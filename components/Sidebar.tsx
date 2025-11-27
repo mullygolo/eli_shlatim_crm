@@ -1,0 +1,69 @@
+
+import React from 'react';
+import { Page } from '../types';
+import { DashboardIcon, OrdersIcon, CustomersIcon, SuppliersIcon, EmployeesIcon, ReportsIcon, SettingsIcon, FinanceIcon, ClockIcon } from './icons';
+import { PAGE_TITLES } from '../App';
+
+interface SidebarProps {
+    currentPage: Page;
+    setCurrentPage: (page: Page) => void;
+}
+
+const Sidebar: React.FC<SidebarProps> = ({ currentPage, setCurrentPage }) => {
+    const navItems: { page: Page; icon: React.ReactNode; label?: string }[] = [
+        { page: 'Dashboard', icon: <DashboardIcon className="h-6 w-6" /> },
+        { page: 'Attendance', icon: <ClockIcon className="h-6 w-6" />, label: 'נוכחות ושכר' },
+        { page: 'Orders', icon: <OrdersIcon className="h-6 w-6" /> },
+        { page: 'Customers', icon: <CustomersIcon className="h-6 w-6" /> },
+        { page: 'Suppliers', icon: <SuppliersIcon className="h-6 w-6" /> },
+        { page: 'Finance', icon: <FinanceIcon className="h-6 w-6" />, label: 'דוחות כספיים' },
+        { page: 'Reports', icon: <ReportsIcon className="h-6 w-6" />, label: 'תשלום לספקים' },
+    ];
+
+    return (
+        <nav className="w-16 md:w-64 bg-dark-bg text-white flex flex-col h-full">
+            <div className="flex items-center justify-center md:justify-start md:px-6 h-20 border-b border-dark-border flex-shrink-0">
+                <div className="text-2xl font-bold text-white">
+                    <span className="md:hidden">המ</span>
+                    <span className="hidden md:inline">המערכת</span>
+                </div>
+            </div>
+            
+            <div className="flex-1 overflow-y-auto mt-6">
+                <ul className="space-y-1">
+                    {navItems.map(({ page, icon, label }) => (
+                        <li key={page} className="px-3">
+                            <button
+                                onClick={() => setCurrentPage(page)}
+                                className={`flex items-center w-full p-3 rounded-lg transition-colors duration-200 ${
+                                    currentPage === page
+                                        ? 'bg-primary text-white'
+                                        : 'text-slate-400 hover:bg-dark-card hover:text-white'
+                                }`}
+                            >
+                                {icon}
+                                <span className="ms-4 hidden md:inline">{label || PAGE_TITLES[page]}</span>
+                            </button>
+                        </li>
+                    ))}
+                </ul>
+            </div>
+
+            <div className="border-t border-dark-border p-3 flex-shrink-0">
+                <button
+                    onClick={() => setCurrentPage('Settings')}
+                    className={`flex items-center w-full p-3 rounded-lg transition-colors duration-200 ${
+                        currentPage === 'Settings'
+                            ? 'bg-primary text-white'
+                            : 'text-slate-400 hover:bg-dark-card hover:text-white'
+                    }`}
+                >
+                    <SettingsIcon className="h-6 w-6" />
+                    <span className="ms-4 hidden md:inline">הגדרות</span>
+                </button>
+            </div>
+        </nav>
+    );
+};
+
+export default Sidebar;

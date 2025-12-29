@@ -11,6 +11,23 @@ export enum PaymentMethod {
     OTHER = 'אחר'
 }
 
+// NEW: Lifecycle statuses for payments
+export type TransactionStatus = 
+    | 'PENDING'           // Received/Issued but not yet processed (On Hand)
+    | 'IN_BANK_CUSTODY'   // Deposited to bank (Gvia/Mishmeret) but not cleared yet
+    | 'CLEARED'           // Money actually moved
+    | 'BOUNCED'           // Returned (A.K.M / Insufficient Funds) - Reopens debt
+    | 'CANCELED'          // Voided manually - Reopens debt
+    | 'RETURNED'          // Physically returned to drawer - Reopens debt
+    | 'ENDORSED';         // Passed to third party (Supplier)
+
+export interface PaymentStatusHistory {
+    date: Date;
+    status: TransactionStatus;
+    changedBy: string;
+    reason?: string;
+}
+
 export interface Contact {
     id: string;
     name: string;
@@ -35,21 +52,12 @@ export interface Customer {
     paymentTerms?: string;
 }
 
-export enum OrderStatus {
-    NEW_LEAD = 'ליד חדש',
-    QUOTE_SENT = 'נשלח הצעת מחיר',
-    IN_GRAPHICS = 'בגרפיקה',
-    IN_PRODUCTION = 'ירד לביצוע',
-    READY_FOR_PICKUP = 'מוכן ממתין לאיסוף',
-    READY_FOR_DELIVERY = 'מוכן ממתין למשלוח',
-    READY_FOR_INSTALLATION = 'מוכן ממתין להתקנה',
-    SHIPPED = 'נשלח',
-    DELIVERED_AT_FACTORY = 'סופק במפעל',
-    INSTALLED = 'הותקן',
-    IN_COLLECTION = 'בגביה',
-    CANCELED_IRRELEVANT = 'בוטל / לא רלוונטי',
-    CANCELED_EXPENSIVE = 'יקר',
-    CANCELED_BOUGHT_ELSEWHERE = 'קנה במקום אחר',
+/* Fix: Added missing Supplier interface export to resolve module errors */
+export interface Supplier {
+    id: string;
+    name: string;
+    paymentTerms: string;
+    contacts: Contact[];
 }
 
 export enum PaymentStatus {
@@ -73,6 +81,26 @@ export interface SupplierPayment {
     reference?: string;
     notes?: string;
     attachment?: Attachment;
+    status?: TransactionStatus; // Added
+    statusHistory?: PaymentStatusHistory[]; // Added
+    repaymentDate?: Date; // Added for outgoing checks
+}
+
+// New Interface for Customer Payments (Collection)
+export interface CustomerPayment {
+    id: string;
+    amount: number;
+    date: Date; // Receipt date
+    method: PaymentMethod;
+    reference?: string; // Check number, last 4 digits, etc.
+    repaymentDate?: Date; // Critical for Checks (Maturity date)
+    notes?: string;
+    attachment?: Attachment; // Legacy support
+    attachments?: Attachment[]; // New: Support multiple files
+    status?: TransactionStatus; // Added
+    statusHistory?: PaymentStatusHistory[]; // Added
+    drawerName?: string; // Name on check
+    bankDetails?: string; // Bank/Branch/Account
 }
 
 export interface LineItem {
@@ -101,6 +129,7 @@ export interface AdditionalService {
     siteContactDetails?: string;
     notes?: string;
     customDueDate?: Date; // Override due date for this service
+    scheduledDate?: Date; // NEW: Date and time for delivery/installation
 }
 
 export interface Attachment {
@@ -114,12 +143,23 @@ export interface Attachment {
 
 export type AttachmentCategory = 'GRAPHICS' | 'SITE_BEFORE' | 'SITE_AFTER' | 'DOCUMENTS' | 'GENERAL';
 
+// Detailed Audit Logic
+export interface FieldChange {
+    field: string;
+    label: string;
+    oldValue?: any;
+    newValue?: any;
+    action: 'ADDED' | 'REMOVED' | 'UPDATED' | 'COMPLETED';
+    subItemLabel?: string; // e.g. "Line Item: Banner"
+}
+
 export interface TimelineEvent {
     id: string;
     timestamp: Date;
     user: string;
     type: 'STATUS_CHANGE' | 'NOTE' | 'TASK' | 'LOG';
     content: string;
+    changes?: FieldChange[]; // Detailed breakdown for LOG events
     isCompleted?: boolean; // For tasks
     completedAt?: Date;
     completedBy?: string;
@@ -157,6 +197,7 @@ export interface Order {
     employeeId: string; // Sales rep
     orderStatus: string; // Now dynamic based on configuration
     paymentStatus: PaymentStatus;
+    payments: CustomerPayment[]; // New field for collection
     paymentTerms: string;
     lineItems: LineItem[];
     invoiceIssued: boolean;
@@ -167,22 +208,34 @@ export interface Order {
     statusHistory?: StatusHistoryEntry[];
     type?: OrderType;
     parentOrderId?: string; // For service calls linked to original orders
-}
-
-export interface Supplier {
-    id: string;
-    name: string;
-    contacts: Contact[];
-    paymentTerms: string;
+    vatRate?: number; // Deal-specific VAT rate snapshot/override
 }
 
 export type EmployeeRole = 'ADMIN' | 'MANAGER' | 'EMPLOYEE';
+export type EmployeeStatus = 'ACTIVE' | 'INACTIVE';
+
+export interface EmploymentPeriod {
+    id: string;
+    startDate: Date;
+    endDate?: Date;
+    exitReason?: string;
+}
+
+export interface SalaryRecord {
+    id: string;
+    amount: number;
+    salaryType: 'HOURLY' | 'GLOBAL';
+    effectiveDate: Date;
+    note?: string;
+}
 
 export interface Employee {
     id: string;
     name: string;
     role: string; // Display role title (e.g. "Sales VP")
     roleType: EmployeeRole; // Permissions level
+    status: EmployeeStatus; // NEW
+    startDate: Date; // NEW: Original join date
     email?: string;
     phone?: string;
     address?: string;
@@ -190,20 +243,33 @@ export interface Employee {
     
     // Salary & Employment
     jobScopePercentage: number; // 100% = 1.0, 50% = 0.5
-    hourlyWage: number;
+    salaryType: 'HOURLY' | 'GLOBAL'; // Current/Default type
+    hourlyWage: number; // Current/Default wage
+    monthlyBaseSalary?: number; // Current/Default monthly
     employerCostPercentage: number; // e.g., 20% for pension/taxes added to cost
     hasSalesBonus: boolean;
     salesBonusPercentage: number; // % of deal value
     bonusBasisEmployeeIds?: string[]; // IDs of employees whose sales count towards this bonus (Team bonus)
+
+    // Salary History (Versioning)
+    salaryHistory?: SalaryRecord[];
+
+    // History
+    employmentHistory: EmploymentPeriod[]; // NEW
+    timeline: TimelineEvent[]; // NEW
 }
 
 export interface OrderStatusConfiguration {
     id: string;
     label: string;
     isActiveDeal: boolean; // Does this status count as an active deal/WIP?
+    isLead: boolean; // Is this considered a "New Lead" for metrics?
+    isQuote: boolean; // Is this considered a "Quote Sent" for metrics?
+    isCompleted: boolean; // Is this considered a successfully completed deal? (Hidden by default in Orders)
+    isLost: boolean; // Is this considered a LOST deal? (For stats)
     color: string; // Tailwind classes
     orderIndex: number; // For sorting
-    isSystem?: boolean; // Cannot be deleted
+    isSystem?: boolean; // Historical flag, now name is unlocked
 }
 
 // Finance Types
@@ -220,6 +286,8 @@ export interface FixedExpense {
     paymentMethod: PaymentMethod;
     paymentDetails?: string;
     includesVat?: boolean;
+    isVatExempt?: boolean;
+    checks?: SupplierPayment[]; // Added to support check series
 }
 
 export interface VariableExpense {
@@ -230,6 +298,23 @@ export interface VariableExpense {
     category: string;
     description?: string;
     includesVat?: boolean;
+    isVatExempt?: boolean;
+    paymentMethod?: PaymentMethod; // Added
+    paymentDetails?: string; // Added
+    checks?: SupplierPayment[]; // Added to support check series
+}
+
+// NEW: Amortization Entry for Loans
+export interface AmortizationEntry {
+    id: string;
+    paymentNumber: number;
+    dueDate: Date;
+    principalAmount: number;
+    interestAmount: number;
+    totalMonthlyPayment: number;
+    remainingPrincipal: number;
+    isPaid: boolean;
+    fees?: number; // Collector fees or other
 }
 
 export interface Loan {
@@ -242,23 +327,58 @@ export interface Loan {
     paymentsMade: number;
     startDate: Date;
     description?: string;
+    amortizationFile?: Attachment;
+    schedule?: AmortizationEntry[]; // NEW
 }
 
 export interface DebtPayment {
     id: string;
     amount: number;
     date: Date;
+    method: PaymentMethod;
+    reference?: string;
+    repaymentDate?: Date;
+    status?: TransactionStatus;
+    statusHistory?: PaymentStatusHistory[];
     note?: string;
 }
 
 export interface Debt {
     id: string;
     name: string;
-    amount: number; // Original amount
+    amount: number; // Entered amount
+    createdAt: Date; // Added
     dueDate: Date;
     description?: string;
     payments?: DebtPayment[];
     isPaid?: boolean;
+    includesVat?: boolean; // NEW
+    isVatExempt?: boolean; // NEW
+}
+
+export interface ReceivablePayment {
+    id: string;
+    amount: number;
+    date: Date;
+    method: PaymentMethod;
+    reference?: string;
+    repaymentDate?: Date;
+    status?: TransactionStatus;
+    statusHistory?: PaymentStatusHistory[];
+    note?: string;
+}
+
+export interface Receivable {
+    id: string;
+    name: string;
+    amount: number;
+    createdAt: Date;
+    dueDate: Date;
+    description?: string;
+    payments?: ReceivablePayment[];
+    isPaid?: boolean;
+    includesVat?: boolean;
+    isVatExempt?: boolean;
 }
 
 export interface EquityInvestment {
@@ -314,7 +434,7 @@ export interface TimeEntry {
     description: string;
 }
 
-export type AttendanceStatus = 'PRESENT' | 'ABSENT' | 'PENDING_APPROVAL' | 'REJECTED';
+export type AttendanceStatus = 'PRESENT' | 'ABSENT' | 'PENDING_APPROVAL' | 'REJECTED' | 'VACATION' | 'SICK' | 'WFH';
 
 export interface AttendanceRecord {
     id: string;
@@ -322,17 +442,26 @@ export interface AttendanceRecord {
     date: Date; // The specific day
     clockIn?: Date;
     clockOut?: Date;
-    breakDurationMinutes: number;
     totalHours: number;
     status: AttendanceStatus;
     note?: string;
+    certificate?: Attachment; // Added: Optional medical certificate
     correctionRequest?: {
         requestedClockIn: Date;
         requestedClockOut: Date;
-        requestedBreak: number;
+        requestedStatus: AttendanceStatus;
         reason: string;
+        certificate?: Attachment; // Added: Optional certificate during request
     }
 }
+
+// NEW: Monthly Payroll Adjustments Override
+export interface PayrollOverride {
+    finalGross?: number;
+    finalEmployerCost?: number;
+}
+
+export type PayrollOverrideMap = Record<string, PayrollOverride>; // Key: empId_year_month
 
 export enum QuoteStatus {
     DRAFT = 'טיוטה',
@@ -348,4 +477,12 @@ export interface Quote {
     date: Date;
     status: QuoteStatus;
     lineItems: LineItem[];
+}
+
+export interface ManualEvent {
+    id: string;
+    title: string;
+    description?: string;
+    date: Date;
+    time?: string;
 }

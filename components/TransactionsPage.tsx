@@ -1,3 +1,4 @@
+
 import React, { useState } from 'react';
 import { Transaction, Customer, Deal, TransactionType, Supplier } from '../types';
 import { PlusIcon, EditIcon, DeleteIcon } from './icons';
@@ -186,7 +187,7 @@ const TransactionsPage: React.FC<TransactionsPageProps> = ({ transactions, setTr
                                     </span>
                                 </td>
                                 <td className={`px-6 py-4 whitespace-nowrap text-sm font-semibold ${transaction.type === TransactionType.INCOME ? 'text-green-600' : 'text-red-600'}`}>
-                                    ${transaction.amount.toLocaleString('he-IL', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                                    ${transaction.amount.toLocaleString('he-IL', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                                 </td>
                                 <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-500">{getLinkName(transaction)}</td>
                                 <td className="px-6 py-4 whitespace-nowrap text-left text-sm font-medium space-x-2 space-x-reverse">

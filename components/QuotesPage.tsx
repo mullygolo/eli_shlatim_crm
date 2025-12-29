@@ -1,5 +1,6 @@
 
 
+
 import React, { useState, useMemo } from 'react';
 // FIX: Removed 'Order' from the import as it's not needed and was causing confusion.
 import { Quote, Customer, QuoteStatus, LineItem, LineItemUnit } from '../types';
@@ -112,11 +113,11 @@ const QuoteForm: React.FC<{
              <div className="grid grid-cols-2 gap-4 bg-slate-50 p-4 rounded-md">
                  <div className="text-center">
                      <h4 className="text-sm text-slate-500">סה"כ הצעה</h4>
-                     <p className="text-lg font-bold text-green-600">{totals.totalAmount.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 0, maximumFractionDigits: 0 })}</p>
+                     <p className="text-lg font-bold text-green-600">{totals.totalAmount.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
                  </div>
                  <div className="text-center">
                      <h4 className="text-sm text-slate-500">רווח צפוי</h4>
-                     <p className="text-lg font-bold text-slate-800">{totals.profit.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 0, maximumFractionDigits: 0 })}</p>
+                     <p className="text-lg font-bold text-slate-800">{totals.profit.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
                  </div>
              </div>
 
@@ -206,7 +207,7 @@ const QuotesPage: React.FC<QuotesPageProps> = ({ quotes, setQuotes, customers, a
                                     <td className="px-4 py-4 whitespace-nowrap text-sm text-slate-500">{quote.quoteNumber}</td>
                                     <td className="px-4 py-4 whitespace-nowrap text-sm font-medium text-slate-900">{getCustomerName(quote.customerId)}</td>
                                     <td className='px-4 py-4 whitespace-nowrap text-sm font-semibold text-green-600'>
-                                        {totalAmount.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                                        {totalAmount.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                                     </td>
                                     <td className="px-4 py-4 whitespace-nowrap text-sm text-slate-500">{quote.date.toLocaleDateString('he-IL')}</td>
                                     <td className="px-4 py-4 whitespace-nowrap text-sm">

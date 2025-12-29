@@ -8,9 +8,15 @@ interface HeaderProps {
     attendanceRecords?: AttendanceRecord[];
 }
 
+interface ActiveEmployeeInfo {
+    name: string;
+    isWFH: boolean;
+    clockInTime: string; // Added field
+}
+
 const Header: React.FC<HeaderProps> = ({ title, employees = [], attendanceRecords = [] }) => {
     
-    const activeEmployees = useMemo(() => {
+    const activeEmployees = useMemo((): ActiveEmployeeInfo[] => {
         const todayStr = new Date().toDateString();
         
         // Get all records for today that have a clock-in but NO clock-out
@@ -20,12 +26,23 @@ const Header: React.FC<HeaderProps> = ({ title, employees = [], attendanceRecord
             !r.clockOut
         );
 
-        // Map to employee objects
+        // Map to info objects
         return activeRecords.map(r => {
             const emp = employees.find(e => e.id === r.employeeId);
-            return emp ? emp.name : 'Unknown';
+            const timeStr = r.clockIn 
+                ? new Date(r.clockIn).toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' })
+                : '--:--';
+
+            return {
+                name: emp ? emp.name : 'Unknown',
+                isWFH: r.status === 'WFH',
+                clockInTime: timeStr
+            };
         });
     }, [attendanceRecords, employees]);
+
+    const wfhCount = activeEmployees.filter(e => e.isWFH).length;
+    const officeCount = activeEmployees.length - wfhCount;
 
     return (
         <header className="h-20 flex items-center justify-between px-8 bg-white border-b border-slate-200">
@@ -46,14 +63,24 @@ const Header: React.FC<HeaderProps> = ({ title, employees = [], attendanceRecord
                     </div>
 
                     {/* Tooltip / Dropdown */}
-                    <div className="absolute top-full left-0 mt-2 w-48 bg-white rounded-lg shadow-xl border border-slate-100 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50 transform translate-y-2 group-hover:translate-y-0">
+                    <div className="absolute top-full left-0 mt-2 w-64 bg-white rounded-lg shadow-xl border border-slate-100 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50 transform translate-y-2 group-hover:translate-y-0">
                         <div className="p-3">
-                            <p className="text-xs font-semibold text-slate-400 mb-2 border-b border-slate-100 pb-1">רשימת עובדים פעילים</p>
-                            <ul className="space-y-1">
-                                {activeEmployees.map((name, idx) => (
-                                    <li key={idx} className="text-sm text-slate-700 flex items-center gap-2">
-                                        <span className="w-1.5 h-1.5 rounded-full bg-green-500"></span>
-                                        {name}
+                            <p className="text-xs font-semibold text-slate-400 mb-2 border-b border-slate-100 pb-1">
+                                מחוברים ({officeCount} במשרד, {wfhCount} מהבית)
+                            </p>
+                            <ul className="space-y-2">
+                                {activeEmployees.map((emp, idx) => (
+                                    <li key={idx} className="text-sm text-slate-700 flex items-center justify-between gap-2 hover:bg-slate-50 p-1 rounded transition-colors">
+                                        <div className="flex flex-col">
+                                            <div className="flex items-center gap-2">
+                                                <span className="w-1.5 h-1.5 rounded-full bg-green-500"></span>
+                                                <span className="font-medium">{emp.name}</span>
+                                                {emp.isWFH && <span className="text-[9px] bg-indigo-50 text-indigo-600 px-1 py-0.5 rounded font-bold">🏠</span>}
+                                            </div>
+                                            <span className="text-[10px] text-slate-400 font-bold ps-3.5 mt-0.5">
+                                                מחובר מ-{emp.clockInTime}
+                                            </span>
+                                        </div>
                                     </li>
                                 ))}
                             </ul>

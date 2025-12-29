@@ -1,9 +1,69 @@
 
-
 import React, { useState, useMemo, useEffect } from 'react';
-import { FixedExpense, VariableExpense, Loan, EquityInvestment, Debt, PaymentMethod, DebtPayment } from '../types';
-import { PlusIcon, DeleteIcon, BankIcon, TrendingUpIcon, EditIcon, LogIcon } from './icons';
+import { FixedExpense, VariableExpense, Loan, EquityInvestment, Debt, Receivable, ReceivablePayment, PaymentMethod, DebtPayment, Order, TransactionStatus, CustomerPayment, SupplierPayment, LineItemUnit, Attachment, PaymentStatusHistory, AmortizationEntry } from '../types';
+import { PlusIcon, EditIcon, DeleteIcon, BankIcon, TrendingUpIcon, LogIcon, CashIcon, ClockIcon, LockIcon, DownloadIcon, ImportIcon } from './icons';
 import Modal from './Modal';
+
+// --- Financial Engine Helpers ---
+
+/**
+ * Calculates the monthly payment (PMT) for a Spitzer (Annuity) loan.
+ * Formula: P * (i * (1 + i)^n) / ((1 + i)^n - 1)
+ */
+const calculatePMT = (principal: number, annualRate: number, months: number): number => {
+    if (principal <= 0 || months <= 0) return 0;
+    // Fix for 0% interest - simple linear division
+    if (!annualRate || annualRate <= 0) return Math.round((principal / months) * 100) / 100;
+    
+    const monthlyRate = annualRate / 100 / 12;
+    const pmt = principal * (monthlyRate * Math.pow(1 + monthlyRate, months)) / (Math.pow(1 + monthlyRate, months) - 1);
+    return Math.round(pmt * 100) / 100;
+};
+
+/**
+ * Generates a full Spitzer amortization schedule.
+ */
+const generateSpitzerSchedule = (
+    principal: number, 
+    annualRate: number, 
+    months: number, 
+    startDate: Date, 
+    paymentsMade: number = 0
+): AmortizationEntry[] => {
+    const schedule: AmortizationEntry[] = [];
+    const monthlyPayment = calculatePMT(principal, annualRate, months);
+    const monthlyRate = (annualRate && annualRate > 0) ? (annualRate / 100 / 12) : 0;
+    
+    let remainingPrincipal = principal;
+    const baseDate = new Date(startDate);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    for (let i = 1; i <= months; i++) {
+        const interestAmount = monthlyRate > 0 ? (remainingPrincipal * monthlyRate) : 0;
+        const principalAmount = monthlyPayment - interestAmount;
+        remainingPrincipal -= principalAmount;
+
+        const dueDate = new Date(baseDate);
+        dueDate.setMonth(baseDate.getMonth() + (i - 1));
+        const dueDateClean = new Date(dueDate);
+        dueDateClean.setHours(0, 0, 0, 0);
+
+        schedule.push({
+            id: `gen_${Date.now()}_${i}`,
+            paymentNumber: i,
+            dueDate: dueDate,
+            principalAmount: Math.round(principalAmount * 100) / 100,
+            interestAmount: Math.round(interestAmount * 100) / 100,
+            totalMonthlyPayment: monthlyPayment,
+            remainingPrincipal: Math.max(0, Math.round(remainingPrincipal * 100) / 100),
+            // Auto-mark as paid if date has passed or manually marked via count
+            isPaid: i <= paymentsMade || dueDateClean <= today
+        });
+    }
+
+    return schedule;
+};
 
 interface FinancePageProps {
     fixedExpenses: FixedExpense[];
@@ -14,46 +74,446 @@ interface FinancePageProps {
     setLoans: React.Dispatch<React.SetStateAction<Loan[]>>;
     debts: Debt[];
     setDebts: React.Dispatch<React.SetStateAction<Debt[]>>;
+    receivables: Receivable[];
+    setReceivables: React.Dispatch<React.SetStateAction<Receivable[]>>;
     equity: EquityInvestment[];
     setEquity: React.Dispatch<React.SetStateAction<EquityInvestment[]>>;
     addActivity: (description: string) => void;
     vatRate: number;
+    orders: Order[];
+    setOrders: React.Dispatch<React.SetStateAction<Order[]>>;
+}
+
+// Internal type for Table Display
+interface VariableDisplayItem {
+    id: string;
+    name: string;
+    category: string;
+    amount: number; 
+    date: Date;
+    paymentMethod: string;
+    isInstallment: boolean;
+    originalId: string;
+    isVatExempt?: boolean;
+    includesVat?: boolean;
+    checksCount?: number;
+    isDebtPayment?: boolean;
 }
 
 // Internal type for Audit Log
 interface AuditLogEntry {
     id: string;
-    timestamp: string; // ISO string
+    timestamp: string;
     action: 'CREATE' | 'UPDATE' | 'DELETE';
     investorName: string;
     description: string;
     amountSnapshot: number;
-    changes?: string[]; // Array of specific changes strings
+    changes?: string[];
     user: string;
 }
 
-const TabButton: React.FC<{ label: string; active: boolean; onClick: () => void }> = ({ label, active, onClick }) => (
+interface CheckSource {
+    orderId: string;
+    orderNumber: string;
+    paymentId: string;
+    sourceIndex?: number;
+    sourceType?: 'lineItem' | 'additionalService' | 'fixedExpense' | 'variableExpense' | 'debt' | 'receivable';
+    fixedExpenseId?: string;
+    variableExpenseId?: string;
+    debtId?: string;
+    receivableId?: string;
+    amount: number;
+}
+
+interface AggregatedCheck {
+    uniqueId: string;
+    type: 'INCOMING' | 'OUTGOING';
+    date: Date;
+    repaymentDate: Date;
+    amount: number;
+    reference: string;
+    entityName: string;
+    status: TransactionStatus;
+    statusHistory: any[];
+    sources: CheckSource[];
+}
+
+const TabButton: React.FC<{ label: string; active: boolean; onClick: () => void; icon?: React.ReactNode }> = ({ label, active, onClick, icon }) => (
     <button
         onClick={onClick}
-        className={`px-6 py-3 font-medium text-sm transition-colors border-b-2 ${
-            active ? 'border-primary text-primary' : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'
+        className={`px-6 py-3 font-bold text-sm transition-colors border-b-4 flex items-center gap-2 ${
+            active ? 'border-primary text-primary' : 'border-transparent text-slate-400 hover:text-slate-600'
         }`}
     >
+        {icon}
         {label}
     </button>
 );
 
+const AmortizationModal: React.FC<{
+    loan: Loan;
+    onClose: () => void;
+    onUpdateSchedule: (loanId: string, schedule: AmortizationEntry[]) => void;
+    isReadOnly?: boolean;
+}> = ({ loan, onClose, onUpdateSchedule, isReadOnly = false }) => {
+    const [schedule, setSchedule] = useState<AmortizationEntry[]>(loan.schedule || []);
+    const [editingEntryId, setEditingEntryId] = useState<string | null>(null);
+    
+    useEffect(() => {
+        setSchedule(loan.schedule || []);
+    }, [loan.schedule]);
+
+    // SMART AUTO-SYNC: Mark past payments as paid automatically
+    useEffect(() => {
+        if (isReadOnly || !loan.schedule || loan.schedule.length === 0) return;
+
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        let hasChanges = false;
+        const updatedSchedule = loan.schedule.map(entry => {
+            const entryDate = new Date(entry.dueDate);
+            entryDate.setHours(0, 0, 0, 0);
+
+            // If the date has passed or is today, and it's not marked paid yet
+            if (entryDate <= today && !entry.isPaid) {
+                hasChanges = true;
+                return { ...entry, isPaid: true };
+            }
+            return entry;
+        });
+
+        if (hasChanges) {
+            setSchedule(updatedSchedule);
+            onUpdateSchedule(loan.id, updatedSchedule);
+        }
+    }, [loan.id, isReadOnly]); 
+
+    const handleTogglePaid = (entryId: string) => {
+        if (isReadOnly) return;
+        const newSchedule = schedule.map(entry => 
+            entry.id === entryId ? { ...entry, isPaid: !entry.isPaid } : entry
+        );
+        setSchedule(newSchedule);
+        onUpdateSchedule(loan.id, newSchedule);
+    };
+
+    const handleUpdateEntryValue = (entryId: string, field: keyof AmortizationEntry, value: number) => {
+        if (isReadOnly) return;
+
+        let currentRunningPrincipal = loan.principalAmount; // Start from the initial loan principal
+
+        const newSchedule = schedule.map(entry => {
+            const updated = { ...entry };
+            
+            // If this is the row being edited, apply the new value and recalculate row total
+            if (entry.id === entryId) {
+                (updated as any)[field] = value;
+                updated.totalMonthlyPayment = (updated.principalAmount || 0) + (updated.interestAmount || 0) + (updated.fees || 0);
+            }
+            
+            // Recalculate remaining principal for the row by subtracting principal repayment
+            currentRunningPrincipal -= updated.principalAmount;
+            updated.remainingPrincipal = Math.max(0, Math.round(currentRunningPrincipal * 100) / 100);
+            
+            return updated;
+        });
+
+        setSchedule(newSchedule);
+        onUpdateSchedule(loan.id, newSchedule);
+    };
+
+    const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = (event) => {
+            let content = event.target?.result as string;
+            content = content.replace(/^\uFEFF/, ''); // Clean BOM
+            
+            const parseCsvLine = (line: string) => {
+                const result = [];
+                let current = '';
+                let inQuotes = false;
+                for (let i = 0; i < line.length; i++) {
+                    const char = line[i];
+                    if (char === '"') {
+                        inQuotes = !inQuotes;
+                    } else if (char === ',' && !inQuotes) {
+                        result.push(current);
+                        current = '';
+                    } else {
+                        current += char;
+                    }
+                }
+                result.push(current);
+                return result.map(c => c.trim().replace(/^"|"$/g, ''));
+            };
+
+            const lines = content.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+            const newSchedule: AmortizationEntry[] = [];
+            
+            let headerRowIndex = -1;
+            let mapping: { [key: string]: number } = {};
+
+            for (let i = 0; i < lines.length; i++) {
+                const cols = parseCsvLine(lines[i]);
+                if (cols.some(c => c.includes('#') || c.includes('תאריך') || c.includes('תשלום'))) {
+                    const tempMapping: any = {};
+                    cols.forEach((col, idx) => {
+                        const c = col.trim();
+                        if (c === '#' || c.includes('מספר תשלום')) tempMapping.num = idx;
+                        else if (c.includes('תאריך')) tempMapping.date = idx;
+                        else if (c.includes('יתרה') || c.includes('יתרת')) tempMapping.remaining = idx;
+                        else if (c.includes('קרן') && !c.includes('יתרה')) tempMapping.principal = idx;
+                        else if (c.includes('ריבית') && !c.includes('אחוז')) tempMapping.interest = idx;
+                        else if (c.includes('שוטף') || c.includes('סה"כ') || c.includes('סך החזר') || c.includes('תשלום חודשי')) tempMapping.total = idx;
+                        else if (c.includes('גבייה') || c.includes('עמלה')) tempMapping.fees = idx;
+                    });
+                    
+                    if (tempMapping.num !== undefined && tempMapping.date !== undefined) {
+                        headerRowIndex = i;
+                        mapping = tempMapping;
+                        break;
+                    }
+                }
+            }
+
+            if (headerRowIndex === -1) {
+                alert("לא הצלחנו לזהות את כותרות העמודות בקובץ. וודא שהקובץ מכיל שורת כותרות עם '#' או 'תאריך תשלום'.");
+                return;
+            }
+
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+
+            for (let i = headerRowIndex + 1; i < lines.length; i++) {
+                const cols = parseCsvLine(lines[i]);
+                const paymentNumStr = mapping.num !== undefined ? cols[mapping.num] : null;
+                if (!paymentNumStr || isNaN(parseInt(paymentNumStr))) continue;
+
+                const parseIsraeliCsvDate = (dateStr: string): Date => {
+                    if (!dateStr || typeof dateStr !== 'string') return new Date();
+                    const parts = dateStr.split('/');
+                    if (parts.length === 3) {
+                        const [day, month, year] = parts.map(p => parseInt(p.trim()));
+                        const fullYear = year < 100 ? 2000 + year : year;
+                        return new Date(fullYear, month - 1, day);
+                    }
+                    return new Date(dateStr);
+                };
+
+                const cleanNumeric = (str: string): number => {
+                    if (!str) return 0;
+                    const cleaned = str.replace(/[^\d.-]/g, '');
+                    return parseFloat(cleaned) || 0;
+                };
+
+                const dueDate = mapping.date !== undefined ? parseIsraeliCsvDate(cols[mapping.date]) : new Date();
+                const dueDateClean = new Date(dueDate);
+                dueDateClean.setHours(0, 0, 0, 0);
+
+                newSchedule.push({
+                    id: `entry_${Date.now()}_${i}`,
+                    paymentNumber: parseInt(paymentNumStr),
+                    dueDate: dueDate,
+                    principalAmount: mapping.principal !== undefined ? cleanNumeric(cols[mapping.principal]) : 0,
+                    interestAmount: mapping.interest !== undefined ? cleanNumeric(cols[mapping.interest]) : 0,
+                    totalMonthlyPayment: mapping.total !== undefined ? cleanNumeric(cols[mapping.total]) : 0,
+                    remainingPrincipal: mapping.remaining !== undefined ? cleanNumeric(cols[mapping.remaining]) : 0,
+                    fees: mapping.fees !== undefined ? cleanNumeric(cols[mapping.fees]) : 0,
+                    isPaid: dueDateClean <= today // Auto-mark as paid if date has passed
+                });
+            }
+
+            if (newSchedule.length > 0) {
+                setSchedule(newSchedule);
+                onUpdateSchedule(loan.id, newSchedule);
+                alert(`נטענו ${newSchedule.length} תשלומים בהצלחה מהקובץ`);
+            } else {
+                alert("לא נמצאו נתוני תשלומים תקינים בקובץ.");
+            }
+        };
+        reader.readAsText(file);
+    };
+
+    const totalPaidSchedule = schedule.filter(s => s.isPaid).reduce((sum, s) => sum + s.totalMonthlyPayment, 0);
+    const totalRemainingSchedule = schedule.filter(s => !s.isPaid).reduce((sum, s) => sum + s.totalMonthlyPayment, 0);
+
+    return (
+        <div className="space-y-6 text-start">
+            <div className="flex justify-between items-center bg-slate-50 p-4 rounded-lg border border-slate-200">
+                <div className="flex gap-8">
+                    <div>
+                        <span className="block text-[10px] uppercase font-black text-slate-400">סה"כ שולם מהלוח</span>
+                        <span className="font-black text-green-600 text-lg">₪{totalPaidSchedule.toLocaleString()}</span>
+                    </div>
+                    <div>
+                        <span className="block text-[10px] uppercase font-black text-slate-400">יתרה לתשלום</span>
+                        <span className="font-black text-red-600 text-lg">₪{totalRemainingSchedule.toLocaleString()}</span>
+                    </div>
+                </div>
+                {!isReadOnly && (
+                    <div className="flex items-center gap-3">
+                        <div className="text-xs text-slate-500 bg-white border px-3 py-1 rounded-full shadow-sm flex items-center gap-2">
+                            <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+                            סנכרון תאריכים אוטומטי פעיל
+                        </div>
+                        <label className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-300 rounded-lg cursor-pointer hover:bg-slate-50 transition-all shadow-sm text-sm font-bold">
+                            <ImportIcon className="w-4 h-4 text-primary" />
+                            ייבוא לוח סילוקין (CSV)
+                            <input type="file" className="hidden" accept=".csv" onChange={handleFileUpload} />
+                        </label>
+                    </div>
+                )}
+            </div>
+
+            <div className="max-h-[500px] overflow-y-auto border rounded-xl shadow-inner bg-white custom-scrollbar">
+                <table className="min-w-full text-sm text-right">
+                    <thead className="bg-slate-100 text-slate-600 font-black sticky top-0 z-10 border-b">
+                        <tr>
+                            <th className="px-4 py-3 w-12 text-center">#</th>
+                            <th className="px-4 py-3">תאריך פירעון</th>
+                            <th className="px-4 py-3">קרן</th>
+                            <th className="px-4 py-3">ריבית</th>
+                            <th className="px-4 py-3">עמלות</th>
+                            <th className="px-4 py-3">סה"כ תשלום</th>
+                            <th className="px-4 py-3">יתרת קרן</th>
+                            <th className="px-4 py-3 text-center">סטטוס</th>
+                        </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                        {schedule.map((entry) => {
+                            const isPast = new Date(entry.dueDate) <= new Date();
+                            const isEditing = editingEntryId === entry.id;
+
+                            return (
+                                <tr key={entry.id} className={`hover:bg-slate-50 transition-colors ${entry.isPaid ? 'bg-green-50/30 opacity-70' : ''}`}>
+                                    <td className="px-4 py-3 text-center font-mono text-slate-400">{entry.paymentNumber}</td>
+                                    <td className="px-4 py-3 font-bold">
+                                        {new Date(entry.dueDate).toLocaleDateString('he-IL')}
+                                        {isPast && !entry.isPaid && <span className="block text-[10px] text-red-500">באיחור</span>}
+                                    </td>
+                                    <td className="px-4 py-3">
+                                        {isEditing && !isReadOnly ? (
+                                            <input 
+                                                type="number" 
+                                                autoFocus
+                                                value={entry.principalAmount} 
+                                                onChange={e => handleUpdateEntryValue(entry.id, 'principalAmount', Number(e.target.value))}
+                                                className="w-20 p-1 border rounded focus:ring-1 focus:ring-primary text-xs"
+                                            />
+                                        ) : (
+                                            <div className="flex items-center gap-2 group cursor-pointer" onClick={() => !isReadOnly && setEditingEntryId(entry.id)}>
+                                                <span>₪{entry.principalAmount.toLocaleString()}</span>
+                                                {!isReadOnly && <EditIcon className="w-3 h-3 text-slate-300 opacity-0 group-hover:opacity-100 transition-opacity" />}
+                                            </div>
+                                        )}
+                                    </td>
+                                    <td className="px-4 py-3 text-slate-500">
+                                        {isEditing && !isReadOnly ? (
+                                            <input 
+                                                type="number" 
+                                                value={entry.interestAmount} 
+                                                onChange={e => handleUpdateEntryValue(entry.id, 'interestAmount', Number(e.target.value))}
+                                                className="w-20 p-1 border rounded focus:ring-1 focus:ring-primary text-xs"
+                                            />
+                                        ) : (
+                                            <div className="flex items-center gap-2 group cursor-pointer" onClick={() => !isReadOnly && setEditingEntryId(entry.id)}>
+                                                <span>₪{entry.interestAmount.toLocaleString()}</span>
+                                                {!isReadOnly && <EditIcon className="w-3 h-3 text-slate-300 opacity-0 group-hover:opacity-100 transition-opacity" />}
+                                            </div>
+                                        )}
+                                    </td>
+                                    <td className="px-4 py-3 text-amber-600">
+                                        {isEditing && !isReadOnly ? (
+                                            <input 
+                                                type="number" 
+                                                value={entry.fees || 0} 
+                                                onChange={e => handleUpdateEntryValue(entry.id, 'fees', Number(e.target.value))}
+                                                className="w-20 p-1 border rounded focus:ring-1 focus:ring-primary text-xs"
+                                            />
+                                        ) : (
+                                            <div className="flex items-center gap-2 group cursor-pointer" onClick={() => !isReadOnly && setEditingEntryId(entry.id)}>
+                                                <span>₪{(entry.fees || 0).toLocaleString()}</span>
+                                                {!isReadOnly && <EditIcon className="w-3 h-3 text-slate-300 opacity-0 group-hover:opacity-100 transition-opacity" />}
+                                            </div>
+                                        )}
+                                    </td>
+                                    <td className="px-4 py-3 font-black text-slate-800">
+                                        {isEditing && !isReadOnly ? (
+                                            <button 
+                                                onClick={() => setEditingEntryId(null)}
+                                                className="bg-primary text-white text-[10px] px-2 py-1 rounded"
+                                            >
+                                                שמור שורה
+                                            </button>
+                                        ) : (
+                                            <span>₪{entry.totalMonthlyPayment.toLocaleString()}</span>
+                                        )}
+                                    </td>
+                                    <td className="px-4 py-3 font-mono text-xs text-slate-400">₪{entry.remainingPrincipal.toLocaleString()}</td>
+                                    <td className="px-4 py-3 text-center">
+                                        <div className="flex flex-col items-center gap-1">
+                                            <button 
+                                                onClick={() => handleTogglePaid(entry.id)}
+                                                className={`px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-tighter shadow-sm transition-all ${entry.isPaid ? 'bg-green-600 text-white' : 'bg-white border border-slate-300 text-slate-400 hover:border-primary hover:text-primary'}`}
+                                                disabled={isReadOnly}
+                                            >
+                                                {entry.isPaid ? 'שולם' : 'סמן כפרעון'}
+                                            </button>
+                                            {entry.isPaid && isPast && !isReadOnly && (
+                                                <span className="text-[8px] text-slate-400 font-bold uppercase">סומן לפי תאריך</span>
+                                            )}
+                                        </div>
+                                    </td>
+                                </tr>
+                            );
+                        })}
+                        {schedule.length === 0 && (
+                            <tr>
+                                <td colSpan={8} className="px-4 py-20 text-center text-slate-400">
+                                    אין נתונים בלוח הסילוקין.
+                                </td>
+                            </tr>
+                        )}
+                    </tbody>
+                </table>
+            </div>
+
+            <div className="flex justify-end pt-4 border-t">
+                <button onClick={onClose} className="px-6 py-2 bg-slate-800 text-white rounded-lg font-bold">סגור לוח סילוקין</button>
+            </div>
+        </div>
+    );
+};
+
 const DebtPaymentModal: React.FC<{ 
     debt: Debt; 
     onSavePayment: (debtId: string, payment: DebtPayment) => void; 
-    onClose: () => void; 
-}> = ({ debt, onSavePayment, onClose }) => {
-    const [amount, setAmount] = useState<number>(0);
-    const [date, setDate] = useState<string>(new Date().toISOString().split('T')[0]);
-    const [note, setNote] = useState<string>('');
+    onClose: () => void;
+    vatRate: number;
+}> = ({ debt, onSavePayment, onClose, vatRate }) => {
+    const debtOriginalAmount = debt.amount || 0;
+    let debtGross = debtOriginalAmount;
+    if (!debt.isVatExempt) {
+        debtGross = debt.includesVat ? debtOriginalAmount : debtOriginalAmount * (1 + vatRate / 100);
+    }
 
-    const paidSoFar = (debt.payments || []).reduce((sum, p) => sum + p.amount, 0);
-    const remaining = debt.amount - paidSoFar;
+    const paidSoFar = (debt.payments || []).reduce((sum, p) => {
+        const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
+        if (p.status && invalidStatuses.includes(p.status)) return sum;
+        return sum + p.amount;
+    }, 0);
+    const remaining = Math.max(0, debtGross - paidSoFar);
+
+    const [amount, setAmount] = useState<number>(Number(remaining.toFixed(2)));
+    const [date, setDate] = useState<string>(new Date().toISOString().split('T')[0]);
+    const [method, setMethod] = useState<PaymentMethod>(PaymentMethod.BANK_TRANSFER);
+    const [reference, setReference] = useState('');
+    const [repaymentDate, setRepaymentDate] = useState<string>('');
+    const [note, setNote] = useState<string>('');
 
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
@@ -61,107 +521,82 @@ const DebtPaymentModal: React.FC<{
             alert("אנא הזן סכום חיובי");
             return;
         }
-        if (amount > remaining + 1) { // small buffer for floating point
-             if (!window.confirm("הסכום גבוה מהיתרה לתשלום. האם להמשיך?")) return;
+        if (method === PaymentMethod.CHECK) {
+            if (!reference) { alert("חובה להזין מספר צ'ק בשדה אסמכתא"); return; }
+            if (!repaymentDate) { alert("חובה להזין תאריך פירעון עבור צ'ק"); return; }
         }
-        
-        const newPayment: DebtPayment = {
-            id: `dp_${Date.now()}`,
-            amount,
-            date: new Date(date),
-            note
+
+        const initialStatus: TransactionStatus = method === PaymentMethod.CHECK ? 'PENDING' : 'CLEARED';
+
+        const newPayment: DebtPayment = { 
+            id: `dp_${Date.now()}`, 
+            amount, 
+            date: new Date(date), 
+            method,
+            reference,
+            repaymentDate: method === PaymentMethod.CHECK ? new Date(repaymentDate) : undefined,
+            status: initialStatus,
+            statusHistory: [{
+                date: new Date(),
+                status: initialStatus,
+                changedBy: 'משתמש',
+                reason: 'תשלום חוב'
+            }],
+            note 
         };
         onSavePayment(debt.id, newPayment);
-        setAmount(0);
-        setNote('');
     };
 
     return (
-        <div className="space-y-6">
+        <div className="space-y-6 text-start">
             <div className="bg-slate-50 p-4 rounded-lg border border-slate-200">
                 <div className="flex justify-between items-center mb-2">
-                    <span className="text-slate-500 font-medium">סכום חוב מקורי:</span>
-                    <span className="font-bold text-lg">₪{debt.amount.toLocaleString()}</span>
-                </div>
-                <div className="flex justify-between items-center mb-2">
-                    <span className="text-green-600 font-medium">שולם עד כה:</span>
-                    <span className="font-bold text-green-600">₪{paidSoFar.toLocaleString()}</span>
+                    <span className="text-slate-500 font-medium">סכום חוב (ברוטו):</span>
+                    <span className="font-bold text-lg">₪{debtGross.toLocaleString()}</span>
                 </div>
                 <div className="flex justify-between items-center border-t border-slate-200 pt-2">
                     <span className="text-red-600 font-bold">יתרה לתשלום:</span>
-                    <span className="font-bold text-red-600 text-xl">₪{remaining.toLocaleString()}</span>
+                    <span className="font-bold text-red-600 text-xl">₪{remaining.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
                 </div>
             </div>
-
             <form onSubmit={handleSubmit} className="p-4 border rounded-lg bg-white shadow-sm space-y-4">
                 <h4 className="font-bold text-slate-800">רישום החזר חדש</h4>
                 <div className="grid grid-cols-2 gap-4">
                     <div>
                         <label className="block text-sm font-medium text-slate-700">סכום החזר</label>
-                        <input 
-                            type="number" 
-                            value={amount} 
-                            onChange={e => setAmount(Number(e.target.value))} 
-                            className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" 
-                            required 
-                        />
+                        <input type="number" step="0.01" value={amount} onChange={e => setAmount(Number(e.target.value))} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" required />
                     </div>
                     <div>
-                        <label className="block text-sm font-medium text-slate-700">תאריך</label>
-                        <input 
-                            type="date" 
-                            value={date} 
-                            onChange={e => setDate(e.target.value)} 
-                            className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" 
-                            required 
-                        />
+                        <label className="block text-sm font-medium text-slate-700">אמצעי תשלום</label>
+                        <select value={method} onChange={e => setMethod(e.target.value as PaymentMethod)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm bg-white p-2 focus:ring-primary focus:border-primary sm:text-sm">
+                            {Object.values(PaymentMethod).map(m => <option key={m} value={m}>{m}</option>)}
+                        </select>
                     </div>
-                    <div className="col-span-2">
-                        <label className="block text-sm font-medium text-slate-700">הערה</label>
-                        <input 
-                            type="text" 
-                            value={note} 
-                            onChange={e => setNote(e.target.value)} 
-                            placeholder="לדוג': העברה בנקאית מס' 123"
-                            className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" 
-                        />
+                    <div>
+                        <label className="block text-sm font-medium text-slate-700">תאריך ביצוע</label>
+                        <input type="date" value={date} onChange={e => setDate(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" required />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-slate-700">אסמכתא / מס' צ'ק</label>
+                        <input type="text" value={reference} onChange={e => setReference(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" placeholder={method === PaymentMethod.CHECK ? 'חובה' : ''} />
                     </div>
                 </div>
-                <div className="flex justify-end">
-                    <button type="submit" className="px-4 py-2 bg-primary text-white rounded hover:bg-indigo-700 text-sm font-bold">
-                        בצע תשלום
-                    </button>
-                </div>
-            </form>
 
-            <div>
-                <h4 className="font-bold text-slate-800 mb-2">היסטוריית תשלומים</h4>
-                {(!debt.payments || debt.payments.length === 0) ? (
-                    <p className="text-slate-500 text-sm bg-slate-50 p-3 rounded">אין תשלומים רשומים לחוב זה.</p>
-                ) : (
-                    <div className="border rounded-lg overflow-hidden">
-                        <table className="min-w-full text-sm text-right divide-y divide-slate-100">
-                            <thead className="bg-slate-50 text-slate-500">
-                                <tr>
-                                    <th className="px-3 py-2">תאריך</th>
-                                    <th className="px-3 py-2">סכום</th>
-                                    <th className="px-3 py-2">הערה</th>
-                                </tr>
-                            </thead>
-                            <tbody className="divide-y divide-slate-100 bg-white">
-                                {[...debt.payments].sort((a,b) => new Date(b.date).getTime() - new Date(a.date).getTime()).map(p => (
-                                    <tr key={p.id}>
-                                        <td className="px-3 py-2">{new Date(p.date).toLocaleDateString('he-IL')}</td>
-                                        <td className="px-3 py-2 font-bold text-green-600">₪{p.amount.toLocaleString()}</td>
-                                        <td className="px-3 py-2 text-slate-500">{p.note || '-'}</td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
+                {method === PaymentMethod.CHECK && (
+                    <div className="bg-yellow-50 p-3 rounded border border-yellow-200">
+                        <label className="block text-sm font-bold text-yellow-800">תאריך פירעון הצ'ק</label>
+                        <input type="date" value={repaymentDate} onChange={e => setRepaymentDate(e.target.value)} className="mt-1 block w-full rounded-md border-yellow-300 shadow-sm focus:ring-yellow-500 p-2 sm:text-sm" required />
                     </div>
                 )}
-            </div>
-            
+
+                <div>
+                    <label className="block text-sm font-medium text-slate-700">הערה</label>
+                    <input type="text" value={note} onChange={e => setNote(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" />
+                </div>
+                <div className="flex justify-end pt-2">
+                    <button type="submit" className="px-4 py-2 bg-primary text-white rounded hover:bg-indigo-700 text-sm font-bold shadow-sm">בצע תשלום</button>
+                </div>
+            </form>
             <div className="flex justify-end pt-4 border-t border-slate-100">
                 <button type="button" onClick={onClose} className="px-4 py-2 bg-slate-200 text-slate-800 rounded hover:bg-slate-300">סגור</button>
             </div>
@@ -169,1064 +604,2336 @@ const DebtPaymentModal: React.FC<{
     );
 };
 
+const ReceivableCollectionModal: React.FC<{ 
+    receivable: Receivable; 
+    onSavePayment: (receivableId: string, payment: ReceivablePayment) => void; 
+    onClose: () => void;
+    vatRate: number;
+}> = ({ receivable, onSavePayment, onClose, vatRate }) => {
+    const originalAmount = receivable.amount || 0;
+    let gross = originalAmount;
+    if (!receivable.isVatExempt) {
+        gross = receivable.includesVat ? originalAmount : originalAmount * (1 + vatRate / 100);
+    }
+
+    const collectedSoFar = (receivable.payments || []).reduce((sum, p) => {
+        const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
+        if (p.status && invalidStatuses.includes(p.status)) return sum;
+        return sum + p.amount;
+    }, 0);
+    const remaining = Math.max(0, gross - collectedSoFar);
+
+    const [amount, setAmount] = useState<number>(Number(remaining.toFixed(2)));
+    const [date, setDate] = useState<string>(new Date().toISOString().split('T')[0]);
+    const [method, setMethod] = useState<PaymentMethod>(PaymentMethod.BANK_TRANSFER);
+    const [reference, setReference] = useState('');
+    const [repaymentDate, setRepaymentDate] = useState<string>('');
+    const [note, setNote] = useState<string>('');
+
+    const handleSubmit = (e: React.FormEvent) => {
+        e.preventDefault();
+        if (amount <= 0) {
+            alert("אנא הזן סכום חיובי");
+            return;
+        }
+        if (method === PaymentMethod.CHECK) {
+            if (!reference) { alert("חובה להזין מספר צ'ק בשדה אסמכתא"); return; }
+            if (!repaymentDate) { alert("חובה להזין תאריך פירעון עבור צ'ק"); return; }
+        }
+
+        const initialStatus: TransactionStatus = method === PaymentMethod.CHECK ? 'PENDING' : 'CLEARED';
+
+        const newPayment: ReceivablePayment = { 
+            id: `rp_${Date.now()}`, 
+            amount, 
+            date: new Date(date), 
+            method,
+            reference,
+            repaymentDate: method === PaymentMethod.CHECK ? new Date(repaymentDate) : undefined,
+            status: initialStatus,
+            statusHistory: [{
+                date: new Date(),
+                status: initialStatus,
+                changedBy: 'משתמש',
+                reason: 'גביית חוב לקוח'
+            }],
+            note 
+        };
+        onSavePayment(receivable.id, newPayment);
+    };
+
+    return (
+        <div className="space-y-6 text-start">
+            <div className="bg-slate-50 p-4 rounded-lg border border-slate-200">
+                <div className="flex justify-between items-center mb-2">
+                    <span className="text-slate-500 font-medium">סכום החייב (ברוטו):</span>
+                    <span className="font-bold text-lg">₪{gross.toLocaleString()}</span>
+                </div>
+                <div className="flex justify-between items-center border-t border-slate-200 pt-2">
+                    <span className="text-green-600 font-bold">יתרה לגבייה:</span>
+                    <span className="font-bold text-green-600 text-xl">₪{remaining.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+                </div>
+            </div>
+            <form onSubmit={handleSubmit} className="p-4 border rounded-lg bg-white shadow-sm space-y-4">
+                <h4 className="font-bold text-slate-800">רישום גבייה חדשה</h4>
+                <div className="grid grid-cols-2 gap-4">
+                    <div>
+                        <label className="block text-sm font-medium text-slate-700">סכום שהתקבל</label>
+                        <input type="number" step="0.01" value={amount} onChange={e => setAmount(Number(e.target.value))} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" required />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-slate-700">אמצעי תשלום</label>
+                        <select value={method} onChange={e => setMethod(e.target.value as PaymentMethod)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm bg-white p-2 focus:ring-primary focus:border-primary sm:text-sm">
+                            {Object.values(PaymentMethod).map(m => <option key={m} value={m}>{m}</option>)}
+                        </select>
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-slate-700">תאריך קבלה</label>
+                        <input type="date" value={date} onChange={e => setDate(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" required />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-slate-700">אסמכתא / מס' צ'ק</label>
+                        <input type="text" value={reference} onChange={e => setReference(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" placeholder={method === PaymentMethod.CHECK ? 'חובה' : ''} />
+                    </div>
+                </div>
+
+                {method === PaymentMethod.CHECK && (
+                    <div className="bg-yellow-50 p-3 rounded border border-yellow-200">
+                        <label className="block text-sm font-bold text-yellow-800">תאריך פירעון הצ'ק</label>
+                        <input type="date" value={repaymentDate} onChange={e => setRepaymentDate(e.target.value)} className="mt-1 block w-full rounded-md border-yellow-300 shadow-sm focus:ring-yellow-500 p-2 sm:text-sm" required />
+                    </div>
+                )}
+
+                <div>
+                    <label className="block text-sm font-medium text-slate-700">הערה</label>
+                    <input type="text" value={note} onChange={e => setNote(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" />
+                </div>
+                <div className="flex justify-end pt-2">
+                    <button type="submit" className="px-4 py-2 bg-primary text-white rounded hover:bg-indigo-700 text-sm font-bold shadow-sm">קלוט תשלום</button>
+                </div>
+            </form>
+            <div className="flex justify-end pt-4 border-t border-slate-100">
+                <button type="button" onClick={onClose} className="px-4 py-2 bg-slate-200 text-slate-800 rounded hover:bg-slate-300">סגור</button>
+            </div>
+        </div>
+    );
+};
+
+const CheckActionModal: React.FC<{
+    check: AggregatedCheck;
+    onUpdateStatus: (check: AggregatedCheck, newStatus: TransactionStatus, metadata?: any) => void;
+    onClose: () => void;
+    viewOnlyHistory?: boolean;
+}> = ({ check, onUpdateStatus, onClose, viewOnlyHistory = false }) => {
+    const [selectedStatus, setSelectedStatus] = useState<TransactionStatus>(check.status);
+    const [note, setNote] = useState('');
+    const [bounceFee, setBounceFee] = useState<number>(0);
+    const [addFee, setAddFee] = useState(false);
+    const isIncoming = check.type === 'INCOMING';
+
+    const statusOptions: { value: TransactionStatus; label: string; color: string }[] = [
+        { value: 'PENDING', label: isIncoming ? 'ביד (ממתין להפקדה)' : 'נמסר (טרם נפרע)', color: 'bg-yellow-100 text-yellow-800' },
+        ...(isIncoming ? [{ value: 'IN_BANK_CUSTODY' as TransactionStatus, label: 'הופקד בבנק (משמורת)', color: 'bg-blue-100 text-blue-800' }] : []),
+        { value: 'CLEARED', label: 'נפרע (כסף עבר)', color: 'bg-green-100 text-green-800' },
+        { value: 'BOUNCED', label: 'חזר (א.כ.מ / מוגבל)', color: 'bg-red-100 text-red-800' },
+        { value: 'CANCELED', label: 'בוטל', color: 'bg-gray-200 text-gray-800' },
+        { value: 'RETURNED', label: 'הוחזר פיזית ללקוח/ספק', color: 'bg-orange-100 text-orange-800' },
+    ];
+
+    const getStatusLabel = (s: string) => statusOptions.find(opt => opt.value === s)?.label || s;
+    const handleSubmit = () => { onUpdateStatus(check, selectedStatus, { note, bounceFee: addFee ? bounceFee : 0 }); onClose(); };
+
+    return (
+        <Modal title={`פרטי צ'ק - ${check.reference}`} onClose={onClose} size="lg">
+            <div className="space-y-6 text-start">
+                <div className="bg-slate-50 p-4 rounded border border-slate-200 flex justify-between">
+                    <div>
+                        <p className="text-sm text-slate-500">שם: <strong>{check.entityName}</strong></p>
+                        <p className="text-sm text-slate-500">תאריך פירעון: <strong>{new Date(check.repaymentDate).toLocaleDateString('he-IL')}</strong></p>
+                        {check.sources.length > 1 && (
+                            <p className="text-xs text-slate-400 mt-1">צ'ק מרוכז המכסה {check.sources.length} פריטים/הזמנות</p>
+                        )}
+                    </div>
+                    <div className="text-left">
+                        <p className="text-xl font-bold text-slate-800">₪{check.amount.toLocaleString()}</p>
+                        <span className={`text-xs px-2 py-1 rounded ${statusOptions.find(s => s.value === check.status)?.color}`}>
+                            {getStatusLabel(check.status)}
+                        </span>
+                    </div>
+                </div>
+                {!viewOnlyHistory && (
+                    <div className="border-b border-slate-200 pb-6 mb-6">
+                        <h4 className="font-bold text-slate-800 mb-3">עדכון סטטוס</h4>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
+                            {statusOptions.map(opt => (
+                                <div key={opt.value} onClick={() => setSelectedStatus(opt.value)} className={`p-3 rounded border cursor-pointer flex items-center justify-between transition-all ${selectedStatus === opt.value ? 'ring-2 ring-primary border-primary bg-indigo-50' : 'border-slate-200 hover:bg-slate-50'}`}>
+                                    <span className={`text-sm font-medium ${selectedStatus === opt.value ? 'text-primary' : 'text-slate-600'}`}>{opt.label}</span>
+                                    {selectedStatus === opt.value && <div className="w-3 h-3 bg-primary rounded-full"></div>}
+                                </div>
+                            ))}
+                        </div>
+                        {selectedStatus === 'BOUNCED' && isIncoming && (
+                            <div className="bg-red-50 p-4 rounded border border-red-200 mb-4 animate-fadeIn">
+                                <div className="flex items-center gap-2 mb-2">
+                                    <input type="checkbox" id="addFee" checked={addFee} onChange={e => setAddFee(e.target.checked)} className="h-4 w-4 text-red-600 border-gray-300 rounded focus:ring-red-500" />
+                                    <label htmlFor="addFee" className="text-sm font-bold text-red-800">האם לחייב את הלקוח בעמלת החזרת צ'ק?</label>
+                                </div>
+                                {addFee && (
+                                    <div>
+                                        <label className="block text-xs text-red-700 mb-1">סכום העמלה (₪)</label>
+                                        <input type="number" value={bounceFee} onChange={e => setBounceFee(Number(e.target.value))} className="w-32 text-sm border-red-300 rounded focus:border-red-500" />
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                        <div>
+                            <label className="block text-sm font-medium text-slate-700 mb-1">הערות לשינוי</label>
+                            <textarea value={note} onChange={e => setNote(e.target.value)} rows={2} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2" />
+                        </div>
+                        <div className="flex justify-end pt-4 gap-2">
+                            <button onClick={onClose} className="px-4 py-2 bg-slate-100 text-slate-700 rounded hover:bg-slate-200">ביטול</button>
+                            <button onClick={handleSubmit} className="px-4 py-2 bg-primary text-white rounded hover:bg-indigo-700 font-bold">עדכן סטטוס</button>
+                        </div>
+                    </div>
+                )}
+                <div>
+                    <h4 className="font-bold text-slate-800 mb-3 flex items-center">
+                        <ClockIcon className="w-4 h-4 me-2 text-slate-500"/> היסטוריית גלגול הצ'ק
+                    </h4>
+                    <div className="space-y-4 max-h-60 overflow-y-auto px-1 custom-scrollbar">
+                        {check.statusHistory && check.statusHistory.length > 0 ? (
+                            [...check.statusHistory].sort((a,b) => new Date(b.date).getTime() - new Date(a.date).getTime()).map((entry, idx) => (
+                                <div key={idx} className="flex gap-3 relative">
+                                    {idx !== check.statusHistory.length - 1 && <div className="absolute top-8 right-[15px] bottom-[-20px] w-0.5 bg-slate-200"></div>}
+                                    <div className="w-8 h-8 rounded-full bg-slate-100 border border-slate-200 flex items-center justify-center shrink-0 l-10 text-xs font-bold text-slate-500">{check.statusHistory.length - idx}</div>
+                                    <div className="flex-1 bg-white p-3 rounded border border-slate-100 shadow-sm">
+                                        <div className="flex justify-between items-start">
+                                            <span className="text-sm font-bold text-slate-800">{getStatusLabel(entry.status)}</span>
+                                            <span className="text-xs text-slate-400">{new Date(entry.date).toLocaleString('he-IL')}</span>
+                                        </div>
+                                        {entry.reason && <div className="mt-2 text-sm text-slate-600 bg-slate-50 p-2 rounded">{entry.reason}</div>}
+                                    </div>
+                                </div>
+                            ))
+                        ) : <div className="text-center py-4 text-slate-400 text-sm bg-slate-50 rounded">אין היסטוריית שינויים.</div>}
+                    </div>
+                </div>
+            </div>
+        </Modal>
+    );
+};
+
+const CheckCenter: React.FC<{
+    orders: Order[];
+    setOrders: React.Dispatch<React.SetStateAction<Order[]>>;
+    fixedExpenses: FixedExpense[];
+    setFixedExpenses: React.Dispatch<React.SetStateAction<FixedExpense[]>>;
+    variableExpenses: VariableExpense[];
+    setVariableExpenses: React.Dispatch<React.SetStateAction<VariableExpense[]>>;
+    debts: Debt[];
+    setDebts: React.Dispatch<React.SetStateAction<Debt[]>>;
+    receivables: Receivable[];
+    setReceivables: React.Dispatch<React.SetStateAction<Receivable[]>>;
+    addActivity: (description: string) => void;
+}> = ({ orders, setOrders, fixedExpenses, setFixedExpenses, variableExpenses, setVariableExpenses, debts, setDebts, receivables, setReceivables, addActivity }) => {
+    const [tab, setTab] = useState<'INCOMING' | 'OUTGOING'>('INCOMING');
+    // SMART FILTER: Active (Actionable), Urgent (Overdue/Bounced), Archive (History), All
+    const [smartFilter, setSmartFilter] = useState<'ACTIVE' | 'URGENT' | 'ARCHIVE' | 'ALL'>('ACTIVE');
+    const [searchQuery, setSearchQuery] = useState('');
+    const [selectedCheck, setSelectedCheck] = useState<{check: AggregatedCheck, viewOnly: boolean} | null>(null);
+
+    const allChecks = useMemo<AggregatedCheck[]>(() => {
+        const rawItems: AggregatedCheck[] = [];
+        
+        orders.forEach(order => {
+            order.payments.forEach(p => {
+                if (p.method === PaymentMethod.CHECK) {
+                    rawItems.push({
+                        uniqueId: p.id,
+                        type: 'INCOMING',
+                        date: new Date(p.date),
+                        repaymentDate: p.repaymentDate ? new Date(p.repaymentDate) : new Date(p.date),
+                        amount: p.amount,
+                        reference: p.reference || 'ללא מס',
+                        entityName: `לקוח (הזמנה ${order.orderNumber})`,
+                        status: p.status || 'PENDING',
+                        statusHistory: p.statusHistory || [],
+                        sources: [{
+                            orderId: order.id,
+                            orderNumber: order.orderNumber,
+                            paymentId: p.id,
+                            amount: p.amount
+                        }]
+                    });
+                }
+            });
+
+            const processOutgoing = (items: any[], type: 'lineItem' | 'additionalService') => {
+                items.forEach((item, idx) => {
+                    item.supplierPayments?.forEach((p: SupplierPayment) => {
+                        if (p.method === PaymentMethod.CHECK) {
+                            rawItems.push({
+                                uniqueId: p.id,
+                                type: 'OUTGOING',
+                                date: new Date(p.date),
+                                repaymentDate: p.repaymentDate ? new Date(p.repaymentDate) : new Date(p.date),
+                                amount: p.amount,
+                                reference: p.reference || 'ללא מס',
+                                entityName: `ספק (הזמנה ${order.orderNumber})`,
+                                status: p.status || 'PENDING',
+                                statusHistory: p.statusHistory || [],
+                                sources: [{
+                                    orderId: order.id,
+                                    orderNumber: order.orderNumber,
+                                    paymentId: p.id,
+                                    sourceIndex: idx,
+                                    sourceType: type,
+                                    amount: p.amount
+                                }]
+                            });
+                        }
+                    });
+                });
+            };
+            processOutgoing(order.lineItems, 'lineItem');
+            processOutgoing(order.additionalServices, 'additionalService');
+        });
+
+        receivables.forEach(receivable => {
+            receivable.payments?.forEach(p => {
+                if (p.method === PaymentMethod.CHECK) {
+                    rawItems.push({
+                        uniqueId: p.id,
+                        type: 'INCOMING',
+                        date: new Date(p.date),
+                        repaymentDate: p.repaymentDate ? new Date(p.repaymentDate) : new Date(p.date),
+                        amount: p.amount,
+                        reference: p.reference || 'ללא מס',
+                        entityName: `חייב: ${receivable.name}`,
+                        status: p.status || 'PENDING',
+                        statusHistory: p.statusHistory || [],
+                        sources: [{
+                            orderId: 'REC',
+                            orderNumber: 'RECEIVABLE',
+                            paymentId: p.id,
+                            sourceType: 'receivable',
+                            receivableId: receivable.id,
+                            amount: p.amount
+                        }]
+                    });
+                }
+            });
+        });
+
+        fixedExpenses.forEach(fe => {
+            fe.checks?.forEach(p => {
+                rawItems.push({
+                    uniqueId: p.id,
+                    type: 'OUTGOING',
+                    date: new Date(p.date),
+                    repaymentDate: p.repaymentDate ? new Date(p.repaymentDate) : new Date(p.date),
+                    amount: p.amount,
+                    reference: p.reference || 'ללא מס',
+                    entityName: `הוצאה קבועה: ${fe.name}`,
+                    status: p.status || 'PENDING',
+                    statusHistory: p.statusHistory || [],
+                    sources: [{
+                        orderId: 'FIXED',
+                        orderNumber: 'FIXED',
+                        paymentId: p.id,
+                        sourceType: 'fixedExpense',
+                        fixedExpenseId: fe.id,
+                        amount: p.amount
+                    }]
+                });
+            });
+        });
+
+        variableExpenses.forEach(ve => {
+            ve.checks?.forEach(p => {
+                rawItems.push({
+                    uniqueId: p.id,
+                    type: 'OUTGOING',
+                    date: new Date(p.date),
+                    repaymentDate: p.repaymentDate ? new Date(p.repaymentDate) : new Date(p.date),
+                    amount: p.amount,
+                    reference: p.reference || 'ללא מס',
+                    entityName: `הוצאה משתנה: ${ve.name}`,
+                    status: p.status || 'PENDING',
+                    statusHistory: p.statusHistory || [],
+                    sources: [{
+                        orderId: 'VAR',
+                        orderNumber: 'VAR',
+                        paymentId: p.id,
+                        sourceType: 'variableExpense',
+                        variableExpenseId: ve.id,
+                        amount: p.amount
+                    }]
+                });
+            });
+        });
+
+        debts.forEach(debt => {
+            debt.payments?.forEach(p => {
+                if (p.method === PaymentMethod.CHECK) {
+                    rawItems.push({
+                        uniqueId: p.id,
+                        type: 'OUTGOING',
+                        date: new Date(p.date),
+                        repaymentDate: p.repaymentDate ? new Date(p.repaymentDate) : new Date(p.date),
+                        amount: p.amount,
+                        reference: p.reference || 'ללא מס',
+                        entityName: `חוב: ${debt.name}`,
+                        status: p.status || 'PENDING',
+                        statusHistory: p.statusHistory || [],
+                        sources: [{
+                            orderId: 'DEBT',
+                            orderNumber: 'DEBT',
+                            paymentId: p.id,
+                            sourceType: 'debt',
+                            debtId: debt.id,
+                            amount: p.amount
+                        }]
+                    });
+                }
+            });
+        });
+
+        const incoming = rawItems.filter(i => i.type === 'INCOMING');
+        const outgoing = rawItems.filter(i => i.type === 'OUTGOING');
+        
+        const groupedMap = new Map<string, AggregatedCheck>();
+        
+        outgoing.forEach(item => {
+            const key = `${item.reference}_${item.repaymentDate.getTime()}`;
+            
+            if (groupedMap.has(key)) {
+                const existing = groupedMap.get(key)!;
+                existing.amount += item.amount;
+                existing.sources = [...existing.sources, ...item.sources];
+                
+                if (!existing.entityName.includes(item.entityName)) {
+                    if (existing.sources.length <= 3) {
+                         existing.entityName += `, ${item.entityName}`;
+                    } else if (!existing.entityName.includes('מרוכז')) {
+                         existing.entityName = `תשלום מרוכז (צ'ק ${item.reference})`;
+                    }
+                }
+            } else {
+                groupedMap.set(key, { ...item });
+            }
+        });
+
+        return [...incoming, ...Array.from(groupedMap.values())];
+    }, [orders, fixedExpenses, variableExpenses, debts, receivables]);
+
+    const filteredChecks = useMemo(() => {
+        const today = new Date();
+        today.setHours(0,0,0,0);
+
+        return allChecks
+            .filter(c => c.type === tab)
+            .filter(c => {
+                // If search query is present, it acts as a global search (ignores lifecycle filters)
+                if (searchQuery.trim()) {
+                    const q = searchQuery.toLowerCase();
+                    return c.reference.toLowerCase().includes(q) || c.entityName.toLowerCase().includes(q);
+                }
+
+                const isActive = ['PENDING', 'BOUNCED', 'IN_BANK_CUSTODY'].includes(c.status);
+                const isOverdue = isActive && c.repaymentDate < today;
+                const isBounced = c.status === 'BOUNCED';
+                const isArchived = ['CLEARED', 'CANCELED', 'RETURNED'].includes(c.status);
+
+                if (smartFilter === 'ACTIVE') return isActive;
+                if (smartFilter === 'URGENT') return isBounced || isOverdue;
+                if (smartFilter === 'ARCHIVE') return isArchived;
+                return true; // ALL
+            })
+            .sort((a, b) => {
+                // PRIORITY SORTING:
+                // 1. Special Case: ARCHIVE View - Newest Cleared/Canceled First (Descending)
+                if (smartFilter === 'ARCHIVE') {
+                    return b.repaymentDate.getTime() - a.repaymentDate.getTime();
+                }
+
+                // 2. ACTIVE/URGENT/ALL/SEARCH Views - Action Priority
+                const isBouncedA = a.status === 'BOUNCED';
+                const isBouncedB = b.status === 'BOUNCED';
+                if (isBouncedA && !isBouncedB) return -1;
+                if (!isBouncedA && isBouncedB) return 1;
+
+                const isOverdueA = ['PENDING', 'IN_BANK_CUSTODY'].includes(a.status) && a.repaymentDate < today;
+                const isOverdueB = ['PENDING', 'IN_BANK_CUSTODY'].includes(b.status) && b.repaymentDate < today;
+                if (isOverdueA && !isOverdueB) return -1;
+                if (!isOverdueA && isOverdueB) return 1;
+
+                // For future/normal ones, sort by date (Ascending - nearest first)
+                return a.repaymentDate.getTime() - b.repaymentDate.getTime();
+            });
+    }, [allChecks, tab, smartFilter, searchQuery]);
+
+    const stats = useMemo(() => {
+        const relevant = allChecks.filter(c => c.type === tab);
+        const today = new Date();
+        today.setHours(0,0,0,0);
+
+        const pending = relevant.filter(c => ['PENDING', 'IN_BANK_CUSTODY'].includes(c.status)).reduce((s, c) => s + c.amount, 0);
+        const bounced = relevant.filter(c => c.status === 'BOUNCED').reduce((s, c) => s + c.amount, 0);
+        const overdue = relevant.filter(c => ['PENDING', 'IN_BANK_CUSTODY'].includes(c.status) && c.repaymentDate < today).reduce((s, c) => s + c.amount, 0);
+        const filteredTotal = filteredChecks.reduce((s, c) => s + c.amount, 0);
+        
+        return { pending, bounced, overdue, filteredTotal };
+    }, [allChecks, tab, filteredChecks]);
+
+    const handleUpdateCheckStatus = (check: AggregatedCheck, newStatus: TransactionStatus, metadata?: any) => {
+        if (check.status === newStatus) return;
+
+        let updatedOrders = [...orders];
+        let updatedFixed = [...fixedExpenses];
+        let updatedVariable = [...variableExpenses];
+        let updatedDebts = [...debts];
+        let updatedReceivables = [...receivables];
+
+        check.sources.forEach(source => {
+            if (source.sourceType === 'debt') {
+                updatedDebts = updatedDebts.map(debt => {
+                    if (debt.id !== source.debtId) return debt;
+                    const updatedPayments = (debt.payments || []).map(p => {
+                        if (p.id !== source.paymentId) return p;
+                        return { 
+                            ...p, 
+                            status: newStatus, 
+                            statusHistory: [...(p.statusHistory || []), { date: new Date(), status: newStatus, changedBy: 'משתמש', reason: metadata?.note }] 
+                        };
+                    });
+                    return { ...debt, payments: updatedPayments };
+                });
+            } else if (source.sourceType === 'receivable') {
+                updatedReceivables = updatedReceivables.map(rec => {
+                    if (rec.id !== source.receivableId) return rec;
+                    const updatedPayments = (rec.payments || []).map(p => {
+                        if (p.id !== source.paymentId) return p;
+                        return { 
+                            ...p, 
+                            status: newStatus, 
+                            statusHistory: [...(p.statusHistory || []), { date: new Date(), status: newStatus, changedBy: 'משתמש', reason: metadata?.note }] 
+                        };
+                    });
+                    return { ...rec, payments: updatedPayments };
+                });
+            } else if (source.sourceType === 'fixedExpense') {
+                updatedFixed = updatedFixed.map(fe => {
+                    if (fe.id !== source.fixedExpenseId) return fe;
+                    const updatedChecks = (fe.checks || []).map(p => {
+                        if (p.id !== source.paymentId) return p;
+                        return { ...p, status: newStatus, statusHistory: [...(p.statusHistory || []), { date: new Date(), status: newStatus, changedBy: 'משתמש', reason: metadata?.note }] };
+                    });
+                    return { ...fe, checks: updatedChecks };
+                });
+            } else if (source.sourceType === 'variableExpense') {
+                updatedVariable = updatedVariable.map(ve => {
+                    if (ve.id !== source.variableExpenseId) return ve;
+                    const updatedChecks = (ve.checks || []).map(p => {
+                        if (p.id !== source.paymentId) return p;
+                        return { ...p, status: newStatus, statusHistory: [...(p.statusHistory || []), { date: new Date(), status: newStatus, changedBy: 'משתמש', reason: metadata?.note }] };
+                    });
+                    return { ...ve, checks: updatedChecks };
+                });
+            } else {
+                const orderIndex = updatedOrders.findIndex(o => o.id === source.orderId);
+                if (orderIndex === -1) return;
+                const order = { ...updatedOrders[orderIndex] };
+                
+                const updatePaymentObj = (payment: any) => {
+                    if (payment.id !== source.paymentId) return payment;
+                    return { ...payment, status: newStatus, statusHistory: [...(payment.statusHistory || []), { date: new Date(), status: newStatus, changedBy: 'משתמש', reason: metadata?.note }] };
+                };
+
+                if (check.type === 'INCOMING') {
+                    order.payments = order.payments.map(updatePaymentObj);
+                    if (newStatus === 'BOUNCED' && metadata?.bounceFee > 0) {
+                        order.lineItems = [...order.lineItems, { id: `li_fee_${Date.now()}`, description: `עמלת החזרת צ'ק (מס' ${check.reference})`, quantity: 1, unitPrice: metadata.bounceFee, cost: 0, unitType: LineItemUnit.UNIT }];
+                    }
+                } else {
+                    if (source.sourceType === 'lineItem') {
+                        const items = [...order.lineItems];
+                        items[source.sourceIndex!].supplierPayments = items[source.sourceIndex!].supplierPayments?.map(updatePaymentObj);
+                        order.lineItems = items;
+                    } else {
+                        const items = [...order.additionalServices];
+                        items[source.sourceIndex!].supplierPayments = items[source.sourceIndex!].supplierPayments?.map(updatePaymentObj);
+                        order.additionalServices = items;
+                    }
+                }
+                updatedOrders[orderIndex] = order;
+            }
+        });
+
+        setOrders(updatedOrders);
+        setFixedExpenses(updatedFixed);
+        setVariableExpenses(updatedVariable);
+        setDebts(updatedDebts);
+        setReceivables(updatedReceivables);
+        
+        addActivity(`סטטוס צ'ק ${check.reference} (${check.type === 'INCOMING' ? 'נכנס' : 'יוצא'}) עודכן ל-${newStatus}`);
+    };
+
+    const getStatusBadge = (status: TransactionStatus) => {
+        switch (status) {
+            case 'PENDING': return <span className="bg-yellow-100 text-yellow-800 px-2 py-1 rounded text-xs font-bold shadow-sm border border-yellow-200">ביד</span>;
+            case 'CLEARED': return <span className="bg-green-100 text-green-800 px-2 py-1 rounded text-xs font-bold shadow-sm border border-green-200">נפרע</span>;
+            case 'BOUNCED': return <span className="bg-red-100 text-red-800 px-2 py-1 rounded text-xs font-bold animate-pulse shadow-sm border border-red-200">חזר</span>;
+            case 'IN_BANK_CUSTODY': return <span className="bg-blue-100 text-blue-800 px-2 py-1 rounded text-xs font-bold shadow-sm border border-blue-200">במשמורת</span>;
+            case 'RETURNED': return <span className="bg-orange-100 text-orange-800 px-2 py-1 rounded text-xs font-bold shadow-sm border border-orange-200">הוחזר</span>;
+            case 'CANCELED': return <span className="bg-gray-100 text-gray-800 px-2 py-1 rounded text-xs font-bold shadow-sm border border-gray-200">בוטל</span>;
+            default: return <span className="bg-slate-100 text-slate-800 px-2 py-1 rounded text-xs">{status}</span>;
+        }
+    };
+
+    return (
+        <div className="space-y-6">
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <div className="bg-white p-4 rounded-lg border border-slate-200 shadow-sm">
+                    <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">סה"כ פתוח ({tab === 'INCOMING' ? 'נכנס' : 'יוצא'})</p>
+                    <p className="text-2xl font-black text-slate-800">₪{stats.pending.toLocaleString()}</p>
+                </div>
+                <div className="bg-red-50 p-4 rounded-lg border border-red-200 shadow-sm">
+                    <p className="text-[10px] text-red-700 font-bold uppercase tracking-widest">בפיגור / באיחור</p>
+                    <p className="text-2xl font-black text-red-800">₪{stats.overdue.toLocaleString()}</p>
+                </div>
+                <div className="bg-red-100 p-4 rounded-lg border border-red-300 shadow-sm animate-pulse">
+                    <p className="text-[10px] text-red-900 font-bold uppercase tracking-widest">צ'קים שחזרו</p>
+                    <p className="text-2xl font-black text-red-900">₪{stats.bounced.toLocaleString()}</p>
+                </div>
+                <div className="bg-indigo-50 p-4 rounded-lg border border-indigo-200 shadow-sm">
+                    <p className="text-[10px] text-indigo-700 font-bold uppercase tracking-widest">בסינון הנוכחי</p>
+                    <p className="text-2xl font-black text-indigo-800">₪{stats.filteredTotal.toLocaleString()}</p>
+                </div>
+            </div>
+
+            <div className="bg-white rounded-lg shadow-sm border border-slate-200 overflow-hidden">
+                <div className="flex border-b border-slate-200 px-4 pt-2 bg-slate-50/50">
+                    <button onClick={() => setTab('INCOMING')} className={`px-4 py-3 font-black text-sm border-b-2 transition-colors ${tab === 'INCOMING' ? 'border-green-500 text-green-700' : 'border-transparent text-slate-500'}`}>צ'קים נכנסים</button>
+                    <button onClick={() => setTab('OUTGOING')} className={`px-4 py-3 font-black text-sm border-b-2 transition-colors ${tab === 'OUTGOING' ? 'border-red-500 text-red-700' : 'border-transparent text-slate-500'}`}>צ'קים יוצאים</button>
+                </div>
+                
+                {/* SMART LIFECYCLE FILTERS */}
+                <div className="p-4 border-b border-slate-200 bg-white grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div className="flex flex-col gap-2">
+                        <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest">תור עבודה חכם (Queue)</label>
+                        <div className="flex bg-slate-100 rounded-lg p-1">
+                            {(['ACTIVE', 'URGENT', 'ARCHIVE', 'ALL'] as const).map(f => (
+                                <button 
+                                    key={f} 
+                                    onClick={() => { setSmartFilter(f); setSearchQuery(''); }}
+                                    className={`flex-1 text-xs font-black py-2.5 px-2 rounded-md transition-all ${smartFilter === f ? 'bg-white text-primary shadow-sm ring-1 ring-black/5' : 'text-slate-500 hover:text-slate-700'}`}
+                                >
+                                    {f === 'ACTIVE' ? 'בתהליך (פתוחים)' : f === 'URGENT' ? 'בטיפול דחוף' : f === 'ARCHIVE' ? 'ארכיון (היסטוריה)' : 'הכל'}
+                                </button>
+                            ))}
+                        </div>
+                        <p className="text-[9px] text-slate-400 font-medium italic">
+                            {smartFilter === 'ACTIVE' && '* מציג את כל הצ׳קים שטרם נפרעו (כולל עתידיים רחוקים)'}
+                            {smartFilter === 'URGENT' && '* מציג רק צ׳קים שחזרו או שעבר תאריך פירעונם'}
+                            {smartFilter === 'ARCHIVE' && '* מציג צ׳קים שכבר נפרעו, בוטלו או הוחזרו'}
+                        </p>
+                    </div>
+                    <div className="relative">
+                        <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">חיפוש גלובלי (מספר צ'ק / שם גורם)</label>
+                        <div className="relative">
+                            <input 
+                                type="text" 
+                                placeholder="חפש מספר צ'ק, ספק או לקוח..." 
+                                value={searchQuery}
+                                onChange={e => setSearchQuery(e.target.value)}
+                                className="w-full text-sm border-slate-300 rounded-lg focus:ring-primary focus:border-primary p-2.5 pl-10 shadow-sm"
+                            />
+                            <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-300">
+                                <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div className="overflow-x-auto min-h-[400px]">
+                    <table className="min-w-full text-sm text-right">
+                        <thead className="bg-slate-50 text-slate-500 font-bold uppercase text-[10px] tracking-widest sticky top-0 z-10 border-b">
+                            <tr><th className="px-6 py-4">תאריך פירעון</th><th className="px-6 py-4">מספר צ'ק</th><th className="px-6 py-4">משויך / גורם</th><th className="px-6 py-4">סכום</th><th className="px-6 py-4">סטטוס</th><th className="px-6 py-4 text-left">פעולות</th></tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                            {filteredChecks.map(check => {
+                                const today = new Date();
+                                today.setHours(0,0,0,0);
+                                const isOverdue = ['PENDING', 'IN_BANK_CUSTODY'].includes(check.status) && check.repaymentDate < today;
+                                const isBounced = check.status === 'BOUNCED';
+                                
+                                return (
+                                    <tr key={check.uniqueId} className={`hover:bg-slate-50 transition-colors group ${isOverdue ? 'bg-red-50/10' : ''} ${isBounced ? 'bg-red-100/20 font-bold' : ''}`}>
+                                        <td className="px-6 py-4">
+                                            <div className="flex flex-col">
+                                                <span className={`font-black ${isOverdue ? 'text-red-600 underline decoration-dotted' : isBounced ? 'text-red-700' : 'text-slate-700'}`}>
+                                                    {check.repaymentDate.toLocaleDateString('he-IL')}
+                                                </span>
+                                                {isOverdue && <span className="text-[9px] font-black text-red-500 uppercase tracking-tighter mt-0.5">⚠️ עבר זמן פירעון</span>}
+                                                {isBounced && <span className="text-[9px] font-black text-red-700 uppercase tracking-tighter mt-0.5">🚨 חזר מהבנק</span>}
+                                            </div>
+                                        </td>
+                                        <td className="px-6 py-4 font-mono font-bold text-slate-500">{check.reference}</td>
+                                        <td className="px-6 py-4">
+                                            <div className="flex flex-col">
+                                                <span className="font-bold text-slate-800">{check.entityName}</span>
+                                                {check.sources.length > 1 && <span className="text-[10px] text-slate-400">תשלום מרוכז ({check.sources.length} פריטים)</span>}
+                                            </div>
+                                        </td>
+                                        <td className={`px-6 py-4 font-black text-lg ${isBounced ? 'text-red-700' : 'text-slate-900'}`}>₪{check.amount.toLocaleString()}</td>
+                                        <td className="px-6 py-4">{getStatusBadge(check.status)}</td>
+                                        <td className="px-6 py-4 text-left">
+                                            <button onClick={() => setSelectedCheck({check, viewOnly: false})} className="bg-white hover:bg-indigo-600 hover:text-white px-4 py-2 rounded-lg border border-indigo-200 text-primary text-xs font-black shadow-sm transition-all group-hover:shadow-md">ניהול צ'ק</button>
+                                        </td>
+                                    </tr>
+                                );
+                            })}
+                            {filteredChecks.length === 0 && (
+                                <tr>
+                                    <td colSpan={6} className="px-6 py-32 text-center">
+                                        <div className="flex flex-col items-center gap-4 text-slate-400 opacity-60">
+                                            <CashIcon className="w-16 h-16 text-slate-200" />
+                                            <div className="max-w-xs">
+                                                <p className="font-black text-lg">לא נמצאו צ'קים</p>
+                                                <p className="text-sm">לא נמצאו פריטים העונים על תנאי הסינון או החיפוש. נסה לשנות את תור העבודה או לנקות את החיפוש.</p>
+                                            </div>
+                                        </div>
+                                    </td>
+                                </tr>
+                            )}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            {selectedCheck && <CheckActionModal check={selectedCheck.check} onClose={() => setSelectedCheck(null)} onUpdateStatus={handleUpdateCheckStatus} viewOnlyHistory={selectedCheck.viewOnly} />}
+        </div>
+    );
+};
+
+const CheckSeriesGenerator: React.FC<{ 
+    initialAmount: number; 
+    onGenerated: (checks: SupplierPayment[]) => void 
+}> = ({ initialAmount, onGenerated }) => {
+    const [count, setCount] = useState(12);
+    const [startDate, setStartDate] = useState(new Date().toISOString().split('T')[0]);
+    const [startRef, setStartRef] = useState('');
+    const [amountPerCheck, setAmountPerCheck] = useState(initialAmount);
+
+    useEffect(() => {
+        setAmountPerCheck(initialAmount);
+    }, [initialAmount]);
+
+    const handleGenerate = () => {
+        const checks: SupplierPayment[] = [];
+        const startNum = parseInt(startRef) || 1001;
+        const baseDate = new Date(startDate);
+
+        for (let i = 0; i < count; i++) {
+            const dueDate = new Date(baseDate.getFullYear(), baseDate.getMonth() + i, baseDate.getDate());
+            checks.push({
+                id: `sp_fix_${Date.now()}_${i}`,
+                amount: amountPerCheck,
+                date: new Date(),
+                repaymentDate: dueDate,
+                method: PaymentMethod.CHECK,
+                reference: (startNum + i).toString(),
+                status: 'PENDING',
+                statusHistory: []
+            });
+        }
+        onGenerated(checks);
+    };
+
+    return (
+        <div className="bg-indigo-50 p-4 rounded-lg border border-indigo-100 space-y-4">
+            <h4 className="font-bold text-indigo-900 text-sm">מחולל סדרת צ'קים מהיר</h4>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <div>
+                    <label className="block text-[10px] font-bold text-indigo-600 mb-1">סכום לכל צ'ק</label>
+                    <input type="number" value={amountPerCheck} onChange={e => setAmountPerCheck(Number(e.target.value))} className="w-full text-sm rounded border-indigo-200 font-bold p-1" />
+                </div>
+                <div>
+                    <label className="block text-[10px] font-bold text-indigo-600 mb-1">מס' תשלומים</label>
+                    <input type="number" value={count} onChange={e => setCount(Number(e.target.value))} className="w-full text-sm rounded border-indigo-200 p-1" />
+                </div>
+                <div>
+                    <label className="block text-[10px] font-bold text-indigo-600 mb-1">פירעון ראשון</label>
+                    <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} className="w-full text-sm rounded border-indigo-200 p-1" />
+                </div>
+                <div>
+                    <label className="block text-[10px] font-bold text-indigo-600 mb-1">מספר צ'ק התחלתי</label>
+                    <input type="text" value={startRef} onChange={e => setStartRef(e.target.value)} placeholder="1001" className="w-full text-sm rounded border-indigo-200 p-1" />
+                </div>
+            </div>
+            <button type="button" onClick={handleGenerate} className="w-full bg-indigo-600 text-white py-2 rounded font-bold text-xs shadow-sm hover:bg-indigo-700">ייצר סדרת צ'קים</button>
+        </div>
+    );
+};
+
 const FinancePage: React.FC<FinancePageProps> = ({ 
-    fixedExpenses, setFixedExpenses, 
-    variableExpenses, setVariableExpenses,
-    loans, setLoans,
-    debts, setDebts,
-    equity, setEquity,
-    addActivity,
-    vatRate
+    fixedExpenses, setFixedExpenses, variableExpenses, setVariableExpenses, loans, setLoans, debts, setDebts, receivables, setReceivables, equity, setEquity, addActivity, vatRate, orders, setOrders
 }) => {
-    const [activeTab, setActiveTab] = useState<'FIXED' | 'VARIABLE' | 'LOANS' | 'DEBTS' | 'EQUITY'>('FIXED');
+    const [activeTab, setActiveTab] = useState<'FIXED' | 'VARIABLE' | 'LOANS' | 'DEBTS' | 'RECEIVABLES' | 'EQUITY' | 'CHECKS'>('FIXED');
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
+    const [isAmortizationModalOpen, setIsAmortizationModalOpen] = useState(false);
     const [editingId, setEditingId] = useState<string | null>(null);
     const [selectedDebtForPayment, setSelectedDebtForPayment] = useState<Debt | null>(null);
+    const [selectedReceivableForCollection, setSelectedReceivableForCollection] = useState<Receivable | null>(null);
+    const [selectedLoanForAmortization, setSelectedLoanForAmortization] = useState<Loan | null>(null);
+    const [selectedCheckForDebt, setSelectedCheckForDebt] = useState<{check: AggregatedCheck, viewOnly: boolean} | null>(null);
+    const [viewingLoanDoc, setViewingLoanDoc] = useState<Attachment | null>(null);
     
-    // Audit Log State
+    // Preview state for manual loan calculation
+    const [showLoanPreview, setShowLoanPreview] = useState(false);
+
+    // Debt Filter States
+    const [debtSearch, setDebtSearch] = useState('');
+    const [debtStatusFilter, setDebtStatusFilter] = useState<'ALL' | 'OPEN' | 'OVERDUE' | 'PAID'>('OPEN');
+
+    // Receivable Filter States
+    const [receivableSearch, setReceivableSearch] = useState('');
+    const [receivableStatusFilter, setReceivableStatusFilter] = useState<'ALL' | 'OPEN' | 'OVERDUE' | 'PAID'>('OPEN');
+
     const [equityLogs, setEquityLogs] = useState<AuditLogEntry[]>(() => {
         const saved = localStorage.getItem('equity_audit_logs');
         return saved ? JSON.parse(saved) : [];
     });
+    useEffect(() => { localStorage.setItem('equity_audit_logs', JSON.stringify(equityLogs)); }, [equityLogs]);
 
-    // Save logs to local storage whenever they change
-    useEffect(() => {
-        localStorage.setItem('equity_audit_logs', JSON.stringify(equityLogs));
-    }, [equityLogs]);
+    const [vMonthFilter, setVMonthFilter] = useState<string | number>(new Date().getMonth() + 1);
+    const [vYearFilter, setVYearFilter] = useState<string | number>(new Date().getFullYear());
 
-    // Variable Expenses Filter
-    const [variableMonthFilter, setVariableMonthFilter] = useState<string>(() => {
-        const now = new Date();
-        return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-    });
-
-    // State for Forms
     const [fixedForm, setFixedForm] = useState<Partial<FixedExpense>>({});
     const [variableForm, setVariableForm] = useState<Partial<VariableExpense>>({});
     const [loanForm, setLoanForm] = useState<Partial<Loan>>({});
     const [debtForm, setDebtForm] = useState<Partial<Debt>>({});
+    const [receivableForm, setReceivableForm] = useState<Partial<Receivable>>({});
     const [equityForm, setEquityForm] = useState<Partial<EquityInvestment>>({});
-
-    // Helper for Transaction List expansion
+    const [isNewInvestor, setIsNewInvestor] = useState(false); 
     const [expandedInvestors, setExpandedInvestors] = useState<Set<string>>(new Set());
+    const [expandedDebts, setExpandedDebts] = useState<Set<string>>(new Set());
+    const [expandedReceivables, setExpandedReceivables] = useState<Set<string>>(new Set());
 
-    const toggleInvestorExpansion = (investorName: string) => {
-        setExpandedInvestors(prev => {
-            const newSet = new Set(prev);
-            if (newSet.has(investorName)) {
-                newSet.delete(investorName);
-            } else {
-                newSet.add(investorName);
+    // Available years for Variable Expenses Filter
+    const vAvailableYears = useMemo(() => {
+        const years = new Set<number>();
+        variableExpenses.forEach(e => years.add(new Date(e.date).getFullYear()));
+        variableExpenses.forEach(e => e.checks?.forEach(c => c.repaymentDate && years.add(new Date(c.repaymentDate).getFullYear())));
+        debts.forEach(d => d.payments?.forEach(p => years.add(new Date(p.date).getFullYear())));
+        years.add(new Date().getFullYear());
+        return Array.from(years).sort((a, b) => b - a);
+    }, [variableExpenses, debts]);
+
+    // Effect for Real-time PMT calculation in Loan Form
+    useEffect(() => {
+        if (activeTab === 'LOANS' && isModalOpen) {
+            const principal = loanForm.principalAmount || 0;
+            const rate = loanForm.interestRate || 0;
+            const duration = loanForm.durationMonths || 0;
+            
+            if (principal > 0 && duration > 0) {
+                const calculatedPmt = calculatePMT(principal, rate, duration);
+                if (calculatedPmt !== loanForm.monthlyPayment) {
+                    setLoanForm(prev => ({ ...prev, monthlyPayment: calculatedPmt }));
+                }
             }
-            return newSet;
-        });
-    };
+        }
+    }, [loanForm.principalAmount, loanForm.interestRate, loanForm.durationMonths, activeTab, isModalOpen]);
 
-    // --- Stats Calculation ---
-    const totalFixedMonthly = fixedExpenses
-        .filter(e => {
-            if (!e.isActive) return false;
-            if (e.endDate && new Date(e.endDate) < new Date()) return false; // Ended service
-            return true;
-        })
-        .reduce((sum, e) => sum + e.monthlyAmount, 0);
+    const totalFixedMonthly = useMemo(() => {
+        return fixedExpenses
+            .filter(e => e.isActive && (!e.endDate || new Date(e.endDate) >= new Date()))
+            .reduce((sum, e) => {
+                const amount = e.monthlyAmount || 0;
+                if (e.isVatExempt) return sum + amount;
+                return sum + (e.includesVat ? amount : amount * (1 + vatRate / 100));
+            }, 0);
+    }, [fixedExpenses, vatRate]);
 
-    // Calculate Variable Expenses for Current Month Only (includes variable expenses AND debt repayments made this month)
     const totalVariableCurrentMonth = useMemo(() => {
         const now = new Date();
         const currentMonth = now.getMonth();
         const currentYear = now.getFullYear();
-        
-        const expensesSum = variableExpenses
-            .filter(e => {
-                const d = new Date(e.date);
-                return d.getMonth() === currentMonth && d.getFullYear() === currentYear;
-            })
-            .reduce((sum, e) => sum + e.amount, 0);
 
-        const debtPaymentsSum = debts.reduce((sum, debt) => {
-            if (!debt.payments) return sum;
-            return sum + debt.payments
-                .filter(p => {
-                    const d = new Date(p.date);
-                    return d.getMonth() === currentMonth && d.getFullYear() === currentYear;
-                })
-                .reduce((pSum, p) => pSum + p.amount, 0);
+        const immediateExpensesSum = variableExpenses.filter(e => {
+            const d = new Date(e.date);
+            const isThisMonth = d.getMonth() === currentMonth && d.getFullYear() === currentYear;
+            return isThisMonth && e.paymentMethod !== PaymentMethod.CHECK;
+        }).reduce((sum, e) => {
+            const amount = e.amount || 0;
+            const gross = e.isVatExempt ? amount : (e.includesVat ? amount : amount * (1 + vatRate / 100));
+            return sum + gross;
         }, 0);
 
-        return expensesSum + debtPaymentsSum;
-    }, [variableExpenses, debts]);
+        const monthlyChecksSum = variableExpenses.reduce((sum, e) => {
+            if (!e.checks) return sum;
+            const validChecks = e.checks.filter(p => {
+                if (!p.repaymentDate) return false;
+                const rd = new Date(p.repaymentDate);
+                const isThisMonth = rd.getMonth() === currentMonth && rd.getFullYear() === currentYear;
+                return isThisMonth && p.status !== 'CANCELED' && p.status !== 'BOUNCED';
+            });
+            return sum + validChecks.reduce((pSum, p) => pSum + p.amount, 0);
+        }, 0);
+        
+        const debtPaymentsSum = debts.reduce((sum, debt) => {
+            if (!debt.payments) return sum;
+            return sum + debt.payments.filter(p => { 
+                const d = new Date(p.date); 
+                const isThisMonth = d.getMonth() === currentMonth && d.getFullYear() === currentYear;
+                const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
+                return isThisMonth && (!p.status || !invalidStatuses.includes(p.status)); 
+            }).reduce((pSum, p) => pSum + p.amount, 0);
+        }, 0);
+
+        return immediateExpensesSum + monthlyChecksSum + debtPaymentsSum;
+    }, [variableExpenses, debts, vatRate]);
 
     const totalLoanBalance = loans.reduce((sum, l) => {
-        const totalToPay = l.monthlyPayment * l.durationMonths;
-        const alreadyPaid = l.monthlyPayment * l.paymentsMade;
-        return sum + (totalToPay - alreadyPaid);
+        if (l.schedule && l.schedule.length > 0) {
+            const unpaid = l.schedule.filter(s => !s.isPaid).reduce((acc, s) => acc + s.totalMonthlyPayment, 0);
+            return sum + unpaid;
+        }
+        return sum + ((l.monthlyPayment * l.durationMonths) - (l.monthlyPayment * l.paymentsMade));
     }, 0);
     
-    // Total debts now reflects remaining balance
-    const totalDebts = debts.reduce((sum, d) => {
-        const paid = (d.payments || []).reduce((acc, p) => acc + p.amount, 0);
-        return sum + Math.max(0, d.amount - paid);
-    }, 0);
+    const totalDebts = useMemo(() => {
+        return debts.reduce((sum, d) => {
+            const amount = d.amount || 0;
+            let gross = d.isVatExempt ? amount : (d.includesVat ? amount : amount * (1 + vatRate / 100));
+            const paidAmount = (d.payments || []).reduce((acc, p) => {
+                const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
+                if (p.status && invalidStatuses.includes(p.status)) return acc;
+                return acc + p.amount;
+            }, 0);
+            const remaining = Math.round((gross - paidAmount) * 100) / 100;
+            return sum + (remaining > 0.1 ? remaining : 0);
+        }, 0);
+    }, [debts, vatRate]);
+
+    const totalReceivables = useMemo(() => {
+        return receivables.reduce((sum, r) => {
+            const amount = r.amount || 0;
+            let gross = r.isVatExempt ? amount : (r.includesVat ? amount : amount * (1 + vatRate / 100));
+            const collectedAmount = (r.payments || []).reduce((acc, p) => {
+                const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
+                if (p.status && invalidStatuses.includes(p.status)) return acc;
+                return acc + p.amount;
+            }, 0);
+            const remaining = Math.round((gross - collectedAmount) * 100) / 100;
+            return sum + (remaining > 0.1 ? remaining : 0);
+        }, 0);
+    }, [receivables, vatRate]);
 
     const equityByInvestor = useMemo(() => {
-        const groups: Record<string, { 
-            name: string, 
-            type: string, 
-            totalInvested: number, 
-            totalWithdrawn: number, 
-            transactions: EquityInvestment[] 
-        }> = {};
-
+        const groups: Record<string, { name: string, type: string, totalInvested: number, totalWithdrawn: number, transactions: EquityInvestment[] }> = {};
         equity.forEach(item => {
-            if (!groups[item.investorName]) {
-                groups[item.investorName] = {
-                    name: item.investorName,
-                    type: item.type,
-                    totalInvested: 0,
-                    totalWithdrawn: 0,
-                    transactions: []
-                };
-            }
-            
-            // Use transactionType to classify
-            if (item.transactionType === 'WITHDRAWAL') {
-                groups[item.investorName].totalWithdrawn += item.amount;
-            } else {
-                // Default to Deposit if undefined (migration)
-                groups[item.investorName].totalInvested += item.amount;
-            }
-            
+            if (!groups[item.investorName]) groups[item.investorName] = { name: item.investorName, type: item.type, totalInvested: 0, totalWithdrawn: 0, transactions: [] };
+            if (item.transactionType === 'WITHDRAWAL') groups[item.investorName].totalWithdrawn += item.amount;
+            else groups[item.investorName].totalInvested += item.amount;
             groups[item.investorName].transactions.push(item);
         });
         return Object.values(groups);
     }, [equity]);
-
     const totalEquityBalance = equityByInvestor.reduce((sum, inv) => sum + (inv.totalInvested - inv.totalWithdrawn), 0);
+    
+    const uniqueInvestorNames = useMemo(() => Array.from(new Set(equity.map(e => e.investorName))).sort(), [equity]);
 
-    // --- Filter Fixed Expenses ---
-    const activeFixedServices = fixedExpenses.filter(e => !e.endDate || new Date(e.endDate) >= new Date());
-    const endedFixedServices = fixedExpenses.filter(e => e.endDate && new Date(e.endDate) < new Date());
+    const activeFixedServices = useMemo(() => 
+        fixedExpenses
+            .filter(e => !e.endDate || new Date(e.endDate) >= new Date())
+            .sort((a,b) => (a.paymentDay || 1) - (b.paymentDay || 1))
+    , [fixedExpenses]);
 
-    // --- Filter Variable Expenses ---
+    const historicalFixedServices = useMemo(() => 
+        fixedExpenses
+            .filter(e => e.endDate && new Date(e.endDate) < new Date())
+            .sort((a,b) => new Date(b.endDate!).getTime() - new Date(a.endDate!).getTime())
+    , [fixedExpenses]);
+
     const filteredVariableExpenses = useMemo(() => {
-        if (variableMonthFilter === 'all') {
-            return variableExpenses.sort((a,b) => b.date.getTime() - a.date.getTime());
-        }
-        const [year, month] = variableMonthFilter.split('-').map(Number);
-        return variableExpenses
-            .filter(e => {
-                const d = new Date(e.date);
-                return d.getFullYear() === year && (d.getMonth() + 1) === month;
-            })
-            .sort((a,b) => b.date.getTime() - a.date.getTime());
-    }, [variableExpenses, variableMonthFilter]);
+        const year = vYearFilter;
+        const month = vMonthFilter;
+        const displayItems: VariableDisplayItem[] = [];
 
-    // --- Handlers ---
-
-    const handleDelete = (type: string, id: string) => {
-        if (!window.confirm('האם אתה בטוח?')) return;
-        
-        if (type === 'EQUITY') {
-            const deletedItem = equity.find(e => e.id === id);
-            if (deletedItem) {
-                const log: AuditLogEntry = {
-                    id: `log_${Date.now()}`,
-                    timestamp: new Date().toISOString(),
-                    action: 'DELETE',
-                    investorName: deletedItem.investorName,
-                    description: `נמחקה רשומה: ${deletedItem.description || 'ללא תיאור'}`,
-                    amountSnapshot: deletedItem.amount,
-                    changes: [`נמחק ${deletedItem.transactionType === 'DEPOSIT' ? 'הפקדה' : 'משיכה'} בסך ₪${deletedItem.amount.toLocaleString()}`],
-                    user: 'מנהל מערכת'
-                };
-                setEquityLogs(prev => [log, ...prev]);
+        // 1. Base Variable Expenses
+        variableExpenses.forEach(e => {
+            const expenseDate = new Date(e.date);
+            const yearMatches = year === 'all' || expenseDate.getFullYear() === Number(year);
+            const monthMatches = month === 'all' || (expenseDate.getMonth() + 1) === Number(month);
+            
+            if (yearMatches && monthMatches) {
+                displayItems.push({
+                    id: e.id,
+                    originalId: e.id,
+                    name: e.name,
+                    category: e.category,
+                    amount: e.amount,
+                    date: expenseDate,
+                    paymentMethod: e.paymentMethod || PaymentMethod.BANK_TRANSFER,
+                    isInstallment: false,
+                    includesVat: e.includesVat,
+                    isVatExempt: e.isVatExempt,
+                    checksCount: e.checks?.length
+                });
             }
-            setEquity(prev => prev.filter(e => e.id !== id));
-        } else if (type === 'FIXED') setFixedExpenses(prev => prev.filter(e => e.id !== id));
-        else if (type === 'VARIABLE') setVariableExpenses(prev => prev.filter(e => e.id !== id));
-        else if (type === 'LOANS') setLoans(prev => prev.filter(e => e.id !== id));
-        else if (type === 'DEBTS') setDebts(prev => prev.filter(e => e.id !== id));
-        
-        addActivity(`פריט נמחק מדוח כספי`);
-    };
+
+            // 2. Future installments (checks) for this variable expense
+            if (e.checks && e.checks.length > 0) {
+                const checksInFilter = e.checks.filter(c => {
+                    if (!c.repaymentDate) return false;
+                    const rd = new Date(c.repaymentDate);
+                    const yMatches = year === 'all' || rd.getFullYear() === Number(year);
+                    const mMatches = month === 'all' || (rd.getMonth() + 1) === Number(month);
+                    return yMatches && mMatches;
+                });
+
+                checksInFilter.forEach((check, idx) => {
+                    displayItems.push({
+                        id: `${e.id}_inst_${idx}`,
+                        originalId: e.id,
+                        name: `תשלום (פריסה): ${e.name}`,
+                        category: e.category,
+                        amount: check.amount,
+                        date: new Date(check.repaymentDate!),
+                        paymentMethod: `צ'ק (מס' ${check.reference || '?'})`,
+                        isInstallment: true,
+                        isVatExempt: true
+                    });
+                });
+            }
+        });
+
+        // 3. Debt Payments
+        debts.forEach(debt => {
+            if (!debt.payments) return;
+            debt.payments.forEach(p => {
+                const pDate = new Date(p.date);
+                const yearMatches = year === 'all' || pDate.getFullYear() === Number(year);
+                const monthMatches = month === 'all' || (pDate.getMonth() + 1) === Number(month);
+                
+                if (yearMatches && monthMatches) {
+                    const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
+                    if (p.status && invalidStatuses.includes(p.status)) return;
+
+                    displayItems.push({
+                        id: p.id,
+                        originalId: debt.id,
+                        name: `תשלום חוב: ${debt.name}`,
+                        category: 'חובות',
+                        amount: p.amount,
+                        date: pDate,
+                        paymentMethod: p.method === PaymentMethod.CHECK ? `צ'ק (מס' ${p.reference || '?'})` : p.method,
+                        isInstallment: true, // Mark as special row
+                        isVatExempt: true, // Debt amounts are gross usually, don't re-calculate
+                        isDebtPayment: true
+                    });
+                }
+            });
+        });
+
+        return displayItems.sort((a,b) => b.date.getTime() - a.date.getTime());
+    }, [variableExpenses, debts, vMonthFilter, vYearFilter]);
+
+    // Calculate Totals for the summary row
+    const variableSummaryTotals = useMemo(() => {
+        return filteredVariableExpenses.reduce((acc, item) => {
+            const amount = item.amount || 0;
+            const gross = item.isVatExempt ? amount : (item.includesVat ? amount : amount * (1 + vatRate / 100));
+            const net = item.isVatExempt ? amount : (item.includesVat ? amount / (1 + vatRate / 100) : amount);
+            acc.net += net;
+            acc.gross += gross;
+            return acc;
+        }, { net: 0, gross: 0 });
+    }, [filteredVariableExpenses, vatRate]);
+
+    // --- Debts Logic with Filtering and Sorting ---
+    const filteredDebts = useMemo(() => {
+        let result = debts.map(d => {
+            const amount = d.amount || 0;
+            const gross = d.isVatExempt ? amount : (d.includesVat ? amount : amount * (1 + vatRate / 100));
+            const paid = (d.payments || []).reduce((sum, p) => {
+                const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
+                if (p.status && invalidStatuses.includes(p.status)) return sum;
+                return sum + p.amount;
+            }, 0);
+            const remaining = Math.max(0, gross - paid);
+            const isFullyPaid = remaining <= 0.1;
+            
+            const today = new Date();
+            today.setHours(0,0,0,0);
+            const isOverdue = !isFullyPaid && new Date(d.dueDate) < today;
+
+            return { ...d, gross, paid, remaining, isFullyPaid, isOverdue };
+        });
+
+        if (debtSearch.trim()) {
+            const lowSearch = debtSearch.toLowerCase();
+            result = result.filter(d => d.name.toLowerCase().includes(lowSearch) || d.description?.toLowerCase().includes(lowSearch));
+        }
+
+        if (debtStatusFilter === 'OPEN') result = result.filter(d => !d.isFullyPaid);
+        else if (debtStatusFilter === 'OVERDUE') result = result.filter(d => d.isOverdue);
+        else if (debtStatusFilter === 'PAID') result = result.filter(d => d.isFullyPaid);
+
+        return result.sort((a, b) => {
+            if (a.isOverdue && !b.isOverdue) return -1;
+            if (!a.isOverdue && b.isOverdue) return 1;
+            if (a.isFullyPaid && !b.isFullyPaid) return 1;
+            if (!a.isFullyPaid && b.isFullyPaid) return -1;
+            return new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime();
+        });
+    }, [debts, debtSearch, debtStatusFilter, vatRate]);
+
+    // --- Receivables Logic ---
+    const filteredReceivables = useMemo(() => {
+        let result = receivables.map(r => {
+            const amount = r.amount || 0;
+            const gross = r.isVatExempt ? amount : (r.includesVat ? amount : amount * (1 + vatRate / 100));
+            const collected = (r.payments || []).reduce((sum, p) => {
+                const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
+                if (p.status && invalidStatuses.includes(p.status)) return sum;
+                return sum + p.amount;
+            }, 0);
+            const remaining = Math.max(0, gross - collected);
+            const isFullyPaid = remaining <= 0.1;
+            
+            const today = new Date();
+            today.setHours(0,0,0,0);
+            const isOverdue = !isFullyPaid && new Date(r.dueDate) < today;
+
+            return { ...r, gross, collected, remaining, isFullyPaid, isOverdue };
+        });
+
+        if (receivableSearch.trim()) {
+            const lowSearch = receivableSearch.toLowerCase();
+            result = result.filter(r => r.name.toLowerCase().includes(lowSearch) || r.description?.toLowerCase().includes(lowSearch));
+        }
+
+        if (receivableStatusFilter === 'OPEN') result = result.filter(r => !r.isFullyPaid);
+        else if (receivableStatusFilter === 'OVERDUE') result = result.filter(r => r.isOverdue);
+        else if (receivableStatusFilter === 'PAID') result = result.filter(r => r.isFullyPaid);
+
+        return result.sort((a, b) => {
+            if (a.isOverdue && !b.isOverdue) return -1;
+            if (!a.isOverdue && b.isOverdue) return 1;
+            if (a.isFullyPaid && !b.isFullyPaid) return 1;
+            if (!a.isFullyPaid && b.isFullyPaid) return -1;
+            return new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime();
+        });
+    }, [receivables, receivableSearch, receivableStatusFilter, vatRate]);
 
     const handleAdd = (type: string) => {
         setEditingId(null);
-        if (type === 'FIXED') {
-            setFixedForm({ name: '', monthlyAmount: 0, paymentDay: 1, category: '', isActive: true, startDate: new Date(), paymentMethod: PaymentMethod.CREDIT_CARD, paymentDetails: '', includesVat: true });
-        } else if (type === 'VARIABLE') {
-            setVariableForm({ name: '', amount: 0, date: new Date(), category: '', includesVat: true });
-        } else if (type === 'LOANS') {
-            setLoanForm({ lenderName: '', principalAmount: 0, interestRate: 0, monthlyPayment: 0, durationMonths: 12, paymentsMade: 0, startDate: new Date() });
-        } else if (type === 'DEBTS') {
-            setDebtForm({ name: '', amount: 0, dueDate: new Date(), description: '', payments: [] });
-        } else if (type === 'EQUITY') {
+        if (type === 'FIXED') setFixedForm({ name: '', monthlyAmount: 0, paymentDay: 1, category: '', isActive: true, startDate: new Date(), paymentMethod: PaymentMethod.STANDING_ORDER, paymentDetails: '', includesVat: true, isVatExempt: false, description: '', checks: [] });
+        else if (type === 'VARIABLE') setVariableForm({ name: '', amount: 0, date: new Date(), category: '', includesVat: true, isVatExempt: false, description: '', paymentMethod: PaymentMethod.BANK_TRANSFER, paymentDetails: '', checks: [] });
+        else if (type === 'LOANS') {
+             setLoanForm({ lenderName: '', principalAmount: 0, interestRate: 0, monthlyPayment: 0, durationMonths: 12, paymentsMade: 0, startDate: new Date(), schedule: [] });
+             setShowLoanPreview(false);
+        }
+        else if (type === 'DEBTS') setDebtForm({ name: '', amount: 0, createdAt: new Date(), dueDate: new Date(), description: '', payments: [], includesVat: true, isVatExempt: false });
+        else if (type === 'RECEIVABLES') setReceivableForm({ name: '', amount: 0, createdAt: new Date(), dueDate: new Date(), description: '', payments: [], includesVat: true, isVatExempt: false });
+        else if (type === 'EQUITY') {
             setEquityForm({ investorName: '', amount: 0, type: 'הון בעלים', date: new Date(), transactionType: 'DEPOSIT' });
+            setIsNewInvestor(uniqueInvestorNames.length === 0);
         }
         setIsModalOpen(true);
     };
 
-    const handleEditFixed = (expense: FixedExpense) => {
-        setEditingId(expense.id);
-        setFixedForm({
-            ...expense,
-            startDate: expense.startDate ? new Date(expense.startDate) : new Date(),
+    const handleEditFixed = (expense: FixedExpense) => { 
+        setEditingId(expense.id); 
+        setFixedForm({ 
+            ...expense, 
+            startDate: expense.startDate ? new Date(expense.startDate) : new Date(), 
             endDate: expense.endDate ? new Date(expense.endDate) : undefined,
-        });
-        setIsModalOpen(true);
+            checks: expense.checks || []
+        }); 
+        setIsModalOpen(true); 
     };
 
-    const handleEditVariable = (expense: VariableExpense) => {
-        setEditingId(expense.id);
-        setVariableForm({
-            ...expense,
+    const handleEditVariable = (expenseId: string) => { 
+        const expense = variableExpenses.find(v => v.id === expenseId);
+        if (!expense) return;
+        setEditingId(expense.id); 
+        setVariableForm({ 
+            ...expense, 
             date: new Date(expense.date),
+            paymentMethod: expense.paymentMethod || PaymentMethod.BANK_TRANSFER,
+            paymentDetails: expense.paymentDetails || '',
+            checks: expense.checks || []
+        }); 
+        setIsModalOpen(true); 
+    };
+
+    const handleEditEquity = (item: EquityInvestment) => { 
+        setEditingId(item.id); 
+        setEquityForm({ ...item, date: new Date(item.date) }); 
+        setIsNewInvestor(false);
+        setIsModalOpen(true); 
+    };
+
+    const handleEditLoan = (loan: Loan) => {
+        setEditingId(loan.id);
+        setLoanForm({
+            ...loan,
+            startDate: new Date(loan.startDate),
+            schedule: loan.schedule || []
+        });
+        setShowLoanPreview(false);
+        setIsModalOpen(true);
+    };
+
+    const handleEditDebt = (debt: Debt) => {
+        setEditingId(debt.id);
+        setDebtForm({
+            ...debt,
+            createdAt: new Date(debt.createdAt),
+            dueDate: new Date(debt.dueDate),
         });
         setIsModalOpen(true);
     };
 
-    const handleEditEquity = (item: EquityInvestment) => {
-        setEditingId(item.id);
-        setEquityForm({
-            ...item,
-            date: new Date(item.date)
+    const handleEditReceivable = (receivable: Receivable) => {
+        setEditingId(receivable.id);
+        setReceivableForm({
+            ...receivable,
+            createdAt: new Date(receivable.createdAt),
+            dueDate: new Date(receivable.dueDate),
         });
         setIsModalOpen(true);
     };
 
-    const generateEquityDiff = (oldItem: EquityInvestment, newItem: EquityInvestment): string[] => {
-        const changes: string[] = [];
-        if (oldItem.amount !== newItem.amount) {
-            changes.push(`סכום שונה מ-₪${oldItem.amount.toLocaleString()} ל-₪${newItem.amount.toLocaleString()}`);
+    const handleDelete = (type: 'FIXED' | 'VARIABLE' | 'LOANS' | 'DEBTS' | 'RECEIVABLES' | 'EQUITY', id: string) => {
+        if (!window.confirm('האם אתה בטוח שברצונך למחוק פריט זה?')) return;
+        
+        switch (type) {
+            case 'FIXED': setFixedExpenses(prev => prev.filter(e => e.id !== id)); break;
+            case 'VARIABLE': setVariableExpenses(prev => prev.filter(e => e.id !== id)); break;
+            case 'LOANS': setLoans(prev => prev.filter(e => e.id !== id)); break;
+            case 'DEBTS': setDebts(prev => prev.filter(e => e.id !== id)); break;
+            case 'RECEIVABLES': setReceivables(prev => prev.filter(r => r.id !== id)); break;
+            case 'EQUITY': setEquity(prev => prev.filter(e => e.id !== id)); break;
         }
-        if (oldItem.transactionType !== newItem.transactionType) {
-            const typeMap: any = { 'DEPOSIT': 'הפקדה', 'WITHDRAWAL': 'משיכה' };
-            changes.push(`סוג פעולה שונה מ-${typeMap[oldItem.transactionType]} ל-${typeMap[newItem.transactionType]}`);
-        }
-        if (new Date(oldItem.date).getTime() !== new Date(newItem.date).getTime()) {
-            changes.push(`תאריך שונה מ-${new Date(oldItem.date).toLocaleDateString('he-IL')} ל-${new Date(newItem.date).toLocaleDateString('he-IL')}`);
-        }
-        if (oldItem.description !== newItem.description) {
-            changes.push(`תיאור שונה מ-"${oldItem.description || ''}" ל-"${newItem.description || ''}"`);
-        }
-        if (oldItem.investorName !== newItem.investorName) {
-            changes.push(`שם משקיע שונה מ-${oldItem.investorName} ל-${newItem.investorName}`);
-        }
-        return changes;
     };
 
-    const handleSave = () => {
-        if (activeTab === 'FIXED') {
-            const newItem = { ...fixedForm, id: editingId || `fe_${Date.now()}` } as FixedExpense;
-            if (editingId) {
-                setFixedExpenses(prev => prev.map(item => item.id === editingId ? newItem : item));
-            } else {
-                setFixedExpenses([...fixedExpenses, newItem]);
-            }
-        } else if (activeTab === 'VARIABLE') {
-            const newItem = { ...variableForm, id: editingId || `ve_${Date.now()}`, date: new Date(variableForm.date || new Date()) } as VariableExpense;
-            if (editingId) {
-                setVariableExpenses(prev => prev.map(item => item.id === editingId ? newItem : item));
-            } else {
-                setVariableExpenses([...variableExpenses, newItem]);
-            }
-        } else if (activeTab === 'LOANS') {
-            const newItem = { ...loanForm, id: `ln_${Date.now()}`, startDate: new Date(loanForm.startDate || new Date()) } as Loan;
-            setLoans([...loans, newItem]);
-        } else if (activeTab === 'DEBTS') {
-            const newItem = { ...debtForm, id: `db_${Date.now()}`, dueDate: new Date(debtForm.dueDate || new Date()), payments: [] } as Debt;
-            setDebts([...debts, newItem]);
-        } else if (activeTab === 'EQUITY') {
-            // VALIDATION
-            if (!equityForm.investorName || equityForm.investorName.trim() === '') {
-                alert('אנא הזן שם משקיע/שותף (שדה חובה)');
-                return;
-            }
-            if (!equityForm.amount || Number(equityForm.amount) <= 0) {
-                alert('אנא הזן סכום חיובי (שדה חובה)');
-                return;
-            }
-
-            const newItem = { ...equityForm, id: editingId || `eq_${Date.now()}`, date: new Date(equityForm.date || new Date()) } as EquityInvestment;
-            
-            // --- AUDIT LOG LOGIC START ---
-            let logEntry: AuditLogEntry | null = null;
-            if (editingId) {
-                const oldItem = equity.find(e => e.id === editingId);
-                if (oldItem) {
-                    const changes = generateEquityDiff(oldItem, newItem);
-                    if (changes.length > 0) {
-                        logEntry = {
-                            id: `log_${Date.now()}`,
-                            timestamp: new Date().toISOString(),
-                            action: 'UPDATE',
-                            investorName: newItem.investorName,
-                            description: `עדכון רשומה: ${newItem.description || oldItem.description}`,
-                            amountSnapshot: newItem.amount,
-                            changes: changes,
-                            user: 'מנהל מערכת'
-                        };
-                    }
-                }
-                setEquity(prev => prev.map(item => item.id === editingId ? newItem : item));
-            } else {
-                logEntry = {
-                    id: `log_${Date.now()}`,
-                    timestamp: new Date().toISOString(),
-                    action: 'CREATE',
-                    investorName: newItem.investorName,
-                    description: `יצירה חדשה: ${newItem.description || 'השקעה ראשונית'}`,
-                    amountSnapshot: newItem.amount,
-                    changes: [`נוספה ${newItem.transactionType === 'DEPOSIT' ? 'הפקדה' : 'משיכה'} חדשה בסך ₪${newItem.amount.toLocaleString()}`],
-                    user: 'מנהל מערכת'
-                };
-                setEquity([...equity, newItem]);
-            }
-
-            if (logEntry) {
-                setEquityLogs(prev => [logEntry!, ...prev]);
-            }
-            // --- AUDIT LOG LOGIC END ---
-        }
-        addActivity(editingId ? `עודכן פריט בדוח: ${activeTab}` : `נוסף פריט חדש לדוח: ${activeTab}`);
-        setIsModalOpen(false);
+    const handleUpdateLoanSchedule = (loanId: string, newSchedule: AmortizationEntry[]) => {
+        setLoans(prev => prev.map(l => {
+            if (l.id !== loanId) return l;
+            return {
+                ...l,
+                schedule: newSchedule,
+                paymentsMade: newSchedule.filter(s => s.isPaid).length
+            };
+        }));
     };
 
-    const openPaymentModal = (debt: Debt) => {
-        setSelectedDebtForPayment(debt);
-        setIsPaymentModalOpen(true);
+    const toggleInvestorExpansion = (name: string) => {
+        setExpandedInvestors(prev => {
+            const next = new Set(prev);
+            if (next.has(name)) next.delete(name);
+            else next.add(name);
+            return next;
+        });
+    };
+
+    const toggleDebtExpansion = (id: string) => {
+        setExpandedDebts(prev => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id);
+            else next.add(id);
+            return next;
+        });
+    };
+
+    const toggleReceivableExpansion = (id: string) => {
+        setExpandedReceivables(prev => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id);
+            else next.add(id);
+            return next;
+        });
     };
 
     const handleSaveDebtPayment = (debtId: string, payment: DebtPayment) => {
         setDebts(prev => prev.map(d => {
             if (d.id === debtId) {
                 const updatedPayments = [...(d.payments || []), payment];
-                const paidTotal = updatedPayments.reduce((acc, p) => acc + p.amount, 0);
+                const totalPaid = updatedPayments.reduce((sum, p) => {
+                    const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
+                    if (p.status && invalidStatuses.includes(p.status)) return sum;
+                    return sum + p.amount;
+                }, 0);
+                const amount = d.amount || 0;
+                let gross = amount;
+                if (!d.isVatExempt) {
+                    gross = d.includesVat ? amount : amount * (1 + vatRate / 100);
+                }
                 return { 
                     ...d, 
                     payments: updatedPayments,
-                    isPaid: paidTotal >= d.amount
+                    isPaid: totalPaid >= gross - 0.05
                 };
             }
             return d;
         }));
-        
-        // Update selected debt reference to reflect changes immediately in modal if needed
-        const updatedDebt = debts.find(d => d.id === debtId);
-        if (updatedDebt) {
-             const updatedPayments = [...(updatedDebt.payments || []), payment];
-             setSelectedDebtForPayment({ ...updatedDebt, payments: updatedPayments });
+        setIsPaymentModalOpen(false);
+        setSelectedDebtForPayment(null);
+    };
+
+    const handleSaveReceivableCollection = (receivableId: string, payment: ReceivablePayment) => {
+        setReceivables(prev => prev.map(r => {
+            if (r.id === receivableId) {
+                const updatedPayments = [...(r.payments || []), payment];
+                const totalCollected = updatedPayments.reduce((sum, p) => {
+                    const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
+                    if (p.status && invalidStatuses.includes(p.status)) return sum;
+                    return sum + p.amount;
+                }, 0);
+                const amount = r.amount || 0;
+                let gross = amount;
+                if (!r.isVatExempt) {
+                    gross = r.includesVat ? amount : amount * (1 + vatRate / 100);
+                }
+                return { 
+                    ...r, 
+                    payments: updatedPayments,
+                    isPaid: totalCollected >= gross - 0.05
+                };
+            }
+            return r;
+        }));
+        setIsPaymentModalOpen(false);
+        setSelectedReceivableForCollection(null);
+    };
+
+    const handleDeleteDebtPayment = (debtId: string, paymentId: string) => {
+        if (!window.confirm('האם למחוק תשלום זה? היתרה תתעדכן בהתאם.')) return;
+        setDebts(prev => prev.map(d => {
+            if (d.id === debtId) {
+                const updatedPayments = (d.payments || []).filter(p => p.id !== paymentId);
+                const totalPaid = updatedPayments.reduce((sum, p) => {
+                    const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
+                    if (p.status && invalidStatuses.includes(p.status)) return sum;
+                    return sum + p.amount;
+                }, 0);
+                const amount = d.amount || 0;
+                let gross = amount;
+                if (!d.isVatExempt) {
+                    gross = d.includesVat ? amount : amount * (1 + vatRate / 100);
+                }
+                return { 
+                    ...d, 
+                    payments: updatedPayments,
+                    isPaid: totalPaid >= gross - 0.05 
+                };
+            }
+            return d;
+        }));
+    };
+
+    const handleDeleteReceivablePayment = (receivableId: string, paymentId: string) => {
+        if (!window.confirm('האם למחוק גבייה זו? היתרה תתעדכן בהתאם.')) return;
+        setReceivables(prev => prev.map(r => {
+            if (r.id === receivableId) {
+                const updatedPayments = (r.payments || []).filter(p => p.id !== paymentId);
+                const totalCollected = updatedPayments.reduce((sum, p) => {
+                    const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
+                    if (p.status && invalidStatuses.includes(p.status)) return sum;
+                    return sum + p.amount;
+                }, 0);
+                const amount = r.amount || 0;
+                let gross = amount;
+                if (!r.isVatExempt) {
+                    gross = r.includesVat ? amount : amount * (1 + vatRate / 100);
+                }
+                return { 
+                    ...r, 
+                    payments: updatedPayments,
+                    isPaid: totalCollected >= gross - 0.05 
+                };
+            }
+            return r;
+        }));
+    };
+
+    const handleUpdateDebtPaymentStatus = (debtId: string, paymentId: string, newStatus: TransactionStatus, note?: string) => {
+        setDebts(prev => prev.map(debt => {
+            if (debt.id !== debtId) return debt;
+            const updatedPayments = (debt.payments || []).map(p => {
+                if (p.id !== paymentId) return p;
+                return { 
+                    ...p, 
+                    status: newStatus, 
+                    statusHistory: [...(p.statusHistory || []), { date: new Date(), status: newStatus, changedBy: 'משתמש', reason: note }] 
+                };
+            });
+            const totalPaid = updatedPayments.reduce((sum, p) => {
+                const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
+                if (p.status && invalidStatuses.includes(p.status)) return sum;
+                return sum + p.amount;
+            }, 0);
+            const amount = debt.amount || 0;
+            let gross = amount;
+            if (!debt.isVatExempt) gross = debt.includesVat ? amount : amount * (1 + vatRate / 100);
+
+            return { ...debt, payments: updatedPayments, isPaid: totalPaid >= gross - 0.05 };
+        }));
+        addActivity(`סטטוס תשלום חוב עודכן ל-${newStatus}`);
+    };
+
+    const handleUpdateReceivablePaymentStatus = (receivableId: string, paymentId: string, newStatus: TransactionStatus, note?: string) => {
+        setReceivables(prev => prev.map(rec => {
+            if (rec.id !== receivableId) return rec;
+            const updatedPayments = (rec.payments || []).map(p => {
+                if (p.id !== paymentId) return p;
+                return { 
+                    ...p, 
+                    status: newStatus, 
+                    statusHistory: [...(p.statusHistory || []), { date: new Date(), status: newStatus, changedBy: 'משתמש', reason: note }] 
+                };
+            });
+            const totalCollected = updatedPayments.reduce((sum, p) => {
+                const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
+                if (p.status && invalidStatuses.includes(p.status)) return sum;
+                return sum + p.amount;
+            }, 0);
+            const amount = rec.amount || 0;
+            let gross = amount;
+            if (!rec.isVatExempt) gross = rec.includesVat ? amount : amount * (1 + vatRate / 100);
+
+            return { ...rec, payments: updatedPayments, isPaid: totalCollected >= gross - 0.05 };
+        }));
+        addActivity(`סטטוס גבייה עודכן ל-${newStatus}`);
+    };
+
+    const handleLoanFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        if (e.target.files && e.target.files[0]) {
+            const file = e.target.files[0];
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                if (event.target?.result) {
+                    setLoanForm(prev => ({
+                        ...prev,
+                        amortizationFile: {
+                            id: `att_${Date.now()}`,
+                            fileName: file.name,
+                            dataUrl: event.target.result as string,
+                            type: file.type,
+                        }
+                    }));
+                }
+            };
+            reader.readAsDataURL(file);
         }
-        
-        addActivity(`בוצע החזר חוב בסך ₪${payment.amount.toLocaleString()}`);
+    };
+
+    const handleUpdateFixedFormCheck = (index: number, field: string, value: any) => {
+        const updatedChecks = [...(fixedForm.checks || [])];
+        const check = { ...updatedChecks[index] };
+        if (field === 'repaymentDate') check.repaymentDate = new Date(value);
+        else (check as any)[field] = field === 'amount' ? Number(value) : value;
+        updatedChecks[index] = check;
+        setFixedForm(prev => ({ ...prev, checks: updatedChecks }));
+    };
+
+    const handleUpdateVariableFormCheck = (index: number, field: string, value: any) => {
+        const updatedChecks = [...(variableForm.checks || [])];
+        const check = { ...updatedChecks[index] };
+        if (field === 'repaymentDate') check.repaymentDate = new Date(value);
+        else (check as any)[field] = field === 'amount' ? Number(value) : value;
+        updatedChecks[index] = check;
+        setVariableForm(prev => ({ ...prev, checks: updatedChecks }));
+    };
+
+    const handleRemoveCheckFromFixedForm = (index: number) => {
+        const updatedChecks = (fixedForm.checks || []).filter((_, i) => i !== index);
+        setFixedForm(prev => ({ ...prev, checks: updatedChecks }));
+    };
+
+    const handleRemoveCheckFromVariableForm = (index: number) => {
+        const updatedChecks = (variableForm.checks || []).filter((_, i) => i !== index);
+        setVariableForm(prev => ({ ...prev, checks: updatedChecks }));
+    };
+
+    const handleSave = () => {
+        if (activeTab === 'FIXED') {
+            const newItem = { ...fixedForm, id: editingId || `fe_${Date.now()}` } as FixedExpense;
+            setFixedExpenses(prev => editingId ? prev.map(item => item.id === editingId ? newItem : item) : [...prev, newItem]);
+        } else if (activeTab === 'VARIABLE') {
+            const newItem = { 
+                ...variableForm, 
+                id: editingId || `ve_${Date.now()}`, 
+                date: new Date(variableForm.date || new Date()),
+                paymentMethod: variableForm.paymentMethod || PaymentMethod.BANK_TRANSFER,
+                paymentDetails: variableForm.paymentDetails || '',
+                checks: variableForm.checks || []
+            } as VariableExpense;
+            setVariableExpenses(prev => editingId ? prev.map(item => item.id === editingId ? newItem : item) : [...prev, newItem]);
+        } else if (activeTab === 'LOANS') {
+            const principal = loanForm.principalAmount || 0;
+            const rate = loanForm.interestRate || 0;
+            const duration = loanForm.durationMonths || 12;
+            const startDate = loanForm.startDate || new Date();
+            const paymentsMadeCount = loanForm.paymentsMade || 0;
+            
+            let schedule = loanForm.schedule || [];
+            const scheduleTotalPrincipal = schedule.reduce((sum, s) => sum + s.principalAmount, 0);
+            const needsSync = schedule.length === 0 || schedule.length !== duration || Math.abs(scheduleTotalPrincipal - principal) > 1.0;
+
+            if (needsSync && principal > 0 && duration > 0) {
+                schedule = generateSpitzerSchedule(principal, rate, duration, startDate, paymentsMadeCount);
+            }
+
+            const newItem = { 
+                ...loanForm, 
+                id: editingId || `ln_${Date.now()}`, 
+                startDate: new Date(loanForm.startDate || new Date()),
+                schedule: schedule,
+                paymentsMade: schedule.filter(s => s.isPaid).length 
+            } as Loan;
+            setLoans(prev => editingId ? prev.map(l => l.id === editingId ? newItem : l) : [...prev, newItem]);
+        } else if (activeTab === 'DEBTS') {
+            const newItem = { 
+                ...debtForm, 
+                id: editingId || `db_${Date.now()}`, 
+                createdAt: new Date(debtForm.createdAt || new Date()), 
+                dueDate: new Date(debtForm.dueDate || new Date()), 
+                payments: debtForm.payments || [], 
+                includesVat: debtForm.includesVat ?? true, 
+                isVatExempt: debtForm.isVatExempt ?? false 
+            } as Debt;
+            setDebts(prev => editingId ? prev.map(d => d.id === editingId ? newItem : d) : [...prev, newItem]);
+        } else if (activeTab === 'RECEIVABLES') {
+            const newItem = { 
+                ...receivableForm, 
+                id: editingId || `rec_${Date.now()}`, 
+                createdAt: new Date(receivableForm.createdAt || new Date()), 
+                dueDate: new Date(receivableForm.dueDate || new Date()), 
+                payments: receivableForm.payments || [], 
+                includesVat: receivableForm.includesVat ?? true, 
+                isVatExempt: receivableForm.isVatExempt ?? false 
+            } as Receivable;
+            setReceivables(prev => editingId ? prev.map(r => r.id === editingId ? newItem : r) : [...prev, newItem]);
+        } else if (activeTab === 'EQUITY') {
+            if (!equityForm.investorName || !equityForm.amount) { alert('חסרים שדות חובה'); return; }
+            const newItem = { ...equityForm, id: editingId || `eq_${Date.now()}`, date: new Date(equityForm.date || new Date()) } as EquityInvestment;
+            if(editingId) setEquity(prev => prev.map(item => item.id === editingId ? newItem : item));
+            else setEquity(prev => [...prev, newItem]);
+        }
+        setIsModalOpen(false);
+    };
+
+    const FixedExpensesTable = ({ items, title, isHistorical = false }: { items: FixedExpense[], title: string, isHistorical?: boolean }) => (
+        <div className={isHistorical ? "mt-12 pt-8 border-t border-slate-200 opacity-70" : ""}>
+            <h4 className={`text-xs font-black uppercase tracking-widest mb-3 flex items-center gap-2 ${isHistorical ? 'text-slate-400' : 'text-blue-600'}`}>
+                {!isHistorical && <div className="w-2 h-2 rounded-full bg-blue-600 animate-pulse"></div>}
+                {title}
+            </h4>
+            <div className={`overflow-x-auto border rounded-lg shadow-sm ${isHistorical ? 'bg-slate-50/30' : 'bg-white'}`}>
+                <table className="min-w-full text-sm text-right">
+                    <thead className="bg-slate-50 text-slate-500 font-bold border-b">
+                        <tr>
+                            <th className="px-4 py-3">יום</th>
+                            <th className="px-4 py-3">שם ההוצאה</th>
+                            <th className="px-4 py-3">אמצעי תשלום</th>
+                            <th className="px-4 py-3">נטו</th>
+                            <th className="px-4 py-3">מע"מ</th>
+                            <th className={`px-4 py-3 ${isHistorical ? 'bg-slate-100' : 'bg-blue-50/30'}`}>סה"כ לתשלום</th>
+                            {isHistorical && <th className="px-4 py-3">תאריך סיום</th>}
+                            <th className="px-4 py-3"></th>
+                        </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                        {items.map(item => {
+                            const amount = item.monthlyAmount || 0;
+                            let gross = item.isVatExempt ? amount : (item.includesVat ? amount : amount * (1 + vatRate / 100));
+                            let net = item.isVatExempt ? amount : (item.includesVat ? amount / (1 + vatRate / 100) : amount);
+                            const checksCount = item.checks?.length || 0;
+                            return (
+                                <tr key={item.id} className="hover:bg-slate-50 group">
+                                    <td className={`px-4 py-4 font-bold ${isHistorical ? 'text-slate-400' : 'text-blue-600'}`}>{item.paymentDay}</td>
+                                    <td className="px-4 py-4">
+                                        <div className="flex flex-col">
+                                            <div className="flex items-center gap-1">
+                                                <span className={`font-bold ${isHistorical ? 'text-slate-500' : 'text-slate-800'}`}>{item.name}</span>
+                                                {item.isVatExempt && <span className="text-[9px] bg-amber-100 text-amber-700 px-1 rounded font-black">פטור</span>}
+                                            </div>
+                                            <span className="text-[10px] text-slate-400">{item.category}</span>
+                                        </div>
+                                    </td>
+                                    <td className="px-4 py-4 text-xs">
+                                        <div className="flex flex-col">
+                                            <span>{item.paymentMethod}</span>
+                                            {item.paymentMethod === PaymentMethod.CHECK && checksCount > 0 && (
+                                                <span className={`text-[10px] font-bold ${isHistorical ? 'text-slate-400' : 'text-indigo-500'}`}>({checksCount} צ'קים במערכת)</span>
+                                            )}
+                                        </div>
+                                    </td>
+                                    <td className="px-4 py-4 text-slate-500">₪{net.toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
+                                    <td className="px-4 py-4 text-slate-400">₪{(gross - net).toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
+                                    <td className={`px-4 py-4 font-black text-slate-900 ${isHistorical ? '' : 'bg-blue-50/10'}`}>₪{gross.toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
+                                    {isHistorical && <td className="px-4 py-4 text-xs text-red-500 font-bold">{new Date(item.endDate!).toLocaleDateString('he-IL')}</td>}
+                                    <td className="px-4 py-4 text-left">
+                                        <div className="flex gap-2 justify-end opacity-0 group-hover:opacity-100">
+                                            <button onClick={() => handleEditFixed(item)} className="text-primary p-1"><EditIcon className="w-4 h-4"/></button>
+                                            <button onClick={() => handleDelete('FIXED', item.id)} className="text-red-500 p-1"><DeleteIcon className="w-4 h-4"/></button>
+                                        </div>
+                                    </td>
+                                </tr>
+                            );
+                        })}
+                        {items.length === 0 && (
+                            <tr><td colSpan={isHistorical ? 9 : 8} className="px-4 py-8 text-center text-slate-400 italic">אין פריטים להצגה</td></tr>
+                        )}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    );
+
+    const renderFilePreview = (file: Attachment) => {
+        const isImage = file.type.startsWith('image/');
+        const isPdf = file.type === 'application/pdf' || file.fileName.toLowerCase().endsWith('.pdf');
+
+        return (
+            <Modal title={`צפייה במסמך: ${file.fileName}`} onClose={() => setViewingLoanDoc(null)} size="5xl">
+                <div className="flex flex-col h-[75vh]">
+                    <div className="flex-1 bg-slate-100 rounded overflow-hidden flex items-center justify-center p-0 relative">
+                        {isImage ? (
+                            <img src={file.dataUrl} alt={file.fileName} className="max-w-full max-h-full object-contain" />
+                        ) : isPdf ? (
+                            <iframe src={file.dataUrl} className="w-full h-full border-none bg-white" title="Document Preview" />
+                        ) : (
+                            <div className="text-center p-10">
+                                <p className="text-slate-600 mb-6 font-bold">סוג קובץ זה אינו נתמך לצפייה ישירה בדפדפן.</p>
+                                <a 
+                                    href={file.dataUrl} 
+                                    download={file.fileName}
+                                    className="px-6 py-3 bg-primary text-white rounded-lg font-black shadow-lg flex items-center gap-2 hover:bg-indigo-700 transition-all mx-auto w-fit"
+                                >
+                                    <DownloadIcon className="w-5 h-5"/>
+                                    הורד קובץ למחשב
+                                </a>
+                            </div>
+                        )}
+                    </div>
+                    {(isImage || isPdf) && (
+                        <div className="mt-4 flex justify-between items-center p-2 bg-slate-50 border rounded border-slate-200">
+                            <span className="text-sm font-medium text-slate-500">{file.fileName}</span>
+                            <a href={file.dataUrl} download={file.fileName} className="text-primary font-bold hover:underline flex items-center gap-1">
+                                <DownloadIcon className="w-4 h-4"/>
+                                הורד קובץ
+                            </a>
+                        </div>
+                    )}
+                </div>
+            </Modal>
+        );
     };
 
     return (
-        <div className="space-y-6">
-            {/* Top Stats Bar */}
-            <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
+        <div className="space-y-6 pb-12">
+            {viewingLoanDoc && renderFilePreview(viewingLoanDoc)}
+            <div className="grid grid-cols-2 lg:grid-cols-6 gap-4">
                 <div className="bg-white p-4 rounded-lg shadow-sm border-t-4 border-blue-500">
-                    <h3 className="text-xs font-bold text-slate-500 uppercase">הוצאות קבועות (חודשי)</h3>
-                    <p className="text-2xl font-bold text-slate-800">₪{totalFixedMonthly.toLocaleString()}</p>
-                    <p className="text-xs text-slate-400 mt-1">צפי שנתי: ₪{(totalFixedMonthly * 12).toLocaleString()}</p>
+                    <h3 className="text-xs font-black text-slate-500 uppercase tracking-tighter">קבועות (ברוטו)</h3>
+                    <p className="text-2xl font-black text-slate-800 mt-1">₪{totalFixedMonthly.toLocaleString(undefined, { minimumFractionDigits: 0 })}</p>
                 </div>
                 <div className="bg-white p-4 rounded-lg shadow-sm border-t-4 border-orange-500">
-                    <h3 className="text-xs font-bold text-slate-500 uppercase">הוצאות משתנות (החודש)</h3>
-                    <p className="text-2xl font-bold text-slate-800">₪{totalVariableCurrentMonth.toLocaleString()}</p>
-                    <p className="text-xs text-slate-400 mt-1">כולל החזרי חוב</p>
+                    <h3 className="text-xs font-black text-slate-500 uppercase tracking-tighter">משתנות (החודש)</h3>
+                    <p className="text-2xl font-black text-slate-800 mt-1">₪{totalVariableCurrentMonth.toLocaleString(undefined, { minimumFractionDigits: 0 })}</p>
                 </div>
                 <div className="bg-white p-4 rounded-lg shadow-sm border-t-4 border-red-500">
-                    <h3 className="text-xs font-bold text-slate-500 uppercase">יתרת הלוואות</h3>
-                    <p className="text-2xl font-bold text-red-600">₪{totalLoanBalance.toLocaleString()}</p>
+                    <h3 className="text-xs font-black text-slate-500 uppercase tracking-tighter">יתרת הלוואות</h3>
+                    <p className="text-2xl font-black text-red-600 mt-1">₪{totalLoanBalance.toLocaleString(undefined, { minimumFractionDigits: 0 })}</p>
                 </div>
                 <div className="bg-white p-4 rounded-lg shadow-sm border-t-4 border-purple-500">
-                    <h3 className="text-xs font-bold text-slate-500 uppercase">חובות שוטפים (יתרה)</h3>
-                    <p className="text-2xl font-bold text-purple-600">₪{totalDebts.toLocaleString()}</p>
+                    <h3 className="text-xs font-black text-slate-500 uppercase tracking-tighter">חובות (יתרה)</h3>
+                    <p className="text-2xl font-black text-purple-600 mt-1">₪{totalDebts.toLocaleString(undefined, { minimumFractionDigits: 0 })}</p>
+                </div>
+                <div className="bg-white p-4 rounded-lg shadow-sm border-t-4 border-indigo-500">
+                    <h3 className="text-xs font-black text-slate-500 uppercase tracking-tighter">חייבים (יתרה)</h3>
+                    <p className="text-2xl font-black text-indigo-600 mt-1">₪{totalReceivables.toLocaleString(undefined, { minimumFractionDigits: 0 })}</p>
                 </div>
                 <div className="bg-white p-4 rounded-lg shadow-sm border-t-4 border-green-500">
-                    <h3 className="text-xs font-bold text-slate-500 uppercase">הון עצמי והשקעות (יתרה)</h3>
-                    <p className="text-2xl font-bold text-green-600">₪{totalEquityBalance.toLocaleString()}</p>
-                    <p className="text-xs text-slate-400 mt-1">נטו (השקעות פחות משיכות)</p>
+                    <h3 className="text-xs font-black text-slate-500 uppercase tracking-tighter">הון עצמי</h3>
+                    <p className="text-2xl font-black text-green-600 mt-1">₪{totalEquityBalance.toLocaleString(undefined, { minimumFractionDigits: 0 })}</p>
                 </div>
             </div>
 
-            {/* Tabs Navigation */}
-            <div className="bg-white rounded-lg shadow-sm border border-slate-200">
-                <div className="flex border-b border-slate-200 px-4 overflow-x-auto">
-                    <TabButton label="הוצאות קבועות" active={activeTab === 'FIXED'} onClick={() => setActiveTab('FIXED')} />
-                    <TabButton label="הוצאות משתנות" active={activeTab === 'VARIABLE'} onClick={() => setActiveTab('VARIABLE')} />
-                    <TabButton label="הלוואות והתחייבויות" active={activeTab === 'LOANS'} onClick={() => setActiveTab('LOANS')} />
+            <div className="bg-white rounded-lg shadow-md border border-slate-200 overflow-hidden">
+                <div className="flex border-b border-slate-200 px-4 overflow-x-auto bg-slate-50/50">
+                    <TabButton label="ניהול צ'קים" active={activeTab === 'CHECKS'} onClick={() => setActiveTab('CHECKS')} icon={<CashIcon className="w-4 h-4"/>} />
+                    <TabButton label="קבועות" active={activeTab === 'FIXED'} onClick={() => setActiveTab('FIXED')} />
+                    <TabButton label="משתנות" active={activeTab === 'VARIABLE'} onClick={() => setActiveTab('VARIABLE')} />
+                    <TabButton label="הלוואות" active={activeTab === 'LOANS'} onClick={() => setActiveTab('LOANS')} />
                     <TabButton label="חובות" active={activeTab === 'DEBTS'} onClick={() => setActiveTab('DEBTS')} />
-                    <TabButton label="הון עצמי והשקעות" active={activeTab === 'EQUITY'} onClick={() => setActiveTab('EQUITY')} />
+                    <TabButton label="חייבים" active={activeTab === 'RECEIVABLES'} onClick={() => setActiveTab('RECEIVABLES')} />
+                    <TabButton label="הון בעלים" active={activeTab === 'EQUITY'} onClick={() => setActiveTab('EQUITY')} />
                 </div>
 
                 <div className="p-6 min-h-[400px]">
-                    
-                    {/* --- FIXED EXPENSES TAB --- */}
-                    {activeTab === 'FIXED' && (
-                        <div>
-                            {/* ... existing code ... */}
-                            <div className="flex justify-between mb-4">
-                                <h3 className="text-lg font-bold text-slate-700">ניהול הוצאות קבועות ושוטפות</h3>
-                                <button onClick={() => handleAdd('FIXED')} className="flex items-center px-3 py-2 bg-blue-50 text-blue-700 rounded hover:bg-blue-100 text-sm font-bold"><PlusIcon className="w-4 h-4 me-1"/> הוסף הוצאה</button>
-                            </div>
-                            
-                            <div className="space-y-8">
-                                {/* Active Services Table */}
-                                <div>
-                                    <h4 className="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2 border-b pb-1">שירותים פעילים (חיוב חודשי)</h4>
-                                    <table className="min-w-full text-sm text-right">
-                                        <thead className="bg-slate-50 text-slate-500 font-medium">
-                                            <tr>
-                                                <th className="px-4 py-2">שם ההוצאה</th>
-                                                <th className="px-4 py-2">קטגוריה</th>
-                                                <th className="px-4 py-2">יום חיוב</th>
-                                                <th className="px-4 py-2">התחלת שירות</th>
-                                                <th className="px-4 py-2">אמצעי תשלום</th>
-                                                <th className="px-4 py-2">סכום (כולל מע"מ)</th>
-                                                <th className="px-4 py-2">לפני מע"מ</th>
-                                                <th className="px-4 py-2"></th>
-                                            </tr>
-                                        </thead>
-                                        <tbody className="divide-y divide-slate-100">
-                                            {activeFixedServices.map(item => {
-                                                const netAmount = item.includesVat ? item.monthlyAmount / (1 + vatRate / 100) : item.monthlyAmount;
-                                                return (
-                                                    <tr key={item.id} className="hover:bg-slate-50">
-                                                        <td className="px-4 py-3 font-medium">
-                                                            {item.name}
-                                                            {item.description && <div className="text-xs text-slate-400 font-normal">{item.description}</div>}
-                                                        </td>
-                                                        <td className="px-4 py-3"><span className="bg-slate-100 px-2 py-1 rounded text-xs">{item.category}</span></td>
-                                                        <td className="px-4 py-3">{item.paymentDay} לחודש</td>
-                                                        <td className="px-4 py-3 text-slate-500">{new Date(item.startDate).toLocaleDateString('he-IL')}</td>
-                                                        <td className="px-4 py-3 text-slate-600 text-xs">
-                                                            <div className="font-bold">{item.paymentMethod}</div>
-                                                            {item.paymentDetails && <div>{item.paymentDetails}</div>}
-                                                        </td>
-                                                        <td className="px-4 py-3 font-bold text-slate-800">
-                                                            ₪{item.monthlyAmount.toLocaleString()}
-                                                            {!item.includesVat && <span className="text-xs font-normal text-slate-400 block">(ללא מע"מ)</span>}
-                                                        </td>
-                                                        <td className="px-4 py-3 font-bold text-blue-600">
-                                                            ₪{netAmount.toLocaleString(undefined, { maximumFractionDigits: 0 })}
-                                                        </td>
-                                                        <td className="px-4 py-3 flex gap-2 justify-end">
-                                                            <button onClick={() => handleEditFixed(item)} className="text-blue-400 hover:text-blue-600"><EditIcon className="w-4 h-4"/></button>
-                                                            <button onClick={() => handleDelete('FIXED', item.id)} className="text-red-400 hover:text-red-600"><DeleteIcon className="w-4 h-4"/></button>
-                                                        </td>
-                                                    </tr>
-                                                );
-                                            })}
-                                            {activeFixedServices.length === 0 && <tr><td colSpan={8} className="text-center py-4 text-slate-400">אין שירותים פעילים כרגע.</td></tr>}
-                                        </tbody>
-                                    </table>
-                                </div>
+                    {activeTab === 'CHECKS' && <CheckCenter orders={orders} setOrders={setOrders} fixedExpenses={fixedExpenses} setFixedExpenses={setFixedExpenses} variableExpenses={variableExpenses} setVariableExpenses={setVariableExpenses} debts={debts} setDebts={setDebts} receivables={receivables} setReceivables={setReceivables} addActivity={addActivity} />}
 
-                                {/* History / Ended Services Table */}
-                                {endedFixedServices.length > 0 && (
-                                    <div className="opacity-75 grayscale-[50%]">
-                                        <h4 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-2 border-b pb-1">היסטוריית שירותים (הסתיים)</h4>
-                                        <table className="min-w-full text-sm text-right bg-slate-50/50 rounded-lg">
-                                            <thead className="text-slate-400 font-medium">
-                                                <tr>
-                                                    <th className="px-4 py-2">שם ההוצאה</th>
-                                                    <th className="px-4 py-2">תקופת שירות</th>
-                                                    <th className="px-4 py-2">סיום התקשרות</th>
-                                                    <th className="px-4 py-2">סכום שהיה</th>
-                                                    <th className="px-4 py-2"></th>
-                                                </tr>
-                                            </thead>
-                                            <tbody className="divide-y divide-slate-100 text-slate-500">
-                                                {endedFixedServices.map(item => (
-                                                    <tr key={item.id} className="hover:bg-slate-100">
-                                                        <td className="px-4 py-3">{item.name}</td>
-                                                        <td className="px-4 py-3 text-xs">
-                                                            {new Date(item.startDate).toLocaleDateString('he-IL')} - {item.endDate ? new Date(item.endDate).toLocaleDateString('he-IL') : '?'}
-                                                        </td>
-                                                        <td className="px-4 py-3 text-xs font-bold text-red-400">
-                                                            הסתיים
-                                                        </td>
-                                                        <td className="px-4 py-3">₪{item.monthlyAmount.toLocaleString()}</td>
-                                                        <td className="px-4 py-3 text-end">
-                                                            <button onClick={() => handleEditFixed(item)} className="text-blue-300 hover:text-blue-500 px-2 text-xs">פרטים/חידוש</button>
-                                                        </td>
-                                                    </tr>
-                                                ))}
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                )}
+                    {activeTab === 'FIXED' && (
+                        <div className="text-start">
+                            <div className="flex justify-between items-center mb-6">
+                                <div>
+                                    <h3 className="text-lg font-black text-slate-700">ניהול הוצאות קבועות</h3>
+                                    <p className="text-sm text-slate-500">שכירות, תוכנות, ביטוחים ושירותים חודשיים</p>
+                                </div>
+                                <button onClick={() => handleAdd('FIXED')} className="flex items-center px-5 py-2.5 bg-primary text-white rounded-lg shadow-lg hover:bg-indigo-700 font-bold transition-all"><PlusIcon className="w-5 h-5 me-2"/> הוסף הוצאה</button>
+                            </div>
+                            <div className="space-y-12">
+                                <FixedExpensesTable items={activeFixedServices} title="שירותים פעילים" />
+                                {historicalFixedServices.length > 0 && <FixedExpensesTable items={historicalFixedServices} title="היסטוריית שירותים (הסתיימו)" isHistorical={true} />}
                             </div>
                         </div>
                     )}
 
-                    {/* --- VARIABLE EXPENSES TAB --- */}
                     {activeTab === 'VARIABLE' && (
-                        <div>
-                            <div className="flex justify-between items-end mb-4">
+                        <div className="text-start">
+                            <div className="flex flex-col sm:flex-row justify-between items-end mb-6 gap-4">
                                 <div>
-                                    <h3 className="text-lg font-bold text-slate-700 mb-2">פירוט הוצאות משתנות</h3>
-                                    <div className="flex items-center gap-2">
-                                        <label className="text-sm text-slate-500">סינון לפי חודש:</label>
-                                        <input 
-                                            type="month" 
-                                            value={variableMonthFilter} 
-                                            onChange={e => setVariableMonthFilter(e.target.value)}
-                                            className="text-sm border p-1.5 rounded border-slate-300"
-                                        />
+                                    <h3 className="text-xl font-black text-slate-800">הוצאות משתנות</h3>
+                                    <div className="flex flex-wrap items-center gap-3 mt-3">
+                                        <div className="flex flex-col">
+                                            <label className="text-[10px] font-black text-slate-400 uppercase">שנה</label>
+                                            <select 
+                                                value={vYearFilter} 
+                                                onChange={e => setVYearFilter(e.target.value === 'all' ? 'all' : Number(e.target.value))} 
+                                                className="text-sm border p-2 rounded-md border-slate-300 shadow-sm focus:ring-primary focus:border-primary bg-white min-w-[100px]"
+                                            >
+                                                <option value="all">כל השנים</option>
+                                                {vAvailableYears.map(y => <option key={y} value={y}>{y}</option>)}
+                                            </select>
+                                        </div>
+                                        <div className="flex flex-col">
+                                            <label className="text-[10px] font-black text-slate-400 uppercase">חודש</label>
+                                            <select 
+                                                value={vMonthFilter} 
+                                                onChange={e => setVMonthFilter(e.target.value === 'all' ? 'all' : Number(e.target.value))} 
+                                                className="text-sm border p-2 rounded-md border-slate-300 shadow-sm focus:ring-primary focus:border-primary bg-white min-w-[120px]"
+                                            >
+                                                <option value="all">כל החודשים</option>
+                                                {Array.from({length: 12}, (_, i) => i + 1).map(m => (
+                                                    <option key={m} value={m}>{new Date(0, m - 1).toLocaleString('he-IL', {month: 'long'})}</option>
+                                                ))}
+                                            </select>
+                                        </div>
                                         <button 
-                                            onClick={() => setVariableMonthFilter('all')} 
-                                            className={`text-xs px-2 py-1.5 rounded ${variableMonthFilter === 'all' ? 'bg-slate-200 font-bold' : 'bg-slate-100 text-slate-600'}`}
+                                            onClick={() => { setVMonthFilter('all'); setVYearFilter('all'); }} 
+                                            className="text-xs px-4 py-2 mt-4 rounded-md font-bold transition-all bg-slate-100 text-slate-600 hover:bg-slate-200"
                                         >
-                                            הכל
+                                            נקה סינון
                                         </button>
                                     </div>
                                 </div>
-                                <button onClick={() => handleAdd('VARIABLE')} className="flex items-center px-3 py-2 bg-orange-50 text-orange-700 rounded hover:bg-orange-100 text-sm font-bold"><PlusIcon className="w-4 h-4 me-1"/> הוסף הוצאה</button>
+                                <button onClick={() => handleAdd('VARIABLE')} className="flex items-center px-6 py-3 bg-[#c2410c] text-white rounded-lg shadow-xl hover:bg-[#9a3412] font-black transition-all"><PlusIcon className="w-6 h-6 me-2"/> הוסף הוצאה</button>
                             </div>
-                            <table className="min-w-full text-sm text-right">
-                                <thead className="bg-slate-50 text-slate-500 font-medium">
-                                    <tr>
-                                        <th className="px-4 py-2">תאריך</th>
-                                        <th className="px-4 py-2">שם ההוצאה</th>
-                                        <th className="px-4 py-2">קטגוריה</th>
-                                        <th className="px-4 py-2">תיאור</th>
-                                        <th className="px-4 py-2 font-bold">סכום (כולל מע"מ)</th>
-                                        <th className="px-4 py-2">לפני מע"מ</th>
-                                        <th className="px-4 py-2"></th>
-                                    </tr>
-                                </thead>
-                                <tbody className="divide-y divide-slate-100">
-                                    {filteredVariableExpenses.map(item => (
-                                        <tr key={item.id} className="hover:bg-slate-50">
-                                            <td className="px-4 py-3 text-slate-500">{new Date(item.date).toLocaleDateString('he-IL')}</td>
-                                            <td className="px-4 py-3 font-medium">{item.name}</td>
-                                            <td className="px-4 py-3"><span className="bg-orange-50 text-orange-700 px-2 py-1 rounded text-xs">{item.category}</span></td>
-                                            <td className="px-4 py-3 text-slate-500">{item.description}</td>
-                                            <td className="px-4 py-3 font-bold text-slate-800">
-                                                ₪{item.amount.toLocaleString()}
-                                                {!item.includesVat && <span className="text-xs font-normal text-slate-400 block">(ללא מע"מ)</span>}
-                                            </td>
-                                            <td className="px-4 py-3 font-bold text-blue-600">
-                                                ₪{(item.includesVat ? item.amount / (1 + vatRate / 100) : item.amount).toLocaleString(undefined, { maximumFractionDigits: 0 })}
-                                            </td>
-                                            <td className="px-4 py-3 flex gap-2 justify-end">
-                                                <button onClick={() => handleEditVariable(item)} className="text-blue-400 hover:text-blue-600"><EditIcon className="w-4 h-4"/></button>
-                                                <button onClick={() => handleDelete('VARIABLE', item.id)} className="text-red-400 hover:text-red-600"><DeleteIcon className="w-4 h-4"/></button>
-                                            </td>
-                                        </tr>
-                                    ))}
-                                    {filteredVariableExpenses.length === 0 && (
-                                        <tr><td colSpan={7} className="text-center py-6 text-slate-400">לא נמצאו הוצאות בחודש זה.</td></tr>
-                                    )}
-                                </tbody>
-                                {filteredVariableExpenses.length > 0 && (
-                                    <tfoot className="bg-slate-100 border-t border-slate-200 font-bold text-slate-700">
+                            <div className="overflow-x-auto border rounded-xl shadow-sm">
+                                <table className="min-w-full text-sm text-right">
+                                    <thead className="bg-slate-50 text-slate-500 font-black border-b">
                                         <tr>
-                                            <td colSpan={4} className="px-4 py-3 text-left">סה"כ</td>
-                                            <td className="px-4 py-3 text-slate-900">₪{filteredVariableExpenses.reduce((acc, curr) => acc + curr.amount, 0).toLocaleString()}</td>
-                                            <td className="px-4 py-3 text-blue-600">
-                                                ₪{filteredVariableExpenses.reduce((acc, curr) => acc + (curr.includesVat ? curr.amount / (1 + vatRate / 100) : curr.amount), 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}
-                                            </td>
-                                            <td></td>
+                                            <th className="px-6 py-4">תאריך</th>
+                                            <th className="px-6 py-4">שם ההוצאה</th>
+                                            <th className="px-6 py-4">אמצעי תשלום</th>
+                                            <th className="px-6 py-4">קטגוריה</th>
+                                            <th className="px-6 py-4">נטו</th>
+                                            <th className="px-6 py-4">ברוטו</th>
+                                            <th className="px-6 py-4"></th>
                                         </tr>
-                                    </tfoot>
-                                )}
-                            </table>
-                        </div>
-                    )}
-
-                    {/* --- LOANS TAB --- */}
-                    {activeTab === 'LOANS' && (
-                        <div>
-                            <div className="flex justify-between mb-6">
-                                <h3 className="text-lg font-bold text-slate-700">ניהול הלוואות בנקאיות / קרנות</h3>
-                                <button onClick={() => handleAdd('LOANS')} className="flex items-center px-3 py-2 bg-red-50 text-red-700 rounded hover:bg-red-100 text-sm font-bold"><PlusIcon className="w-4 h-4 me-1"/> הוסף הלוואה</button>
-                            </div>
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                {loans.map(loan => {
-                                    const totalToPay = loan.monthlyPayment * loan.durationMonths;
-                                    const amountPaid = loan.monthlyPayment * loan.paymentsMade;
-                                    const remaining = totalToPay - amountPaid;
-                                    const progress = (amountPaid / totalToPay) * 100;
-                                    const monthsLeft = loan.durationMonths - loan.paymentsMade;
-
-                                    return (
-                                        <div key={loan.id} className="border rounded-xl p-5 shadow-sm hover:shadow-md transition bg-white relative overflow-hidden">
-                                            <div className="flex justify-between items-start mb-4">
-                                                <div className="flex items-center gap-3">
-                                                    <div className="p-2 bg-red-50 rounded-lg text-red-600"><BankIcon className="w-6 h-6"/></div>
-                                                    <div>
-                                                        <h4 className="font-bold text-lg text-slate-800">{loan.lenderName}</h4>
-                                                        <p className="text-xs text-slate-500">נלקחה ב: {new Date(loan.startDate).toLocaleDateString('he-IL')}</p>
-                                                    </div>
-                                                </div>
-                                                <button onClick={() => handleDelete('LOANS', loan.id)} className="text-slate-300 hover:text-red-500"><DeleteIcon className="w-4 h-4"/></button>
-                                            </div>
-                                            
-                                            <div className="grid grid-cols-2 gap-4 mb-4 text-sm">
-                                                <div>
-                                                    <span className="text-slate-500 block text-xs">קרן מקורית</span>
-                                                    <span className="font-bold">₪{loan.principalAmount.toLocaleString()}</span>
-                                                </div>
-                                                <div>
-                                                    <span className="text-slate-500 block text-xs">החזר חודשי</span>
-                                                    <span className="font-bold">₪{loan.monthlyPayment.toLocaleString()}</span>
-                                                </div>
-                                                <div>
-                                                    <span className="text-slate-500 block text-xs">ריבית</span>
-                                                    <span className="font-bold">{loan.interestRate}%</span>
-                                                </div>
-                                                <div>
-                                                    <span className="text-slate-500 block text-xs">נותרו תשלומים</span>
-                                                    <span className="font-bold text-orange-600">{monthsLeft} חודשים</span>
-                                                </div>
-                                            </div>
-
-                                            <div className="mb-2">
-                                                <div className="flex justify-between text-xs mb-1 font-medium">
-                                                    <span className="text-green-600">שולם: ₪{amountPaid.toLocaleString()}</span>
-                                                    <span className="text-red-600">יתרה: ₪{remaining.toLocaleString()}</span>
-                                                </div>
-                                                <div className="w-full bg-slate-100 rounded-full h-2.5">
-                                                    <div className="bg-green-500 h-2.5 rounded-full" style={{ width: `${progress}%` }}></div>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    );
-                                })}
-                            </div>
-                        </div>
-                    )}
-
-                    {/* --- DEBTS TAB --- */}
-                    {activeTab === 'DEBTS' && (
-                        <div>
-                            <div className="flex justify-between mb-4">
-                                <h3 className="text-lg font-bold text-slate-700">חובות שוטפים / אחרים</h3>
-                                <button onClick={() => handleAdd('DEBTS')} className="flex items-center px-3 py-2 bg-purple-50 text-purple-700 rounded hover:bg-purple-100 text-sm font-bold"><PlusIcon className="w-4 h-4 me-1"/> הוסף חוב</button>
-                            </div>
-                            <div className="bg-purple-50/50 p-4 rounded-lg mb-4 text-sm text-purple-900">
-                                כאן ניתן לנהל חובות שאינם הלוואות בנקאיות מסודרות, כגון: חובות ארנונה, הלוואות מחברים/משפחה, צ'קים שחזרו, וכו'.
-                                <strong> תשלומים שבוצעו בחודש הנוכחי יתווספו אוטומטית לסיכום ההוצאות המשתנות.</strong>
-                            </div>
-                            <table className="min-w-full text-sm text-right">
-                                <thead className="bg-slate-50 text-slate-500 font-medium">
-                                    <tr>
-                                        <th className="px-4 py-2">תאריך יעד</th>
-                                        <th className="px-4 py-2">שם החוב / נושה</th>
-                                        <th className="px-4 py-2">תיאור</th>
-                                        <th className="px-4 py-2 font-bold">סכום מקורי</th>
-                                        <th className="px-4 py-2">שולם</th>
-                                        <th className="px-4 py-2 font-bold text-red-600">יתרה</th>
-                                        <th className="px-4 py-2">סטטוס</th>
-                                        <th className="px-4 py-2"></th>
-                                    </tr>
-                                </thead>
-                                <tbody className="divide-y divide-slate-100">
-                                    {debts.map(item => {
-                                        const paid = (item.payments || []).reduce((acc, p) => acc + p.amount, 0);
-                                        const remaining = item.amount - paid;
-                                        const progress = item.amount > 0 ? (paid / item.amount) * 100 : 0;
-                                        return (
-                                            <tr key={item.id} className="hover:bg-slate-50">
-                                                <td className="px-4 py-3 text-slate-500">{new Date(item.dueDate).toLocaleDateString('he-IL')}</td>
-                                                <td className="px-4 py-3 font-medium">{item.name}</td>
-                                                <td className="px-4 py-3 text-slate-500">{item.description}</td>
-                                                <td className="px-4 py-3 text-slate-800">₪{item.amount.toLocaleString()}</td>
-                                                <td className="px-4 py-3 text-green-600">₪{paid.toLocaleString()}</td>
-                                                <td className="px-4 py-3 font-bold text-red-600">
-                                                    ₪{remaining.toLocaleString()}
-                                                    <div className="w-20 bg-slate-200 rounded-full h-1.5 mt-1">
-                                                        <div className="bg-green-500 h-1.5 rounded-full" style={{ width: `${Math.min(100, progress)}%` }}></div>
-                                                    </div>
-                                                </td>
-                                                <td className="px-4 py-3">
-                                                    {remaining <= 0 ? (
-                                                        <span className="bg-green-100 text-green-800 px-2 py-1 rounded text-xs font-bold">שולם במלואו</span>
-                                                    ) : (
-                                                        <span className="bg-slate-100 text-slate-600 px-2 py-1 rounded text-xs">פתוח</span>
-                                                    )}
-                                                </td>
-                                                <td className="px-4 py-3 flex gap-2 justify-end items-center">
-                                                     <button 
-                                                        onClick={() => openPaymentModal(item)}
-                                                        className="text-white bg-primary hover:bg-indigo-700 px-2 py-1 rounded text-xs transition-colors"
-                                                    >
-                                                        נהל תשלומים
-                                                    </button>
-                                                    <button onClick={() => handleDelete('DEBTS', item.id)} className="text-red-400 hover:text-red-600"><DeleteIcon className="w-4 h-4"/></button>
-                                                </td>
+                                    </thead>
+                                    <tbody className="divide-y divide-slate-100 bg-white">
+                                        {filteredVariableExpenses.map(item => {
+                                            const amount = item.amount || 0;
+                                            let net = item.isVatExempt ? amount : (item.includesVat ? amount / (1 + vatRate / 100) : amount);
+                                            let gross = item.isVatExempt ? amount : (item.includesVat ? amount : amount * (1 + vatRate / 100));
+                                            return (
+                                                <tr key={item.id} className={`hover:bg-slate-50 group ${item.isInstallment ? 'bg-slate-50/50' : ''}`}>
+                                                    <td className="px-6 py-4 font-medium text-slate-500">{new Date(item.date).toLocaleDateString('he-IL')}</td>
+                                                    <td className="px-6 py-4"><div className="flex flex-col"><span className={`font-black ${item.isInstallment ? 'text-slate-500 text-xs italic' : 'text-slate-800'}`}>{item.name}</span>{item.isInstallment && <span className="text-[9px] text-primary font-bold">{item.isDebtPayment ? 'תשלום חוב' : 'תשלום מחודש קודם'}</span>}</div></td>
+                                                    <td className="px-6 py-4 text-xs"><div className="flex flex-col"><span>{item.paymentMethod}</span>{!item.isInstallment && item.checksCount ? <span className="text-[10px] font-bold text-indigo-500">({item.checksCount} צ'קים)</span> : null}</div></td>
+                                                    <td className="px-6 py-4"><span className={`${item.isDebtPayment ? 'bg-purple-50 text-purple-700 border-purple-100' : 'bg-orange-50 text-orange-700 border-orange-100'} px-3 py-1 rounded-full border text-[11px] font-bold`}>{item.category}</span></td>
+                                                    <td className="px-6 py-4 text-slate-500 font-mono">₪{net.toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
+                                                    <td className="px-6 py-4 font-black text-slate-900 font-mono">₪{gross.toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
+                                                    <td className="px-6 py-4 text-left"><div className="flex gap-2 justify-end opacity-0 group-hover:opacity-100">{!item.isInstallment ? <><button onClick={() => handleEditVariable(item.originalId)} className="text-primary hover:bg-blue-50 p-1.5 rounded"><EditIcon className="w-5 h-5"/></button><button onClick={() => handleDelete('VARIABLE', item.originalId)} className="text-red-500 p-1.5 rounded"><DeleteIcon className="w-5 h-5"/></button></> : <span className="text-[10px] text-slate-300 italic">מערכת</span>}</div></td>
+                                                </tr>
+                                            );
+                                        })}
+                                        {filteredVariableExpenses.length === 0 && (
+                                            <tr><td colSpan={7} className="px-6 py-12 text-center text-slate-400 italic">לא נמצאו הוצאות בסינון הנבחר</td></tr>
+                                        )}
+                                    </tbody>
+                                    {filteredVariableExpenses.length > 0 && (
+                                        <tfoot className="bg-slate-50 font-black border-t-2 border-slate-200">
+                                            <tr>
+                                                <td colSpan={4} className="px-6 py-4 text-start text-slate-600">סה"כ לסינון הנוכחי:</td>
+                                                <td className="px-6 py-4 text-slate-800 font-mono">₪{variableSummaryTotals.net.toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
+                                                <td className="px-6 py-4 text-primary font-mono">₪{variableSummaryTotals.gross.toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
+                                                <td></td>
                                             </tr>
-                                        );
-                                    })}
-                                </tbody>
-                            </table>
+                                        </tfoot>
+                                    )}
+                                </table>
+                            </div>
                         </div>
                     )}
 
-                    {/* --- EQUITY TAB --- */}
-                    {activeTab === 'EQUITY' && (
-                        <div>
-                            <div className="flex justify-between mb-6">
-                                <h3 className="text-lg font-bold text-slate-700">לוח בקרה - שותפים ומשקיעים</h3>
-                                <button onClick={() => handleAdd('EQUITY')} className="flex items-center px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 shadow-md text-sm font-bold"><PlusIcon className="w-4 h-4 me-1"/> הוסף תנועה חדשה</button>
+                    {activeTab === 'LOANS' && (
+                        <div className="text-start">
+                            <div className="flex justify-between items-center mb-6">
+                                <div>
+                                    <h3 className="text-xl font-black text-slate-800">ניהול הלוואות ומימון</h3>
+                                    <p className="text-sm text-slate-500">מעקב אחר הלוואות בנקאיות, לוחות סילוקין והחזרים</p>
+                                </div>
+                                <button onClick={() => handleAdd('LOANS')} className="flex items-center px-5 py-2.5 bg-red-600 text-white rounded-lg shadow-lg font-black hover:bg-red-700 transition-all"><PlusIcon className="w-5 h-5 me-2"/> הוסף הלוואה</button>
                             </div>
                             
-                            {/* Cards Grid */}
-                            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6 mb-10">
-                                {equityByInvestor.map((investor, index) => {
-                                    const balance = investor.totalInvested - investor.totalWithdrawn;
-                                    const returnPercentage = investor.totalInvested > 0 ? (investor.totalWithdrawn / investor.totalInvested) * 100 : 0;
-                                    const isExpanded = expandedInvestors.has(investor.name);
-                                    
+                            <div className="overflow-x-auto border rounded-xl shadow-sm bg-white">
+                                <table className="min-w-full text-sm text-right">
+                                    <thead className="bg-slate-50 text-slate-500 font-black border-b uppercase text-[10px] tracking-widest">
+                                        <tr>
+                                            <th className="px-6 py-4">מלווה</th>
+                                            <th className="px-6 py-4 text-center">תאריך התחלה</th>
+                                            <th className="px-6 py-4 text-center">קרן מקורית</th>
+                                            <th className="px-6 py-4 text-center">החזר חודשי</th>
+                                            <th className="px-6 py-4 text-center">ריבית</th>
+                                            <th className="px-6 py-4 text-center">מסמכים</th>
+                                            <th className="px-6 py-4 text-center">התקדמות</th>
+                                            <th className="px-6 py-4 text-center">יתרה נוכחית</th>
+                                            <th className="px-6 py-4"></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-slate-100">
+                                        {loans.map(loan => {
+                                            const schedule = loan.schedule || [];
+                                            const totalPaymentsCount = schedule.length > 0 ? schedule.length : loan.durationMonths;
+                                            const paymentsMadeCount = schedule.length > 0 ? schedule.filter(s => s.isPaid).length : loan.paymentsMade;
+                                            
+                                            const totalToPay = schedule.length > 0 
+                                                ? schedule.reduce((acc, s) => acc + s.totalMonthlyPayment, 0)
+                                                : loan.monthlyPayment * loan.durationMonths;
+                                            
+                                            const amountPaid = schedule.length > 0
+                                                ? schedule.filter(s => s.isPaid).reduce((acc, s) => acc + s.totalMonthlyPayment, 0)
+                                                : loan.monthlyPayment * loan.paymentsMade;
+                                            
+                                            const progress = totalToPay > 0 ? (amountPaid / totalToPay) * 100 : 0;
+                                            const remaining = totalToPay - amountPaid;
+
+                                            return (
+                                                <tr key={loan.id} className="hover:bg-slate-50 transition-colors group cursor-pointer" onClick={() => { setSelectedLoanForAmortization(loan); setIsAmortizationModalOpen(true); }}>
+                                                    <td className="px-6 py-5">
+                                                        <div className="flex items-center gap-3">
+                                                            <div className="p-2 bg-red-50 rounded-lg text-red-600"><BankIcon className="w-5 h-5"/></div>
+                                                            <div>
+                                                                <div className="font-black text-slate-800">{loan.lenderName}</div>
+                                                                <div className="text-[10px] text-slate-400">{loan.description || 'ללא תיאור'}</div>
+                                                            </div>
+                                                        </div>
+                                                    </td>
+                                                    <td className="px-6 py-5 text-center text-slate-500 font-medium">
+                                                        {new Date(loan.startDate).toLocaleDateString('he-IL')}
+                                                    </td>
+                                                    <td className="px-6 py-5 text-center font-bold text-slate-700">
+                                                        ₪{loan.principalAmount.toLocaleString()}
+                                                    </td>
+                                                    <td className="px-6 py-5 text-center font-bold text-slate-800">
+                                                        ₪{loan.monthlyPayment.toLocaleString()}
+                                                    </td>
+                                                    <td className="px-6 py-5 text-center">
+                                                        <span className="bg-slate-100 px-2 py-1 rounded text-xs font-bold text-slate-600">{loan.interestRate}%</span>
+                                                    </td>
+                                                    <td className="px-6 py-5 text-center">
+                                                        {loan.amortizationFile ? (
+                                                            <button 
+                                                                onClick={(e) => { e.stopPropagation(); setViewingLoanDoc(loan.amortizationFile!); }}
+                                                                className="p-2 bg-indigo-50 text-indigo-600 rounded-lg hover:bg-indigo-100 transition-colors"
+                                                                title="צפה במסמך"
+                                                            >
+                                                                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+                                                            </button>
+                                                        ) : <span className="text-slate-300 text-xs">-</span>}
+                                                    </td>
+                                                    <td className="px-6 py-5 text-center">
+                                                        <div className="flex flex-col items-center gap-1 min-w-[120px]">
+                                                            <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
+                                                                <div className="bg-red-500 h-full rounded-full transition-all duration-500" style={{ width: `${Math.min(100, progress)}%` }}></div>
+                                                            </div>
+                                                            <span className="text-[12px] font-black text-slate-800 leading-tight">
+                                                                {paymentsMadeCount} מתוך {totalPaymentsCount}
+                                                            </span>
+                                                            <span className="text-[9px] text-slate-400 font-bold uppercase">תשלומים</span>
+                                                        </div>
+                                                    </td>
+                                                    <td className="px-6 py-5 text-center">
+                                                        <span className="font-black text-red-600 text-lg">₪{remaining.toLocaleString()}</span>
+                                                    </td>
+                                                    <td className="px-6 py-5 text-left" onClick={(e) => e.stopPropagation()}>
+                                                        <div className="flex gap-2 justify-end opacity-0 group-hover:opacity-100 transition-opacity">
+                                                            <button onClick={() => { setSelectedLoanForAmortization(loan); setIsAmortizationModalOpen(true); }} className="text-primary hover:bg-blue-50 p-1.5 rounded" title="לוח סילוקין"><LogIcon className="w-5 h-5"/></button>
+                                                            <button onClick={() => handleEditLoan(loan)} className="text-slate-400 hover:text-blue-500 p-1.5 rounded"><EditIcon className="w-5 h-5"/></button>
+                                                            <button onClick={() => handleDelete('LOANS', loan.id)} className="text-slate-400 hover:text-red-500 p-1.5 rounded"><DeleteIcon className="h-5 w-5"/></button>
+                                                        </div>
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })}
+                                        {loans.length === 0 && (
+                                            <tr><td colSpan={9} className="px-6 py-20 text-center text-slate-400 italic">לא נמצאו הלוואות פעילות.</td></tr>
+                                        )}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    )}
+
+                    {activeTab === 'DEBTS' && (
+                        <div className="text-start">
+                            <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6">
+                                <div>
+                                    <h3 className="text-xl font-black text-slate-800">חובות לספקים ורשויות</h3>
+                                    <p className="text-sm text-slate-500 mt-1">ניהול חובות פתוחים ותשלומים דחויים</p>
+                                </div>
+                                <button onClick={() => handleAdd('DEBTS')} className="flex items-center px-5 py-2.5 bg-purple-600 text-white rounded-lg shadow-lg font-black hover:bg-purple-700 transition-all"><PlusIcon className="w-5 h-5 me-2"/> הוסף חוב</button>
+                            </div>
+
+                            <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-200 mb-6 flex flex-col md:flex-row gap-4 items-center">
+                                <div className="relative flex-1 w-full">
+                                    <input 
+                                        type="text" 
+                                        placeholder="חיפוש חוב או ספק..." 
+                                        value={debtSearch}
+                                        onChange={e => setDebtSearch(e.target.value)}
+                                        className="w-full pl-10 pr-4 py-2 border border-slate-300 rounded-lg focus:ring-purple-500 focus:border-purple-500 text-sm bg-white p-2"
+                                    />
+                                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400">
+                                        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
+                                    </div>
+                                </div>
+                                <div className="flex bg-slate-100 p-1 rounded-lg w-full md:w-auto overflow-x-auto">
+                                    <button onClick={() => setDebtStatusFilter('OPEN')} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${debtStatusFilter === 'OPEN' ? 'bg-white text-purple-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>פתוחים</button>
+                                    <button onClick={() => setDebtStatusFilter('OVERDUE')} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${debtStatusFilter === 'OVERDUE' ? 'bg-white text-red-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>באיחור</button>
+                                    <button onClick={() => setDebtStatusFilter('ALL')} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${debtStatusFilter === 'ALL' ? 'bg-white text-slate-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>הכל</button>
+                                    <button onClick={() => setDebtStatusFilter('PAID')} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${debtStatusFilter === 'PAID' ? 'bg-white text-green-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>שולמו</button>
+                                </div>
+                                <div className="text-xs text-slate-400 font-medium px-2 whitespace-nowrap">מציג {filteredDebts.length} מתוך {debts.length}</div>
+                            </div>
+
+                            <div className="border rounded-xl overflow-x-auto bg-white shadow-sm">
+                                <table className="min-w-full text-sm text-right">
+                                    <thead className="bg-slate-50 text-slate-500 font-black border-b uppercase text-[10px] tracking-widest text-center">
+                                        <tr><th className="px-6 py-4 w-12 text-right"></th><th className="px-6 py-4 text-right">שם החוב</th><th className="px-6 py-4">תאריך יצירה</th><th className="px-6 py-4">תאריך יעד</th><th className="px-6 py-4">נטו</th><th className="px-6 py-4">מע"מ</th><th className="px-6 py-4 bg-purple-50/30">סה"כ</th><th className="px-6 py-4">יתרה פתוחה</th><th className="px-6 py-4"></th></tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-slate-100">
+                                        {filteredDebts.map(debt => {
+                                            const isExpanded = expandedDebts.has(debt.id);
+                                            const net = debt.isVatExempt ? debt.amount : (debt.includesVat ? debt.amount / (1 + vatRate / 100) : debt.amount);
+                                            return (
+                                                <React.Fragment key={debt.id}>
+                                                    <tr className={`hover:bg-slate-50 transition-colors ${debt.isFullyPaid ? 'opacity-60 bg-green-50/10' : ''}`}>
+                                                        <td className="px-6 py-5 text-center"><button onClick={() => toggleDebtExpansion(debt.id)} className={`text-slate-400 hover:text-primary transition-transform ${isExpanded ? 'rotate-180' : ''}`}><svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7"/></svg></button></td>
+                                                        <td className="px-6 py-5 font-black text-slate-800"><div className="flex flex-col"><div className="flex items-center gap-2"><span>{debt.name}</span>{debt.isVatExempt && <span className="text-[9px] bg-amber-100 text-amber-700 px-1 rounded font-black">פטור</span>}{debt.isOverdue && <span className="text-[9px] bg-red-100 text-red-700 px-1 rounded font-black animate-pulse">בפיגור</span>}</div>{debt.description && <span className="text-[10px] text-slate-400 font-normal line-clamp-1">{debt.description}</span>}</div></td>
+                                                        <td className="px-6 py-5 text-slate-500 font-medium text-center">{new Date(debt.createdAt).toLocaleDateString('he-IL')}</td>
+                                                        <td className="px-6 py-5 text-slate-500 font-medium text-center"><span className={debt.isOverdue ? 'text-red-600 font-bold' : ''}>{new Date(debt.dueDate).toLocaleDateString('he-IL')}</span></td>
+                                                        <td className="px-6 py-5 text-slate-500 font-mono text-center">₪{net.toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
+                                                        <td className="px-6 py-5 text-slate-400 font-mono text-center">₪{(debt.gross - net).toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
+                                                        <td className="px-6 py-5 font-black text-slate-900 bg-purple-50/10 text-center">₪{debt.gross.toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
+                                                        <td className="px-6 py-5 text-center">{debt.isFullyPaid ? <span className="text-green-600 font-black bg-green-50 px-3 py-1 rounded-full border border-green-100 text-xs">שולם</span> : <div className="flex flex-col items-center"><span className="text-red-600 font-black text-lg leading-none">₪{debt.remaining.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>{debt.paid > 0.1 && <span className="text-[10px] text-blue-600 font-bold mt-1">שולם חלקית (₪{debt.paid.toLocaleString()})</span>}</div>}</td>
+                                                        <td className="px-6 py-5 text-left"><div className="flex gap-3 justify-end items-center">{!debt.isFullyPaid && <button onClick={() => { setSelectedDebtForPayment(debt); setIsPaymentModalOpen(true); }} className="text-white bg-purple-600 px-4 py-1.5 rounded-lg font-black text-xs shadow-lg hover:bg-purple-700 transition-all">בצע החזר</button>}<button onClick={() => handleEditDebt(debt)} className="text-slate-300 hover:text-blue-500"><EditIcon className="w-5 h-5"/></button></div></td>
+                                                    </tr>
+                                                    {isExpanded && debt.payments && debt.payments.length > 0 && (
+                                                        <tr className="bg-slate-50/30"><td colSpan={9} className="px-6 py-4"><div className="bg-white rounded border border-slate-200 shadow-inner overflow-hidden"><table className="min-w-full text-xs text-right"><thead className="bg-slate-50 text-slate-500 font-bold uppercase"><tr><th className="px-4 py-2">תאריך</th><th className="px-4 py-2">סכום</th><th className="px-4 py-2">שיטה</th><th className="px-4 py-2">אסמכתא</th><th className="px-4 py-2">סטטוס</th><th className="px-4 py-2">הערה</th><th className="px-4 py-2"></th></tr></thead><tbody className="divide-y divide-slate-100">{debt.payments.map(p => (<tr key={p.id} className="hover:bg-slate-50 group"><td className="px-4 py-2">{new Date(p.date).toLocaleDateString('he-IL')}</td><td className="px-4 py-2 font-bold text-green-700">₪{p.amount.toLocaleString()}</td><td className="px-4 py-2">{p.method}</td><td className="px-4 py-2 font-mono">{p.reference || '-'}</td><td className="px-4 py-2"><button onClick={() => {const agCheck: AggregatedCheck = { uniqueId: p.id, type: 'OUTGOING', date: new Date(p.date), repaymentDate: p.repaymentDate ? new Date(p.repaymentDate) : new Date(p.date), amount: p.amount, reference: p.reference || '-', entityName: `חוב: ${debt.name}`, status: p.status || 'CLEARED', statusHistory: p.statusHistory || [], sources: [{ orderId: 'DEBT', orderNumber: 'DEBT', paymentId: p.id, sourceType: 'debt', debtId: debt.id, amount: p.amount }] }; setSelectedCheckForDebt({ check: agCheck, viewOnly: false });}} className={`px-2 py-0.5 rounded text-[10px] font-bold shadow-sm ${['BOUNCED', 'CANCELED', 'RETURNED'].includes(p.status || '') ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>{p.status === 'CLEARED' ? 'נפרע' : p.status === 'PENDING' ? 'ממתין' : p.status || 'שולם'}</button></td><td className="px-4 py-2 text-slate-500 max-w-xs truncate">{p.note || '-'}</td><td className="px-4 py-2 text-left"><button onClick={() => handleDeleteDebtPayment(debt.id, p.id)} className="text-red-300 hover:text-red-500 p-1 opacity-0 group-hover:opacity-100 transition-opacity"><DeleteIcon className="w-3.5 h-3.5"/></button></td></tr>))}</tbody></table></div></td></tr>
+                                                    )}
+                                                </React.Fragment>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    )}
+
+                    {activeTab === 'RECEIVABLES' && (
+                        <div className="text-start">
+                            <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6">
+                                <div>
+                                    <h3 className="text-xl font-black text-slate-800">חייבים (Accounts Receivable)</h3>
+                                    <p className="text-sm text-slate-500 mt-1">ניהול כספים שאמורים להיכנס לעסק (לא ממכירות שוטפות)</p>
+                                </div>
+                                <button onClick={() => handleAdd('RECEIVABLES')} className="flex items-center px-5 py-2.5 bg-indigo-600 text-white rounded-lg shadow-lg font-black hover:bg-indigo-700 transition-all"><PlusIcon className="w-5 h-5 me-2"/> הוסף חייב</button>
+                            </div>
+
+                            <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-200 mb-6 flex flex-col md:flex-row gap-4 items-center">
+                                <div className="relative flex-1 w-full">
+                                    <input 
+                                        type="text" 
+                                        placeholder="חיפוש חייב..." 
+                                        value={receivableSearch}
+                                        onChange={e => setReceivableSearch(e.target.value)}
+                                        className="w-full pl-10 pr-4 py-2 border border-slate-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 text-sm bg-white p-2"
+                                    />
+                                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400">
+                                        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
+                                    </div>
+                                </div>
+                                <div className="flex bg-slate-100 p-1 rounded-lg w-full md:w-auto overflow-x-auto">
+                                    <button onClick={() => setReceivableStatusFilter('OPEN')} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${receivableStatusFilter === 'OPEN' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>פתוחים</button>
+                                    <button onClick={() => setReceivableStatusFilter('OVERDUE')} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${receivableStatusFilter === 'OVERDUE' ? 'bg-white text-red-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>בפיגור</button>
+                                    <button onClick={() => setReceivableStatusFilter('ALL')} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${receivableStatusFilter === 'ALL' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>הכל</button>
+                                    <button onClick={() => setReceivableStatusFilter('PAID')} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${receivableStatusFilter === 'PAID' ? 'bg-white text-green-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>נגבו</button>
+                                </div>
+                            </div>
+
+                            <div className="border rounded-xl overflow-x-auto bg-white shadow-sm">
+                                <table className="min-w-full text-sm text-right">
+                                    <thead className="bg-slate-50 text-slate-500 font-black border-b uppercase text-[10px] tracking-widest text-center">
+                                        <tr><th className="px-6 py-4 w-12 text-right"></th><th className="px-6 py-4 text-right">שם החייב</th><th className="px-6 py-4">תאריך יצירה</th><th className="px-6 py-4">תאריך יעד לגבייה</th><th className="px-6 py-4">ברוטו</th><th className="px-6 py-4">יתרה לגבייה</th><th className="px-6 py-4"></th></tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-slate-100">
+                                        {filteredReceivables.map(rec => {
+                                            const isExpanded = expandedReceivables.has(rec.id);
+                                            return (
+                                                <React.Fragment key={rec.id}>
+                                                    <tr className={`hover:bg-slate-50 transition-colors ${rec.isFullyPaid ? 'opacity-60 bg-green-50/10' : ''}`}>
+                                                        <td className="px-6 py-5 text-center"><button onClick={() => toggleReceivableExpansion(rec.id)} className={`text-slate-400 hover:text-primary transition-transform ${isExpanded ? 'rotate-180' : ''}`}><svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7"/></svg></button></td>
+                                                        <td className="px-6 py-5 font-black text-slate-800"><div className="flex flex-col"><div className="flex items-center gap-2"><span>{rec.name}</span>{rec.isOverdue && <span className="text-[9px] bg-red-100 text-red-700 px-1 rounded font-black animate-pulse">בפיגור</span>}</div>{rec.description && <span className="text-[10px] text-slate-400 font-normal line-clamp-1">{rec.description}</span>}</div></td>
+                                                        <td className="px-6 py-5 text-slate-500 font-medium text-center">{new Date(rec.createdAt).toLocaleDateString('he-IL')}</td>
+                                                        <td className="px-6 py-5 text-slate-500 font-medium text-center"><span className={rec.isOverdue ? 'text-red-600 font-bold' : ''}>{new Date(rec.dueDate).toLocaleDateString('he-IL')}</span></td>
+                                                        <td className="px-6 py-5 font-black text-slate-900 text-center">₪{rec.gross.toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
+                                                        <td className="px-6 py-5 text-center">{rec.isFullyPaid ? <span className="text-green-600 font-black bg-green-50 px-3 py-1 rounded-full border border-green-100 text-xs">נגבה במלואו</span> : <div className="flex flex-col items-center"><span className="text-indigo-600 font-black text-lg leading-none">₪{rec.remaining.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>{rec.collected > 0.1 && <span className="text-[10px] text-green-600 font-bold mt-1">נגבה חלקית (₪{rec.collected.toLocaleString()})</span>}</div>}</td>
+                                                        <td className="px-6 py-5 text-left"><div className="flex gap-3 justify-end items-center">{!rec.isFullyPaid && <button onClick={() => { setSelectedReceivableForCollection(rec); setIsPaymentModalOpen(true); }} className="text-white bg-indigo-600 px-4 py-1.5 rounded-lg font-black text-xs shadow-lg hover:bg-indigo-700 transition-all">דווח גבייה</button>}<button onClick={() => handleEditReceivable(rec)} className="text-slate-300 hover:text-blue-500"><EditIcon className="w-5 h-5"/></button></div></td>
+                                                    </tr>
+                                                    {isExpanded && rec.payments && rec.payments.length > 0 && (
+                                                        <tr className="bg-slate-50/30"><td colSpan={7} className="px-6 py-4"><div className="bg-white rounded border border-slate-200 shadow-inner overflow-hidden"><table className="min-w-full text-xs text-right"><thead className="bg-slate-50 text-slate-500 font-bold uppercase"><tr><th className="px-4 py-2">תאריך קבלה</th><th className="px-4 py-2">סכום</th><th className="px-4 py-2">שיטה</th><th className="px-4 py-2">אסמכתא</th><th className="px-4 py-2">סטטוס</th><th className="px-4 py-2"></th></tr></thead><tbody className="divide-y divide-slate-100">{rec.payments.map(p => (<tr key={p.id} className="hover:bg-slate-50 group"><td className="px-4 py-2">{new Date(p.date).toLocaleDateString('he-IL')}</td><td className="px-4 py-2 font-bold text-green-700">₪{p.amount.toLocaleString()}</td><td className="px-4 py-2">{p.method}</td><td className="px-4 py-2 font-mono">{p.reference || '-'}</td><td className="px-4 py-2"><span className={`px-2 py-0.5 rounded text-[10px] font-bold shadow-sm ${['BOUNCED', 'CANCELED', 'RETURNED'].includes(p.status || '') ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>{p.status === 'CLEARED' ? 'תקין' : p.status === 'PENDING' ? 'ממתין' : p.status || 'נגבה'}</span></td><td className="px-4 py-2 text-left"><button onClick={() => handleDeleteReceivablePayment(rec.id, p.id)} className="text-red-300 hover:text-red-500 p-1 opacity-0 group-hover:opacity-100 transition-opacity"><DeleteIcon className="w-3.5 h-3.5"/></button></td></tr>))}</tbody></table></div></td></tr>
+                                                    )}
+                                                </React.Fragment>
+                                            );
+                                        })}
+                                        {filteredReceivables.length === 0 && (
+                                            <tr><td colSpan={7} className="px-6 py-20 text-center text-slate-400 font-medium">לא נמצאו חייבים התואמים את הסינון.</td></tr>
+                                        )}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    )}
+
+                    {activeTab === 'EQUITY' && (
+                        <div className="text-start">
+                             <div className="flex justify-between items-center mb-6">
+                                <h3 className="text-xl font-black text-slate-800">הון בעלים והשקעות</h3>
+                                <button onClick={() => handleAdd('EQUITY')} className="flex items-center px-5 py-2.5 bg-green-600 text-white rounded-lg shadow-lg font-black hover:bg-green-700 transition-all"><PlusIcon className="w-5 h-5 me-2"/> הוסף תנועת הון</button>
+                            </div>
+                            <div className="space-y-4">
+                                {equityByInvestor.map(inv => {
+                                    const isExpanded = expandedInvestors.has(inv.name);
                                     return (
-                                        <div key={index} className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden flex flex-col h-full">
-                                            {/* Card Header */}
-                                            <div className="bg-slate-50 p-4 border-b border-slate-100 flex justify-between items-start">
-                                                <div>
-                                                    <h4 className="font-bold text-lg text-slate-800">{investor.name}</h4>
-                                                    <span className="text-xs text-slate-500 bg-white px-2 py-0.5 rounded border border-slate-200">{investor.type}</span>
+                                        <div key={inv.name} className="bg-white border rounded-xl overflow-hidden shadow-sm">
+                                            <div onClick={() => toggleInvestorExpansion(inv.name)} className="p-5 flex justify-between items-center cursor-pointer hover:bg-slate-50 transition-colors">
+                                                <div className="flex items-center gap-4">
+                                                    <div className={`transform transition-transform ${isExpanded ? 'rotate-180' : ''}`}><svg className="w-5 h-5 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7"/></svg></div>
+                                                    <div><h4 className="font-black text-lg text-slate-800">{inv.name}</h4><p className="text-xs text-slate-500">{inv.type}</p></div>
                                                 </div>
-                                                <div className="p-2 bg-green-50 text-green-600 rounded-full">
-                                                    <TrendingUpIcon className="w-5 h-5" />
-                                                </div>
-                                            </div>
-
-                                            {/* Main Stats */}
-                                            <div className="p-5 flex-grow">
-                                                <div className="mb-6 text-center">
-                                                    <span className="text-sm text-slate-500 block mb-1">יתרת השקעה (חוב לבעלים)</span>
-                                                    <span className={`text-3xl font-bold ${balance >= 0 ? 'text-slate-800' : 'text-red-600'}`}>
-                                                        ₪{balance.toLocaleString()}
-                                                    </span>
-                                                </div>
-
-                                                <div className="grid grid-cols-2 gap-4 mb-4 text-sm">
-                                                    <div className="bg-green-50 p-3 rounded-lg text-center">
-                                                        <span className="block text-green-800 font-bold text-lg">₪{investor.totalInvested.toLocaleString()}</span>
-                                                        <span className="text-xs text-green-600">סה"כ הושקע</span>
-                                                    </div>
-                                                    <div className="bg-red-50 p-3 rounded-lg text-center">
-                                                        <span className="block text-red-800 font-bold text-lg">₪{investor.totalWithdrawn.toLocaleString()}</span>
-                                                        <span className="text-xs text-red-600">סה"כ נמשך/הוחזר</span>
-                                                    </div>
-                                                </div>
-
-                                                {/* Progress Bar */}
-                                                <div className="mb-2">
-                                                    <div className="flex justify-between text-xs text-slate-500 mb-1">
-                                                        <span>הוחזר עד כה</span>
-                                                        <span>{returnPercentage.toFixed(1)}%</span>
-                                                    </div>
-                                                    <div className="w-full bg-slate-100 rounded-full h-2">
-                                                        <div 
-                                                            className="bg-blue-500 h-2 rounded-full transition-all duration-1000" 
-                                                            style={{ width: `${Math.min(100, returnPercentage)}%` }}
-                                                        ></div>
-                                                    </div>
+                                                <div className="flex gap-10">
+                                                    <div className="text-center"><span className="block text-[10px] uppercase font-black text-slate-400">הזרמות הון</span><span className="font-black text-green-600">₪{inv.totalInvested.toLocaleString()}</span></div>
+                                                    <div className="text-center"><span className="block text-[10px] uppercase font-black text-slate-400">משיכות / החזר</span><span className="font-black text-red-600">₪{inv.totalWithdrawn.toLocaleString()}</span></div>
+                                                    <div className="text-center border-r pr-10"><span className="block text-[10px] uppercase font-black text-slate-400">יתרה נוכחית</span><span className="font-black text-xl text-primary">₪{(inv.totalInvested - inv.totalWithdrawn).toLocaleString()}</span></div>
                                                 </div>
                                             </div>
-
-                                            {/* Transactions History Expander */}
-                                            <div className="border-t border-slate-100">
-                                                <button 
-                                                    onClick={() => toggleInvestorExpansion(investor.name)}
-                                                    className="w-full flex justify-between items-center font-medium cursor-pointer p-3 bg-slate-50 hover:bg-slate-100 text-xs text-slate-600 transition-colors"
-                                                >
-                                                    <span>היסטוריית תנועות ({investor.transactions.length})</span>
-                                                    <span className={`transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`}>
-                                                        <svg fill="none" height="20" shapeRendering="geometricPrecision" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" viewBox="0 0 24 24" width="20"><path d="M6 9l6 6 6-6"></path></svg>
-                                                    </span>
-                                                </button>
-                                                
-                                                {isExpanded && (
-                                                    <div className="text-neutral-600 max-h-48 overflow-y-auto animate-fadeIn">
-                                                        <table className="min-w-full text-xs text-right">
-                                                            <tbody className="divide-y divide-slate-100">
-                                                                {investor.transactions.sort((a,b) => new Date(b.date).getTime() - new Date(a.date).getTime()).map(t => (
-                                                                    <tr key={t.id} className="hover:bg-white">
-                                                                        <td className="px-3 py-2 text-slate-500">{new Date(t.date).toLocaleDateString('he-IL')}</td>
-                                                                        <td className="px-3 py-2">
-                                                                            {t.description || '-'}
-                                                                            <button onClick={() => handleEditEquity(t)} className="ms-2 text-blue-400 hover:text-blue-600"><EditIcon className="w-3 h-3 inline"/></button>
-                                                                        </td>
-                                                                        <td className={`px-3 py-2 font-bold ${t.transactionType === 'WITHDRAWAL' ? 'text-red-600' : 'text-green-600'}`}>
-                                                                            {t.transactionType === 'WITHDRAWAL' ? '-' : '+'}₪{t.amount.toLocaleString()}
-                                                                        </td>
-                                                                        <td className="px-2 py-2 text-end">
-                                                                            <button onClick={() => handleDelete('EQUITY', t.id)} className="text-slate-300 hover:text-red-500 group p-1">
-                                                                                <DeleteIcon className="w-3 h-3 group-hover:scale-110"/>
-                                                                            </button>
-                                                                        </td>
-                                                                    </tr>
-                                                                ))}
-                                                            </tbody>
-                                                        </table>
-                                                    </div>
-                                                )}
-                                            </div>
+                                            {isExpanded && (
+                                                <div className="border-t bg-slate-50 p-5">
+                                                    <table className="min-w-full text-xs text-right">
+                                                        <thead className="text-slate-400 font-black uppercase"><tr><th className="px-4 py-2">תאריך</th><th className="px-4 py-2">סוג פעולה</th><th className="px-4 py-2">סכום</th><th className="px-4 py-2">תיאור</th><th className="px-4 py-2"></th></tr></thead>
+                                                        <tbody className="divide-y divide-slate-200">
+                                                            {inv.transactions.map(item => (
+                                                                <tr key={item.id}>
+                                                                    <td className="px-4 py-3">{new Date(item.date).toLocaleDateString('he-IL')}</td>
+                                                                    <td className="px-4 py-3"><span className={`px-2 py-1 rounded-full font-bold ${item.transactionType === 'DEPOSIT' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>{item.transactionType === 'DEPOSIT' ? 'הזרמה' : 'משיכה'}</span></td>
+                                                                    <td className="px-4 py-3 font-black">₪{item.amount.toLocaleString()}</td>
+                                                                    <td className="px-4 py-3 text-slate-500">{item.description}</td>
+                                                                    <td className="px-4 py-3 text-left"><div className="flex gap-2 justify-end"><button onClick={() => handleEditEquity(item)} className="text-slate-300 hover:text-blue-500"><EditIcon className="w-4 h-4"/></button><button onClick={() => handleDelete('EQUITY', item.id)} className="text-slate-300 hover:text-red-500"><DeleteIcon className="w-4 h-4"/></button></div></td>
+                                                                </tr>
+                                                            ))}
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                            )}
                                         </div>
                                     );
                                 })}
-                            </div>
-
-                            {/* Audit Log Section */}
-                            <div className="mt-12 border-t border-slate-200 pt-8">
-                                <div className="flex items-center gap-2 mb-4">
-                                    <LogIcon className="w-5 h-5 text-slate-500" />
-                                    <h3 className="text-lg font-bold text-slate-700">יומן פעולות ושינויים (Audit Log)</h3>
-                                </div>
-                                <div className="bg-white rounded-lg shadow-sm border border-slate-200 overflow-hidden">
-                                    {equityLogs.length === 0 ? (
-                                        <div className="p-8 text-center text-slate-500">
-                                            <p>טרם נרשמו פעולות ביומן.</p>
-                                        </div>
-                                    ) : (
-                                        <div className="overflow-x-auto">
-                                            <table className="min-w-full text-sm text-right">
-                                                <thead className="bg-slate-50 text-slate-500 font-medium border-b border-slate-200">
-                                                    <tr>
-                                                        <th className="px-6 py-3 w-40">תאריך ושעה</th>
-                                                        <th className="px-6 py-3 w-32">משתמש</th>
-                                                        <th className="px-6 py-3 w-24">פעולה</th>
-                                                        <th className="px-6 py-3 w-48">משקיע</th>
-                                                        <th className="px-6 py-3">פירוט שינויים</th>
-                                                        <th className="px-6 py-3 w-32">סכום (Snapshot)</th>
-                                                    </tr>
-                                                </thead>
-                                                <tbody className="divide-y divide-slate-100">
-                                                    {equityLogs.map((log) => (
-                                                        <tr key={log.id} className="hover:bg-slate-50 transition-colors">
-                                                            <td className="px-6 py-4 text-slate-500 whitespace-nowrap" dir="ltr">
-                                                                {new Date(log.timestamp).toLocaleString('he-IL')}
-                                                            </td>
-                                                            <td className="px-6 py-4 text-slate-600 font-medium">
-                                                                {log.user}
-                                                            </td>
-                                                            <td className="px-6 py-4">
-                                                                <span className={`px-2 py-1 rounded text-xs font-bold border ${
-                                                                    log.action === 'CREATE' ? 'bg-green-50 text-green-700 border-green-200' :
-                                                                    log.action === 'UPDATE' ? 'bg-blue-50 text-blue-700 border-blue-200' :
-                                                                    'bg-red-50 text-red-700 border-red-200'
-                                                                }`}>
-                                                                    {log.action === 'CREATE' ? 'יצירה' : log.action === 'UPDATE' ? 'עדכון' : 'מחיקה'}
-                                                                </span>
-                                                            </td>
-                                                            <td className="px-6 py-4 font-medium text-slate-800">
-                                                                {log.investorName}
-                                                            </td>
-                                                            <td className="px-6 py-4 text-slate-600">
-                                                                <div className="flex flex-col gap-1">
-                                                                    <span className="font-medium text-slate-900">{log.description}</span>
-                                                                    {log.changes && log.changes.length > 0 && (
-                                                                        <ul className="list-disc list-inside text-xs text-slate-500 bg-slate-100 p-2 rounded mt-1 border border-slate-200">
-                                                                            {log.changes.map((change, idx) => (
-                                                                                <li key={idx}>{change}</li>
-                                                                            ))}
-                                                                        </ul>
-                                                                    )}
-                                                                </div>
-                                                            </td>
-                                                            <td className="px-6 py-4 font-mono font-bold text-slate-700">
-                                                                ₪{log.amountSnapshot.toLocaleString()}
-                                                            </td>
-                                                        </tr>
-                                                    ))}
-                                                </tbody>
-                                            </table>
-                                        </div>
-                                    )}
-                                </div>
                             </div>
                         </div>
                     )}
                 </div>
             </div>
 
-            {/* Modal for Adding Items */}
             {isModalOpen && (
-                <Modal title={`${editingId ? 'עריכת' : 'הוספה ל-'} ${activeTab === 'FIXED' ? 'הוצאות קבועות' : activeTab === 'VARIABLE' ? 'הוצאות משתנות' : activeTab === 'LOANS' ? 'הלוואות' : activeTab === 'DEBTS' ? 'חובות' : 'הון והשקעות'}`} onClose={() => setIsModalOpen(false)}>
+                <Modal title={editingId ? 'עריכת פריט' : (activeTab === 'FIXED' ? 'הוצאה קבועה' : activeTab === 'VARIABLE' ? 'הוצאה משתנה' : activeTab === 'LOANS' ? 'הלוואה' : activeTab === 'DEBTS' ? 'חוב' : activeTab === 'RECEIVABLES' ? 'חייב חדש' : 'תנועת הון')} onClose={() => setIsModalOpen(false)} size="4xl">
                     <div className="space-y-4 text-start">
-                        {/* ... Fixed, Variable, Loans, Debts forms remain unchanged ... */}
                         {activeTab === 'FIXED' && (
-                            /* ... (Keeping existing Fixed form code) ... */
-                            <>
-                                <div>
-                                    <label className="block text-sm font-medium text-slate-700">שם ההוצאה</label>
-                                    <input type="text" value={fixedForm.name} onChange={e => setFixedForm({...fixedForm, name: e.target.value})} className="w-full border p-2 rounded mt-1" />
-                                </div>
-                                <div className="grid grid-cols-2 gap-4">
-                                    <div>
-                                        <label className="block text-sm font-medium text-slate-700">קטגוריה</label>
-                                        <input type="text" value={fixedForm.category} onChange={e => setFixedForm({...fixedForm, category: e.target.value})} className="w-full border p-2 rounded mt-1" />
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div className="md:col-span-2"><label className="block text-sm font-bold text-slate-700 mb-1">שם ההוצאה / הספק</label><input type="text" value={fixedForm.name || ''} onChange={e => setFixedForm({...fixedForm, name: e.target.value})} className="block w-full border-slate-300 rounded-md shadow-sm focus:ring-primary focus:border-primary sm:text-sm p-2 bg-white" placeholder="לדוג': ארנונה, בזק, מנורה..." /></div>
+                                <div><label className="block text-sm font-bold text-slate-700 mb-1">קטגוריה</label><input type="text" list="fixed-categories" value={fixedForm.category || ''} onChange={e => setFixedForm({...fixedForm, category: e.target.value})} className="block w-full border-slate-300 rounded-md shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /><datalist id="fixed-categories"><option value="תקשורת"/><option value="נדל''ן"/><option value="מיסים"/><option value="ביטוח"/><option value="שירותים מקצועיים"/></datalist></div>
+                                <div><label className="block text-sm font-bold text-slate-700 mb-1">יום חיוב (1-31)</label><input type="number" min="1" max="31" value={fixedForm.paymentDay || ''} onChange={e => setFixedForm({...fixedForm, paymentDay: parseInt(e.target.value)})} className="block w-full border-slate-300 rounded-md shadow-sm focus:ring-primary focus:border-primary sm:text-sm p-2 bg-white" /></div>
+                                <div><label className="block text-sm font-bold text-slate-700 mb-1">סכום חודשי (נטו)</label><input type="number" value={fixedForm.monthlyAmount || ''} onChange={e => setFixedForm({...fixedForm, monthlyAmount: parseFloat(e.target.value)})} className="block w-full border-slate-300 rounded-md shadow-sm focus:ring-primary focus:border-primary sm:text-sm p-2 bg-white" /></div>
+                                <div className="grid grid-cols-2 gap-2 mt-4"><label className="flex items-center gap-2 cursor-pointer bg-slate-50 p-2 rounded border border-slate-200"><input type="checkbox" checked={fixedForm.includesVat} onChange={e => setFixedForm({...fixedForm, includesVat: e.target.checked})} className="h-4 w-4 text-primary border-gray-300 rounded focus:ring-primary" disabled={fixedForm.isVatExempt} /><span className={`text-sm font-bold ${fixedForm.isVatExempt ? 'text-slate-400' : 'text-slate-700'}`}>הסכום שהוזן כולל מע"מ</span></label><label className="flex items-center gap-2 cursor-pointer bg-amber-50 p-2 rounded border border-amber-200"><input type="checkbox" checked={fixedForm.isVatExempt} onChange={e => setFixedForm({...fixedForm, isVatExempt: e.target.checked})} className="h-4 w-4 text-amber-600 border-amber-300 rounded focus:ring-amber-500" /><span className="text-sm font-bold text-amber-800">הוצאה פטורה ממע"מ</span></label></div>
+                                <div><label className="block text-sm font-bold text-slate-700 mb-1">אמצעי תשלום</label><select value={fixedForm.paymentMethod} onChange={e => setFixedForm({...fixedForm, paymentMethod: e.target.value as PaymentMethod})} className="block w-full border-slate-300 rounded-md shadow-sm focus:ring-primary focus:border-primary sm:text-sm bg-white p-2">{Object.values(PaymentMethod).map(m => <option key={m} value={m}>{m}</option>)}</select></div>
+                                <div><label className="block text-sm font-bold text-slate-700 mb-1">פרטי תשלום (כרטיס/חשבון)</label><input type="text" value={fixedForm.paymentDetails || ''} onChange={e => setFixedForm({...fixedForm, paymentDetails: e.target.value})} className="block w-full border-slate-300 rounded-md shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" placeholder="ויזה 1234, חשבון בנק..." /></div>
+                                {fixedForm.paymentMethod === PaymentMethod.CHECK && (
+                                    <div className="md:col-span-2 mt-4 space-y-4">
+                                        <CheckSeriesGenerator initialAmount={fixedForm.isVatExempt ? (fixedForm.monthlyAmount || 0) : (fixedForm.includesVat ? (fixedForm.monthlyAmount || 0) : (fixedForm.monthlyAmount || 0) * (1 + vatRate / 100))} onGenerated={(checks) => setFixedForm({ ...fixedForm, checks: [...(fixedForm.checks || []), ...checks] })} />
+                                        {fixedForm.checks && fixedForm.checks.length > 0 && (
+                                            <div className="bg-slate-50 border border-slate-200 rounded-lg p-4">
+                                                <div className="flex justify-between items-center mb-3"><h4 className="text-sm font-bold text-slate-700">עריכת רשימת צ'קים ({fixedForm.checks.length})</h4><button type="button" onClick={() => setFixedForm({ ...fixedForm, checks: [] })} className="text-[10px] text-red-500 font-bold hover:underline">נקה הכל</button></div>
+                                                <div className="max-h-60 overflow-y-auto space-y-2 custom-scrollbar pe-2">
+                                                    {fixedForm.checks.map((c, i) => (
+                                                        <div key={c.id || i} className="grid grid-cols-12 gap-2 items-center bg-white p-2 rounded shadow-sm border border-slate-100 group">
+                                                            <div className="col-span-1 text-[10px] font-bold text-slate-400">#{i+1}</div>
+                                                            <div className="col-span-3"><label className="text-[9px] text-slate-400 block">מספר צ'ק</label><input type="text" value={c.reference} onChange={(e) => handleUpdateFixedFormCheck(i, 'reference', e.target.value)} className="w-full text-xs p-1 border border-slate-300 rounded" /></div>
+                                                            <div className="col-span-3"><label className="text-[9px] text-slate-400 block">סכום</label><input type="number" value={c.amount} onChange={(e) => handleUpdateFixedFormCheck(i, 'amount', e.target.value)} className="w-full text-xs p-1 border border-slate-300 rounded font-bold text-indigo-600" /></div>
+                                                            <div className="col-span-4"><label className="text-[9px] text-slate-400 block">תאריך פירעון</label><input type="date" value={c.repaymentDate ? new Date(c.repaymentDate).toISOString().split('T')[0] : ''} onChange={(e) => handleUpdateFixedFormCheck(i, 'repaymentDate', e.target.value)} className="w-full text-xs p-1 border border-slate-300 rounded" /></div>
+                                                            <div className="col-span-1 text-center"><button type="button" onClick={() => handleRemoveCheckFromFixedForm(i)} className="text-red-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"><DeleteIcon className="w-4 h-4"/></button></div>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                                <button type="button" onClick={() => setFixedForm({ ...fixedForm, checks: [...(fixedForm.checks || []), { id: `sp_fix_${Date.now()}`, amount: fixedForm.monthlyAmount || 0, date: new Date(), repaymentDate: new Date(), method: PaymentMethod.CHECK, reference: '', status: 'PENDING' }] })} className="w-full mt-3 py-1.5 border border-dashed border-indigo-300 text-indigo-600 text-xs font-bold rounded hover:bg-indigo-50 transition-colors">+ הוסף צ'ק בודד לרשימה</button>
+                                            </div>
+                                        )}
                                     </div>
-                                    <div>
-                                        <label className="block text-sm font-medium text-slate-700">סכום חודשי</label>
-                                        <input type="number" value={fixedForm.monthlyAmount} onChange={e => setFixedForm({...fixedForm, monthlyAmount: Number(e.target.value)})} className="w-full border p-2 rounded mt-1" />
-                                    </div>
-                                </div>
-                                <div className="flex items-center mt-2 bg-slate-50 p-2 rounded border border-slate-200">
-                                    <input 
-                                        type="checkbox" 
-                                        id="includesVat"
-                                        checked={fixedForm.includesVat !== false} 
-                                        onChange={e => setFixedForm({...fixedForm, includesVat: e.target.checked})} 
-                                        className="h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary me-2"
-                                    />
-                                    <label htmlFor="includesVat" className="text-sm font-medium text-slate-700 cursor-pointer select-none">
-                                        הסכום כולל מע"מ?
-                                    </label>
-                                </div>
-                                
-                                <div>
-                                    <label className="block text-sm font-medium text-slate-700">יום חיוב בחודש</label>
-                                    <input type="number" max="31" min="1" value={fixedForm.paymentDay} onChange={e => setFixedForm({...fixedForm, paymentDay: Number(e.target.value)})} className="w-full border p-2 rounded mt-1" />
-                                </div>
-
-                                <div className="grid grid-cols-2 gap-4">
-                                    <div>
-                                        <label className="block text-sm font-medium text-slate-700">אמצעי תשלום</label>
-                                        <select 
-                                            value={fixedForm.paymentMethod} 
-                                            onChange={e => setFixedForm({...fixedForm, paymentMethod: e.target.value as PaymentMethod})} 
-                                            className="w-full border p-2 rounded mt-1 bg-white"
-                                        >
-                                            <option value="">בחר...</option>
-                                            {Object.values(PaymentMethod).map(pm => <option key={pm} value={pm}>{pm}</option>)}
-                                        </select>
-                                    </div>
-                                    <div>
-                                        <label className="block text-sm font-medium text-slate-700">פרטי תשלום (למשל 4 ספרות)</label>
-                                        <input type="text" value={fixedForm.paymentDetails || ''} onChange={e => setFixedForm({...fixedForm, paymentDetails: e.target.value})} className="w-full border p-2 rounded mt-1" placeholder="לדוג': ויזה 1234" />
-                                    </div>
-                                </div>
-
-                                <div className="grid grid-cols-2 gap-4">
-                                    <div>
-                                        <label className="block text-sm font-medium text-slate-700">תאריך תחילת שירות</label>
-                                        <input type="date" value={fixedForm.startDate ? new Date(fixedForm.startDate).toISOString().split('T')[0] : ''} onChange={e => setFixedForm({...fixedForm, startDate: new Date(e.target.value)})} className="w-full border p-2 rounded mt-1" />
-                                    </div>
-                                    <div>
-                                        <label className="block text-sm font-medium text-slate-700">תאריך סיום (אם ידוע/הסתיים)</label>
-                                        <input 
-                                            type="date" 
-                                            value={fixedForm.endDate ? new Date(fixedForm.endDate).toISOString().split('T')[0] : ''} 
-                                            onChange={e => setFixedForm({...fixedForm, endDate: e.target.value ? new Date(e.target.value) : undefined})} 
-                                            className="w-full border p-2 rounded mt-1" 
-                                        />
-                                        <p className="text-xs text-slate-500 mt-1">אם מוזן תאריך עבר, ההוצאה תעבור להיסטוריה ולא תחושב בחודשי.</p>
-                                    </div>
-                                </div>
-
-                                <div>
-                                    <label className="block text-sm font-medium text-slate-700">תיאור / הערות</label>
-                                    <input type="text" value={fixedForm.description} onChange={e => setFixedForm({...fixedForm, description: e.target.value})} className="w-full border p-2 rounded mt-1" />
-                                </div>
-                            </>
+                                )}
+                                <div><label className="block text-sm font-bold text-slate-700 mb-1">תאריך התחלה</label><input type="date" value={fixedForm.startDate ? new Date(fixedForm.startDate).toISOString().split('T')[0] : ''} onChange={e => setFixedForm({...fixedForm, startDate: new Date(e.target.value)})} className="block w-full border-slate-300 rounded-md shadow-sm focus:ring-primary focus:border-primary sm:text-sm p-2 bg-white" /></div>
+                                <div><label className="block text-sm font-bold text-slate-700 mb-1">תאריך סיום (אופציונלי)</label><input type="date" value={fixedForm.endDate ? new Date(fixedForm.endDate).toISOString().split('T')[0] : ''} onChange={e => setFixedForm({...fixedForm, endDate: e.target.value ? new Date(e.target.value) : undefined})} className="block w-full border-slate-300 rounded-md shadow-sm focus:ring-primary focus:border-primary sm:text-sm p-2 bg-white" /></div>
+                                <div className="md:col-span-2"><label className="block text-sm font-bold text-slate-700 mb-1">תיאור / הערות</label><textarea value={fixedForm.description || ''} onChange={e => setFixedForm({...fixedForm, description: e.target.value})} rows={2} className="block w-full border-slate-300 rounded-md shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
+                            </div>
                         )}
                         {activeTab === 'VARIABLE' && (
-                            /* ... (Keeping existing Variable form code) ... */
-                            <>
-                                <div><label className="block text-sm text-slate-600">שם ההוצאה</label><input type="text" value={variableForm.name} onChange={e => setVariableForm({...variableForm, name: e.target.value})} className="w-full border p-2 rounded mt-1" /></div>
-                                <div><label className="block text-sm text-slate-600">סכום</label><input type="number" value={variableForm.amount} onChange={e => setVariableForm({...variableForm, amount: Number(e.target.value)})} className="w-full border p-2 rounded mt-1" /></div>
-                                <div className="flex items-center mt-2 bg-slate-50 p-2 rounded border border-slate-200">
-                                    <input 
-                                        type="checkbox" 
-                                        id="varIncludesVat"
-                                        checked={variableForm.includesVat !== false} 
-                                        onChange={e => setVariableForm({...variableForm, includesVat: e.target.checked})} 
-                                        className="h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary me-2"
-                                    />
-                                    <label htmlFor="varIncludesVat" className="text-sm font-medium text-slate-700 cursor-pointer select-none">
-                                        הסכום כולל מע"מ?
-                                    </label>
-                                </div>
-                                <div><label className="block text-sm text-slate-600">תאריך</label><input type="date" value={variableForm.date ? new Date(variableForm.date).toISOString().split('T')[0] : ''} onChange={e => setVariableForm({...variableForm, date: new Date(e.target.value)})} className="w-full border p-2 rounded mt-1" /></div>
-                                <div><label className="block text-sm text-slate-600">קטגוריה</label><input type="text" value={variableForm.category} onChange={e => setVariableForm({...variableForm, category: e.target.value})} className="w-full border p-2 rounded mt-1" /></div>
-                                <div><label className="block text-sm text-slate-600">תיאור</label><input type="text" value={variableForm.description} onChange={e => setVariableForm({...variableForm, description: e.target.value})} className="w-full border p-2 rounded mt-1" /></div>
-                            </>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div className="md:col-span-2"><label className="block text-sm font-bold text-slate-700 mb-1">שם ההוצאה</label><input type="text" value={variableForm.name || ''} onChange={e => setVariableForm({...variableForm, name: e.target.value})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
+                                <div><label className="block text-sm font-bold text-slate-700 mb-1">קטגוריה</label><input type="text" value={variableForm.category || ''} onChange={e => setVariableForm({...variableForm, category: e.target.value})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
+                                <div><label className="block text-sm font-bold text-slate-700 mb-1">תאריך</label><input type="date" value={variableForm.date ? new Date(variableForm.date).toISOString().split('T')[0] : ''} onChange={e => setVariableForm({...variableForm, date: new Date(e.target.value)})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
+                                <div><label className="block text-sm font-bold text-slate-700 mb-1">סכום (נטו)</label><input type="number" value={variableForm.amount || ''} onChange={e => setVariableForm({...variableForm, amount: parseFloat(e.target.value)})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
+                                <div className="grid grid-cols-2 gap-2 mt-4"><label className="flex items-center gap-2 cursor-pointer bg-slate-50 p-2 rounded border border-slate-200"><input type="checkbox" checked={variableForm.includesVat} onChange={e => setVariableForm({...variableForm, includesVat: e.target.checked})} className="h-4 w-4 text-primary border-gray-300 rounded focus:ring-primary" disabled={variableForm.isVatExempt} /><span className={`text-sm font-bold ${variableForm.isVatExempt ? 'text-slate-400' : 'text-slate-700'}`}>הסכום שהוזן כולל מע"מ</span></label><label className="flex items-center gap-2 cursor-pointer bg-amber-50 p-2 rounded border border-amber-200"><input type="checkbox" checked={variableForm.isVatExempt} onChange={e => setVariableForm({...variableForm, isVatExempt: e.target.checked})} className="h-4 w-4 text-amber-600 border-amber-300 rounded focus:ring-amber-500" /><span className="text-sm font-bold text-amber-800">הוצאה פטורה ממע"מ</span></label></div>
+                                <div><label className="block text-sm font-bold text-slate-700 mb-1">אמצעי תשלום</label><select value={variableForm.paymentMethod} onChange={e => setVariableForm({...variableForm, paymentMethod: e.target.value as PaymentMethod})} className="mt-1 block w-full border-slate-300 rounded-md shadow-sm focus:border-primary focus:ring-primary sm:text-sm bg-white p-2">{Object.values(PaymentMethod).map(m => <option key={m} value={m}>{m}</option>)}</select></div>
+                                <div><label className="block text-sm font-bold text-slate-700 mb-1">פרטי תשלום (כרטיס/חשבון)</label><input type="text" value={variableForm.paymentDetails || ''} onChange={e => setVariableForm({...variableForm, paymentDetails: e.target.value})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" placeholder="ויזה 1234, חשבון בנק..." /></div>
+                                {variableForm.paymentMethod === PaymentMethod.CHECK && (
+                                    <div className="md:col-span-2 mt-4 space-y-4">
+                                        <CheckSeriesGenerator initialAmount={variableForm.isVatExempt ? (variableForm.amount || 0) : (variableForm.includesVat ? (variableForm.amount || 0) : (variableForm.amount || 0) * (1 + vatRate / 100))} onGenerated={(checks) => setVariableForm({ ...variableForm, checks: [...(variableForm.checks || []), ...checks] })} />
+                                        {variableForm.checks && variableForm.checks.length > 0 && (
+                                            <div className="bg-slate-50 border border-slate-200 rounded-lg p-4">
+                                                <div className="flex justify-between items-center mb-3"><h4 className="text-sm font-bold text-slate-700">עריכת רשימת צ'קים ({variableForm.checks.length})</h4><button type="button" onClick={() => setVariableForm({ ...variableForm, checks: [] })} className="text-[10px] text-red-500 font-bold hover:underline">נקה הכל</button></div>
+                                                <div className="max-h-60 overflow-y-auto space-y-2 custom-scrollbar pe-2">
+                                                    {variableForm.checks.map((c, i) => (
+                                                        <div key={c.id || i} className="grid grid-cols-12 gap-2 items-center bg-white p-2 rounded shadow-sm border border-slate-100 group">
+                                                            <div className="col-span-1 text-[10px] font-bold text-slate-400">#{i+1}</div>
+                                                            <div className="col-span-3"><label className="text-[9px] text-slate-400 block">מספר צ'ק</label><input type="text" value={c.reference} onChange={(e) => handleUpdateVariableFormCheck(i, 'reference', e.target.value)} className="w-full text-xs p-1 border border-slate-300 rounded" /></div>
+                                                            <div className="col-span-3"><label className="text-[9px] text-slate-400 block">סכום</label><input type="number" value={c.amount} onChange={(e) => handleUpdateVariableFormCheck(i, 'amount', e.target.value)} className="w-full text-xs p-1 border border-slate-300 rounded font-bold text-indigo-600" /></div>
+                                                            <div className="col-span-4"><label className="text-[9px] text-slate-400 block">תאריך פירעון</label><input type="date" value={c.repaymentDate ? new Date(c.repaymentDate).toISOString().split('T')[0] : ''} onChange={(e) => handleUpdateVariableFormCheck(i, 'repaymentDate', e.target.value)} className="w-full text-xs p-1 border border-slate-300 rounded" /></div>
+                                                            <div className="col-span-1 text-center"><button type="button" onClick={() => handleRemoveCheckFromVariableForm(i)} className="text-red-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"><DeleteIcon className="w-4 h-4"/></button></div>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                                <button type="button" onClick={() => setVariableForm({ ...variableForm, checks: [...(variableForm.checks || []), { id: `sp_var_${Date.now()}`, amount: variableForm.amount || 0, date: new Date(), repaymentDate: new Date(), method: PaymentMethod.CHECK, reference: '', status: 'PENDING' }] })} className="w-full mt-3 py-1.5 border border-dashed border-indigo-300 text-indigo-600 text-xs font-bold rounded hover:bg-indigo-50 transition-colors">+ הוסף צ'ק בודד לרשימה</button>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                                <div className="md:col-span-2"><label className="block text-sm font-bold text-slate-700 mb-1">תיאור / הערות</label><textarea value={variableForm.description || ''} onChange={e => setVariableForm({...variableForm, description: e.target.value})} rows={2} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
+                            </div>
                         )}
                         {activeTab === 'LOANS' && (
-                            /* ... (Keeping existing Loan form code) ... */
-                            <>
-                                <div><label className="block text-sm text-slate-600">שם הגוף המלווה</label><input type="text" value={loanForm.lenderName} onChange={e => setLoanForm({...loanForm, lenderName: e.target.value})} className="w-full border p-2 rounded mt-1" /></div>
-                                <div><label className="block text-sm text-slate-600">סכום הקרן (המקורי)</label><input type="number" value={loanForm.principalAmount} onChange={e => setLoanForm({...loanForm, principalAmount: Number(e.target.value)})} className="w-full border p-2 rounded mt-1" /></div>
-                                <div><label className="block text-sm text-slate-600">ריבית שנתית (%)</label><input type="number" step="0.1" value={loanForm.interestRate} onChange={e => setLoanForm({...loanForm, interestRate: Number(e.target.value)})} className="w-full border p-2 rounded mt-1" /></div>
-                                <div><label className="block text-sm text-slate-600">החזר חודשי קבוע</label><input type="number" value={loanForm.monthlyPayment} onChange={e => setLoanForm({...loanForm, monthlyPayment: Number(e.target.value)})} className="w-full border p-2 rounded mt-1" /></div>
-                                <div><label className="block text-sm text-slate-600">משך הלוואה (חודשים)</label><input type="number" value={loanForm.durationMonths} onChange={e => setLoanForm({...loanForm, durationMonths: Number(e.target.value)})} className="w-full border p-2 rounded mt-1" /></div>
-                                <div><label className="block text-sm text-slate-600">תשלומים שבוצעו עד כה</label><input type="number" value={loanForm.paymentsMade} onChange={e => setLoanForm({...loanForm, paymentsMade: Number(e.target.value)})} className="w-full border p-2 rounded mt-1" /></div>
-                                <div><label className="block text-sm text-slate-600">תאריך התחלה</label><input type="date" onChange={e => setLoanForm({...loanForm, startDate: new Date(e.target.value)})} className="w-full border p-2 rounded mt-1" /></div>
-                            </>
-                        )}
-                        {activeTab === 'DEBTS' && (
-                            /* ... (Keeping existing Debt form code) ... */
-                            <>
-                                <div><label className="block text-sm text-slate-600">שם החוב / נושה</label><input type="text" value={debtForm.name} onChange={e => setDebtForm({...debtForm, name: e.target.value})} className="w-full border p-2 rounded mt-1" /></div>
-                                <div><label className="block text-sm text-slate-600">סכום החוב</label><input type="number" value={debtForm.amount} onChange={e => setDebtForm({...debtForm, amount: Number(e.target.value)})} className="w-full border p-2 rounded mt-1" /></div>
-                                <div><label className="block text-sm text-slate-600">תאריך יעד לתשלום</label><input type="date" onChange={e => setDebtForm({...debtForm, dueDate: new Date(e.target.value)})} className="w-full border p-2 rounded mt-1" /></div>
-                                <div><label className="block text-sm text-slate-600">תיאור</label><input type="text" value={debtForm.description} onChange={e => setDebtForm({...debtForm, description: e.target.value})} className="w-full border p-2 rounded mt-1" /></div>
-                            </>
-                        )}
-                        {activeTab === 'EQUITY' && (
-                            <>
-                                <div><label className="block text-sm text-slate-600">שם המשקיע / שותף <span className="text-red-500">*</span></label><input type="text" value={equityForm.investorName} onChange={e => setEquityForm({...equityForm, investorName: e.target.value})} className="w-full border p-2 rounded mt-1" list="investors-list" required />
-                                    <datalist id="investors-list">
-                                        {equityByInvestor.map(inv => <option key={inv.name} value={inv.name} />)}
-                                    </datalist>
-                                </div>
-                                
-                                <div className="grid grid-cols-2 gap-4 bg-slate-50 p-3 rounded border border-slate-200 mt-2">
-                                    <label className={`flex items-center justify-center p-2 rounded cursor-pointer border transition-all ${equityForm.transactionType === 'DEPOSIT' ? 'bg-green-100 border-green-400 text-green-800 font-bold' : 'bg-white border-slate-300 text-slate-500'}`}>
-                                        <input 
-                                            type="radio" 
-                                            name="transType" 
-                                            className="hidden"
-                                            checked={equityForm.transactionType === 'DEPOSIT'}
-                                            onChange={() => setEquityForm({...equityForm, transactionType: 'DEPOSIT'})}
-                                        />
-                                        הפקדה / השקעה
-                                    </label>
-                                    <label className={`flex items-center justify-center p-2 rounded cursor-pointer border transition-all ${equityForm.transactionType === 'WITHDRAWAL' ? 'bg-red-100 border-red-400 text-red-800 font-bold' : 'bg-white border-slate-300 text-slate-500'}`}>
-                                        <input 
-                                            type="radio" 
-                                            name="transType" 
-                                            className="hidden"
-                                            checked={equityForm.transactionType === 'WITHDRAWAL'}
-                                            onChange={() => setEquityForm({...equityForm, transactionType: 'WITHDRAWAL'})}
-                                        />
-                                        משיכה / החזר
-                                    </label>
+                            <div className="space-y-6 text-start">
+                                <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-4">
+                                    <h4 className="text-sm font-black text-slate-700 border-b pb-2">נתוני יסוד להלוואה</h4>
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                        <div className="md:col-span-2"><label className="block text-sm font-bold text-slate-700 mb-1">שם המלווה / בנק</label><input type="text" value={loanForm.lenderName || ''} onChange={e => setLoanForm({...loanForm, lenderName: e.target.value})} className="block w-full border-slate-300 rounded-md shadow-sm focus:ring-primary focus:border-primary sm:text-sm p-2 bg-white" /></div>
+                                        <div><label className="block text-sm font-bold text-slate-700 mb-1">סכום הקרן (₪)</label><input type="number" value={loanForm.principalAmount || ''} onChange={e => setLoanForm({...loanForm, principalAmount: parseFloat(e.target.value)})} className="block w-full border-slate-300 rounded-md shadow-sm focus:ring-primary focus:border-primary sm:text-sm p-2 bg-white" /></div>
+                                        <div><label className="block text-sm font-bold text-slate-700 mb-1">ריבית שנתית (%)</label><input type="number" value={loanForm.interestRate || ''} onChange={e => setLoanForm({...loanForm, interestRate: parseFloat(e.target.value)})} className="block w-full border-slate-300 rounded-md shadow-sm focus:ring-primary focus:border-primary sm:text-sm p-2 bg-white" /></div>
+                                        <div><label className="block text-sm font-bold text-slate-700 mb-1">תקופה (חודשים)</label><input type="number" value={loanForm.durationMonths || ''} onChange={e => setLoanForm({...loanForm, durationMonths: parseInt(e.target.value)})} className="block w-full border-slate-300 rounded-md shadow-sm focus:ring-primary focus:border-primary sm:text-sm p-2 bg-white" /></div>
+                                        <div><label className="block text-sm font-bold text-slate-700 mb-1">תאריך התחלה</label><input type="date" value={loanForm.startDate ? new Date(loanForm.startDate).toISOString().split('T')[0] : ''} onChange={e => setLoanForm({...loanForm, startDate: new Date(e.target.value)})} className="block w-full border-slate-300 rounded-md shadow-sm focus:ring-primary focus:border-primary sm:text-sm p-2 bg-white" /></div>
+                                    </div>
                                 </div>
 
-                                <div><label className="block text-sm text-slate-600">סכום <span className="text-red-500">*</span></label><input type="number" value={equityForm.amount} onChange={e => setEquityForm({...equityForm, amount: Number(e.target.value)})} className="w-full border p-2 rounded mt-1" required /></div>
-                                <div><label className="block text-sm text-slate-600">תאריך</label><input type="date" value={equityForm.date ? new Date(equityForm.date).toISOString().split('T')[0] : ''} onChange={e => setEquityForm({...equityForm, date: new Date(e.target.value)})} className="w-full border p-2 rounded mt-1" /></div>
-                                
-                                <div><label className="block text-sm text-slate-600">סוג משקיע</label>
-                                    <select value={equityForm.type} onChange={e => setEquityForm({...equityForm, type: e.target.value as any})} className="w-full border p-2 rounded mt-1">
-                                        <option value="הון בעלים">הון בעלים</option>
-                                        <option value="השקעה חיצונית">השקעה חיצונית</option>
-                                    </select>
+                                <div className="bg-indigo-50 p-4 rounded-xl border border-indigo-100 flex flex-col md:flex-row justify-between items-center gap-4">
+                                    <div>
+                                        <h4 className="text-xs font-black text-indigo-700 uppercase">החזר חודשי מחושב (שפיצר)</h4>
+                                        <div className="flex items-baseline gap-2 mt-1">
+                                            <span className="text-3xl font-black text-indigo-900">₪{(loanForm.monthlyPayment || 0).toLocaleString()}</span>
+                                            <span className="text-xs text-indigo-500 font-bold">לחודש</span>
+                                        </div>
+                                    </div>
+                                    <div className="flex gap-2">
+                                        <button 
+                                            type="button" 
+                                            onClick={() => setShowLoanPreview(!showLoanPreview)}
+                                            className="px-4 py-2 bg-white border border-indigo-200 text-indigo-700 rounded-lg text-sm font-bold shadow-sm hover:bg-indigo-100 transition-all flex items-center gap-2"
+                                        >
+                                            <LogIcon className="w-4 h-4"/>
+                                            {showLoanPreview ? 'הסתר תצוגה מקדימה' : 'תצוגה מקדימה של הלוח'}
+                                        </button>
+                                    </div>
                                 </div>
-                                <div><label className="block text-sm text-slate-600">תיאור/מטרה</label><input type="text" value={equityForm.description} onChange={e => setEquityForm({...equityForm, description: e.target.value})} className="w-full border p-2 rounded mt-1" placeholder="לדוג': הלוואת בעלים, דיבידנד..." /></div>
-                            </>
+
+                                {showLoanPreview && (
+                                    <div className="animate-fadeIn">
+                                        <AmortizationModal 
+                                            loan={{
+                                                ...loanForm,
+                                                id: 'preview',
+                                                schedule: generateSpitzerSchedule(
+                                                    loanForm.principalAmount || 0, 
+                                                    loanForm.interestRate || 0, 
+                                                    loanForm.durationMonths || 12, 
+                                                    loanForm.startDate || new Date(),
+                                                    loanForm.paymentsMade || 0
+                                                )
+                                            } as Loan}
+                                            onClose={() => setShowLoanPreview(false)}
+                                            onUpdateSchedule={() => {}}
+                                            isReadOnly={true}
+                                        />
+                                    </div>
+                                )}
+
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 border-t pt-4">
+                                    <div><label className="block text-sm font-bold text-slate-700 mb-1">תשלומים שכבר בוצעו</label><input type="number" value={loanForm.paymentsMade || ''} onChange={e => setLoanForm({...loanForm, paymentsMade: parseInt(e.target.value)})} className="block w-full border-slate-300 rounded-md shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
+                                    <div>
+                                        <label className="block text-sm font-bold text-slate-700 mb-1">מסמכי הלוואה (חוזה/לוח סילוקין)</label>
+                                        {!loanForm.amortizationFile ? (
+                                            <input type="file" onChange={handleLoanFileChange} className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100" />
+                                        ) : (
+                                            <div className="flex items-center justify-between p-2 bg-indigo-50 border border-indigo-200 rounded-lg">
+                                                <div className="flex items-center gap-2 overflow-hidden">
+                                                    <svg className="w-5 h-5 text-indigo-600 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+                                                    <span className="text-xs font-bold text-indigo-700 truncate">{loanForm.amortizationFile.fileName}</span>
+                                                </div>
+                                                <div className="flex gap-2 shrink-0">
+                                                    <button type="button" onClick={() => setViewingLoanDoc(loanForm.amortizationFile!)} className="text-[10px] bg-white border border-indigo-200 px-2 py-1 rounded font-bold text-indigo-600 hover:bg-indigo-100">צפה</button>
+                                                    <button type="button" onClick={() => setLoanForm({...loanForm, amortizationFile: undefined})} className="text-[10px] text-red-500 font-bold px-2 py-1 hover:bg-red-50 rounded">הסר</button>
+                                                </div>
+                                            </div>
+                                        )}
+                                        <p className="text-[10px] text-slate-400 mt-1">תומך בתמונות, PDF, וקבצי Office</p>
+                                    </div>
+                                    <div className="md:col-span-2"><label className="block text-sm font-bold text-slate-700 mb-1">תיאור / הערות</label><textarea value={loanForm.description || ''} onChange={e => setLoanForm({...loanForm, description: e.target.value})} rows={2} className="block w-full border-slate-300 rounded-md shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
+                                </div>
+                                <div className="bg-amber-50 p-3 rounded border border-amber-200 text-[10px] text-amber-800">
+                                    <strong>שים לב:</strong> שינוי של סכום הקרן או פריסת החודשים יעדכן אוטומטית את לוח הסילוקין בעת השמירה.
+                                </div>
+                            </div>
                         )}
-                        <button onClick={handleSave} className="w-full bg-primary text-white py-2 rounded hover:bg-indigo-700 mt-4">שמור</button>
+                        {activeTab === 'DEBTS' && (
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div className="md:col-span-2"><label className="block text-sm font-bold text-slate-700 mb-1">שם החוב / הספק</label><input type="text" value={debtForm.name || ''} onChange={e => setDebtForm({...debtForm, name: e.target.value})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:ring-primary focus:border-primary sm:text-sm p-2 bg-white" /></div>
+                                <div><label className="block text-sm font-bold text-slate-700 mb-1">תאריך יצירה</label><input type="date" value={debtForm.createdAt ? new Date(debtForm.createdAt).toISOString().split('T')[0] : ''} onChange={e => setDebtForm({...debtForm, createdAt: new Date(e.target.value)})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
+                                <div><label className="block text-sm font-bold text-slate-700 mb-1">תאריך יעד לתשלום</label><input type="date" value={debtForm.dueDate ? new Date(debtForm.dueDate).toISOString().split('T')[0] : ''} onChange={e => setDebtForm({...debtForm, dueDate: new Date(e.target.value)})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
+                                <div><label className="block text-sm font-bold text-slate-700 mb-1">סכום הקרן (נטו)</label><input type="number" value={debtForm.amount || ''} onChange={e => setDebtForm({...debtForm, amount: parseFloat(e.target.value)})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
+                                <div className="grid grid-cols-2 gap-2 mt-4"><label className="flex items-center gap-2 cursor-pointer bg-slate-50 p-2 rounded border border-slate-200"><input type="checkbox" checked={debtForm.includesVat ?? true} onChange={e => setDebtForm({...debtForm, includesVat: e.target.checked})} className="h-4 w-4 text-primary border-gray-300 rounded focus:ring-primary" disabled={debtForm.isVatExempt} /><span className={`text-sm font-bold ${debtForm.isVatExempt ? 'text-slate-400' : 'text-slate-700'}`}>הסכום שהוזן כולל מע"מ</span></label><label className="flex items-center gap-2 cursor-pointer bg-amber-50 p-2 rounded border border-amber-200"><input type="checkbox" checked={debtForm.isVatExempt} onChange={e => setDebtForm({...debtForm, isVatExempt: e.target.checked})} className="h-4 w-4 text-amber-600 border-amber-300 rounded focus:ring-amber-500" /><span className="text-sm font-bold text-amber-800">הוצאה פטורה ממע"מ</span></label></div>
+                                <div className="md:col-span-2"><label className="block text-sm font-bold text-slate-700 mb-1">תיאור / הערות</label><textarea value={debtForm.description || ''} onChange={e => setDebtForm({...debtForm, description: e.target.value})} rows={2} className="block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
+                            </div>
+                        )}
+                        {activeTab === 'RECEIVABLES' && (
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div className="md:col-span-2"><label className="block text-sm font-bold text-slate-700 mb-1">שם הגורם החייב</label><input type="text" value={receivableForm.name || ''} onChange={e => setReceivableForm({...receivableForm, name: e.target.value})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:ring-primary focus:border-primary sm:text-sm p-2 bg-white" /></div>
+                                <div><label className="block text-sm font-bold text-slate-700 mb-1">תאריך יצירה</label><input type="date" value={receivableForm.createdAt ? new Date(receivableForm.createdAt).toISOString().split('T')[0] : ''} onChange={e => setReceivableForm({...receivableForm, createdAt: new Date(e.target.value)})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
+                                <div><label className="block text-sm font-bold text-slate-700 mb-1">תאריך יעד לגבייה</label><input type="date" value={receivableForm.dueDate ? new Date(receivableForm.dueDate).toISOString().split('T')[0] : ''} onChange={e => setReceivableForm({...receivableForm, dueDate: new Date(e.target.value)})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
+                                <div><label className="block text-sm font-bold text-slate-700 mb-1">סכום החוב (נטו)</label><input type="number" value={receivableForm.amount || ''} onChange={e => setReceivableForm({...receivableForm, amount: parseFloat(e.target.value)})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
+                                <div className="grid grid-cols-2 gap-2 mt-4"><label className="flex items-center gap-2 cursor-pointer bg-slate-50 p-2 rounded border border-slate-200"><input type="checkbox" checked={receivableForm.includesVat ?? true} onChange={e => setReceivableForm({...receivableForm, includesVat: e.target.checked})} className="h-4 w-4 text-primary border-gray-300 rounded focus:ring-primary" disabled={receivableForm.isVatExempt} /><span className={`text-sm font-bold ${receivableForm.isVatExempt ? 'text-slate-400' : 'text-slate-700'}`}>הסכום שהוזן כולל מע"מ</span></label><label className="flex items-center gap-2 cursor-pointer bg-amber-50 p-2 rounded border border-amber-200"><input type="checkbox" checked={receivableForm.isVatExempt} onChange={e => setReceivableForm({...receivableForm, isVatExempt: e.target.checked})} className="h-4 w-4 text-amber-600 border-amber-300 rounded focus:ring-amber-500" /><span className="text-sm font-bold text-amber-800">החזר פטור ממע"מ</span></label></div>
+                                <div className="md:col-span-2"><label className="block text-sm font-bold text-slate-700 mb-1">תיאור / הערות</label><textarea value={receivableForm.description || ''} onChange={e => setReceivableForm({...receivableForm, description: e.target.value})} rows={2} className="block w-full border-slate-300 rounded-md shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
+                            </div>
+                        )}
+                        {activeTab === 'EQUITY' && (
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div className="md:col-span-2">
+                                    <label className="block text-sm font-bold text-slate-700 mb-1">שם המשקיע/בעלים</label>
+                                    <div className="flex gap-2">
+                                        {isNewInvestor ? (
+                                            <input 
+                                                type="text" 
+                                                value={equityForm.investorName || ''} 
+                                                onChange={e => setEquityForm({...equityForm, investorName: e.target.value})} 
+                                                className="flex-1 mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" 
+                                                placeholder="הזן שם משקיע חדש..."
+                                                required
+                                            />
+                                        ) : (
+                                            <select 
+                                                value={equityForm.investorName || ''} 
+                                                onChange={e => setEquityForm({...equityForm, investorName: e.target.value})} 
+                                                className="flex-1 mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white"
+                                                required
+                                            >
+                                                <option value="">בחר משקיע קיים...</option>
+                                                {uniqueInvestorNames.map(name => <option key={name} value={name}>{name}</option>)}
+                                            </select>
+                                        )}
+                                        <button 
+                                            type="button" 
+                                            onClick={() => setIsNewInvestor(!isNewInvestor)} 
+                                            className="mt-1 px-3 py-2 bg-slate-100 border border-slate-300 rounded text-xs font-bold text-slate-600 hover:bg-slate-200"
+                                        >
+                                            {isNewInvestor ? 'בחר מקיים' : 'משקיע חדש'}
+                                        </button>
+                                    </div>
+                                </div>
+                                <div><label className="block text-sm font-bold text-slate-700 mb-1">סוג השקעה</label><select value={equityForm.type} onChange={e => setEquityForm({...equityForm, type: e.target.value as any})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white"><option value="הון בעלים">הון בעלים</option><option value="השקעה חיצונית">השקעה חיצונית</option></select></div>
+                                <div><label className="block text-sm font-bold text-slate-700 mb-1">סכום (₪)</label><input type="number" value={equityForm.amount || ''} onChange={e => setEquityForm({...equityForm, amount: parseFloat(e.target.value)})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
+                                <div><label className="block text-sm font-bold text-slate-700 mb-1">סוג תנועה</label><select value={equityForm.transactionType} onChange={e => setEquityForm({...equityForm, transactionType: e.target.value as any})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white"><option value="DEPOSIT">הזרמה לקופה</option><option value="WITHDRAWAL">משיכה / החזר</option></select></div>
+                                <div><label className="block text-sm font-bold text-slate-700 mb-1">תאריך</label><input type="date" value={equityForm.date ? new Date(equityForm.date).toISOString().split('T')[0] : ''} onChange={e => setEquityForm({...equityForm, date: new Date(e.target.value)})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
+                                <div className="md:col-span-2"><label className="block text-sm font-bold text-slate-700 mb-1">תיאור</label><input type="text" value={equityForm.description || ''} onChange={e => setEquityForm({...equityForm, description: e.target.value})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
+                            </div>
+                        )}
+                        <div className="flex justify-end pt-6 border-t mt-4 gap-2">
+                            <button onClick={() => setIsModalOpen(false)} className="px-4 py-2 bg-slate-100 text-slate-700 rounded hover:bg-slate-200">ביטול</button>
+                            <button onClick={handleSave} className="px-6 py-2 bg-primary text-white rounded shadow hover:bg-indigo-700 font-bold">שמור שינויים</button>
+                        </div>
                     </div>
                 </Modal>
             )}
 
             {isPaymentModalOpen && selectedDebtForPayment && (
-                <Modal title={`ניהול החזרי חוב: ${selectedDebtForPayment.name}`} onClose={() => setIsPaymentModalOpen(false)}>
-                    <DebtPaymentModal 
-                        debt={selectedDebtForPayment} 
-                        onSavePayment={handleSaveDebtPayment}
-                        onClose={() => setIsPaymentModalOpen(false)}
+                <Modal title={`תשלום עבור: ${selectedDebtForPayment.name}`} onClose={() => setIsPaymentModalOpen(false)}>
+                    <DebtPaymentModal debt={selectedDebtForPayment} onSavePayment={handleSaveDebtPayment} onClose={() => setIsPaymentModalOpen(false)} vatRate={vatRate} />
+                </Modal>
+            )}
+
+            {isPaymentModalOpen && selectedReceivableForCollection && (
+                <Modal title={`קליטת גבייה: ${selectedReceivableForCollection.name}`} onClose={() => setIsPaymentModalOpen(false)}>
+                    <ReceivableCollectionModal receivable={selectedReceivableForCollection} onSavePayment={handleSaveReceivableCollection} onClose={() => setIsPaymentModalOpen(false)} vatRate={vatRate} />
+                </Modal>
+            )}
+
+            {isAmortizationModalOpen && selectedLoanForAmortization && (
+                <Modal title={`לוח סילוקין - ${selectedLoanForAmortization.lenderName}`} onClose={() => setIsAmortizationModalOpen(false)} size="5xl">
+                    <AmortizationModal 
+                        loan={selectedLoanForAmortization} 
+                        onClose={() => setIsAmortizationModalOpen(false)}
+                        onUpdateSchedule={handleUpdateLoanSchedule}
                     />
                 </Modal>
+            )}
+
+            {selectedCheckForDebt && (
+                <CheckActionModal 
+                    check={selectedCheckForDebt.check} 
+                    onClose={() => setSelectedCheckForDebt(null)} 
+                    onUpdateStatus={(check, newStatus, metadata) => {
+                        if (check.sources[0].sourceType === 'debt') {
+                            handleUpdateDebtPaymentStatus(check.sources[0].debtId!, check.uniqueId, newStatus, metadata?.note);
+                        } else if (check.sources[0].sourceType === 'receivable') {
+                            handleUpdateReceivablePaymentStatus(check.sources[0].receivableId!, check.uniqueId, newStatus, metadata?.note);
+                        }
+                    }} 
+                    viewOnlyHistory={selectedCheckForDebt.viewOnly} 
+                />
             )}
         </div>
     );

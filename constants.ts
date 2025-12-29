@@ -1,5 +1,5 @@
 
-import { Customer, Order, OrderStatus, PaymentStatus, Activity, Supplier, Employee, DealStage, PaymentMethod, QuoteStatus, LineItemUnit, OrderType, OrderStatusConfiguration, FixedExpense, VariableExpense, Loan, EquityInvestment, Debt, AttendanceRecord } from './types';
+import { Customer, Order, PaymentStatus, Activity, Supplier, Employee, DealStage, PaymentMethod, QuoteStatus, LineItemUnit, OrderType, OrderStatusConfiguration, FixedExpense, VariableExpense, Loan, EquityInvestment, Debt, AttendanceRecord } from './types';
 
 export const INITIAL_CUSTOMERS: Customer[] = [
     { 
@@ -84,37 +84,55 @@ export const INITIAL_EMPLOYEES: Employee[] = [
         name: 'אליס', 
         role: 'בעלים ומנהלת ראשית', 
         roleType: 'ADMIN',
+        // Fix: Added missing required properties for Employee interface
+        status: 'ACTIVE',
+        startDate: new Date('2023-01-01'),
         email: 'alice@company.com',
         phone: '050-1234567',
         jobScopePercentage: 100,
+        salaryType: 'HOURLY',
         hourlyWage: 100,
         employerCostPercentage: 25,
         hasSalesBonus: true,
-        salesBonusPercentage: 5
+        salesBonusPercentage: 5,
+        employmentHistory: [{ id: 'ep_1', startDate: new Date('2023-01-01') }],
+        timeline: []
     },
     { 
         id: 'emp_2', 
         name: 'בוב', 
         role: 'מעצב ראשי', 
         roleType: 'EMPLOYEE',
+        // Fix: Added missing required properties for Employee interface
+        status: 'ACTIVE',
+        startDate: new Date('2023-02-15'),
         email: 'bob@company.com',
         jobScopePercentage: 100,
+        salaryType: 'HOURLY',
         hourlyWage: 60,
         employerCostPercentage: 20,
         hasSalesBonus: false,
-        salesBonusPercentage: 0
+        salesBonusPercentage: 0,
+        employmentHistory: [{ id: 'ep_2', startDate: new Date('2023-02-15') }],
+        timeline: []
     },
     { 
         id: 'emp_3', 
         name: 'צ\'ארלי', 
         role: 'מנהל פרויקט', 
         roleType: 'MANAGER',
+        // Fix: Added missing required properties for Employee interface
+        status: 'ACTIVE',
+        startDate: new Date('2023-03-10'),
         email: 'charlie@company.com',
         jobScopePercentage: 80,
+        salaryType: 'HOURLY',
         hourlyWage: 75,
         employerCostPercentage: 22,
         hasSalesBonus: true,
-        salesBonusPercentage: 2
+        salesBonusPercentage: 2,
+        employmentHistory: [{ id: 'ep_3', startDate: new Date('2023-03-10') }],
+        timeline: []
     },
 ];
 
@@ -127,8 +145,9 @@ export const INITIAL_ORDERS: Order[] = [
         type: OrderType.REGULAR,
         customerId: 'cust_1', 
         employeeId: 'emp_2', 
-        orderStatus: OrderStatus.IN_GRAPHICS, 
+        orderStatus: 'בגרפיקה', 
         paymentStatus: PaymentStatus.UNPAID,
+        payments: [],
         lineItems: [
             { id: 'li_1', description: 'עיצוב דף הבית', quantity: 1, unitPrice: 2500, cost: 800, unitType: LineItemUnit.UNIT },
             { id: 'li_2', description: 'עיצוב דף אודות', quantity: 1, unitPrice: 1500, cost: 500, unitType: LineItemUnit.UNIT },
@@ -146,8 +165,8 @@ export const INITIAL_ORDERS: Order[] = [
             { id: 'tl_4', timestamp: new Date('2023-04-01T09:00:00Z'), user: 'בוב', type: 'LOG', content: 'הזמנה נוצרה' },
         ],
         statusHistory: [
-            { status: OrderStatus.QUOTE_SENT, startDate: new Date('2023-03-28') },
-            { status: OrderStatus.IN_GRAPHICS, startDate: new Date('2023-04-01') }
+            { status: 'נשלח הצעת מחיר', startDate: new Date('2023-03-28') },
+            { status: 'בגרפיקה', startDate: new Date('2023-04-01') }
         ],
     },
     { 
@@ -159,8 +178,9 @@ export const INITIAL_ORDERS: Order[] = [
         customerId: 'cust_2', 
         supplierId: 'supp_3',
         employeeId: 'emp_3', 
-        orderStatus: OrderStatus.INSTALLED, 
+        orderStatus: 'הותקן', 
         paymentStatus: PaymentStatus.PAID,
+        payments: [],
         lineItems: [
             { id: 'li_4', description: 'מחשב נייד "ProBook"', quantity: 1, unitPrice: 6000, cost: 4500, unitType: LineItemUnit.UNIT, supplierId: 'supp_3' },
             { id: 'li_5', description: 'מדפסת לייזר', quantity: 1, unitPrice: 800, cost: 650, unitType: LineItemUnit.UNIT, supplierId: 'supp_3' },
@@ -179,8 +199,8 @@ export const INITIAL_ORDERS: Order[] = [
             { id: 'tl_9', timestamp: new Date(), user: 'צ\'ארלי', type: 'LOG', content: 'הזמנה נוצרה' },
         ],
         statusHistory: [
-            { status: OrderStatus.IN_PRODUCTION, startDate: (() => { const d = new Date(); d.setDate(d.getDate() - 5); return d; })() },
-            { status: OrderStatus.INSTALLED, startDate: new Date() }
+            { status: 'ירד לביצוע', startDate: (() => { const d = new Date(); d.setDate(d.getDate() - 5); return d; })() },
+            { status: 'הותקן', startDate: new Date() }
         ],
     },
 ];
@@ -191,38 +211,21 @@ export const INITIAL_ACTIVITY: Activity[] = [
     { id: 'act_3', description: 'נוצרה הזמנה חדשה: "פיתוח אפליקציה למובייל"', timestamp: new Date('2023-04-05T09:00:00Z') },
 ]
 
-export const ORDER_STATUSES_ORDERED: OrderStatus[] = [
-    OrderStatus.NEW_LEAD,
-    OrderStatus.QUOTE_SENT,
-    OrderStatus.IN_GRAPHICS,
-    OrderStatus.IN_PRODUCTION,
-    OrderStatus.READY_FOR_PICKUP,
-    OrderStatus.READY_FOR_DELIVERY,
-    OrderStatus.READY_FOR_INSTALLATION,
-    OrderStatus.SHIPPED,
-    OrderStatus.DELIVERED_AT_FACTORY,
-    OrderStatus.INSTALLED,
-    OrderStatus.IN_COLLECTION,
-    OrderStatus.CANCELED_IRRELEVANT,
-    OrderStatus.CANCELED_EXPENSIVE,
-    OrderStatus.CANCELED_BOUGHT_ELSEWHERE,
-];
-
 export const INITIAL_ORDER_STATUS_CONFIGS: OrderStatusConfiguration[] = [
-    { id: 'st_1', label: 'ליד חדש', isActiveDeal: false, color: 'bg-blue-100 text-blue-800', orderIndex: 1, isSystem: true },
-    { id: 'st_2', label: 'נשלח הצעת מחיר', isActiveDeal: false, color: 'bg-purple-100 text-purple-800', orderIndex: 2, isSystem: true },
-    { id: 'st_3', label: 'בגרפיקה', isActiveDeal: true, color: 'bg-yellow-100 text-yellow-800', orderIndex: 3, isSystem: true },
-    { id: 'st_4', label: 'ירד לביצוע', isActiveDeal: true, color: 'bg-orange-100 text-orange-800', orderIndex: 4, isSystem: true },
-    { id: 'st_5', label: 'מוכן ממתין לאיסוף', isActiveDeal: true, color: 'bg-cyan-100 text-cyan-800', orderIndex: 5, isSystem: true },
-    { id: 'st_6', label: 'מוכן ממתין למשלוח', isActiveDeal: true, color: 'bg-cyan-100 text-cyan-800', orderIndex: 6, isSystem: true },
-    { id: 'st_7', label: 'מוכן ממתין להתקנה', isActiveDeal: true, color: 'bg-cyan-100 text-cyan-800', orderIndex: 7, isSystem: true },
-    { id: 'st_8', label: 'נשלח', isActiveDeal: true, color: 'bg-green-100 text-green-800', orderIndex: 8, isSystem: true },
-    { id: 'st_9', label: 'סופק במפעל', isActiveDeal: true, color: 'bg-green-100 text-green-800', orderIndex: 9, isSystem: true },
-    { id: 'st_10', label: 'הותקן', isActiveDeal: true, color: 'bg-green-100 text-green-800', orderIndex: 10, isSystem: true },
-    { id: 'st_11', label: 'בגביה', isActiveDeal: true, color: 'bg-emerald-100 text-emerald-800', orderIndex: 11, isSystem: true },
-    { id: 'st_12', label: 'בוטל / לא רלוונטי', isActiveDeal: false, color: 'bg-gray-100 text-gray-800', orderIndex: 12, isSystem: true },
-    { id: 'st_13', label: 'יקר', isActiveDeal: false, color: 'bg-gray-100 text-gray-800', orderIndex: 13, isSystem: true },
-    { id: 'st_14', label: 'קנה במקום אחר', isActiveDeal: false, color: 'bg-gray-100 text-gray-800', orderIndex: 14, isSystem: true },
+    { id: 'st_1', label: 'ליד חדש', isActiveDeal: false, isLead: true, isQuote: false, isCompleted: false, isLost: false, color: 'bg-blue-100 text-blue-800', orderIndex: 1, isSystem: true },
+    { id: 'st_2', label: 'נשלח הצעת מחיר', isActiveDeal: false, isLead: false, isQuote: true, isCompleted: false, isLost: false, color: 'bg-purple-100 text-purple-800', orderIndex: 2, isSystem: true },
+    { id: 'st_3', label: 'בגרפיקה', isActiveDeal: true, isLead: false, isQuote: false, isCompleted: false, isLost: false, color: 'bg-yellow-100 text-yellow-800', orderIndex: 3, isSystem: true },
+    { id: 'st_4', label: 'ירד לביצוע', isActiveDeal: true, isLead: false, isQuote: false, isCompleted: false, isLost: false, color: 'bg-orange-100 text-orange-800', orderIndex: 4, isSystem: true },
+    { id: 'st_5', label: 'מוכן ממתין לאיסוף', isActiveDeal: true, isLead: false, isQuote: false, isCompleted: false, isLost: false, color: 'bg-cyan-100 text-cyan-800', orderIndex: 5, isSystem: true },
+    { id: 'st_6', label: 'מוכן ממתין למשלוח', isActiveDeal: true, isLead: false, isQuote: false, isCompleted: false, isLost: false, color: 'bg-cyan-100 text-cyan-800', orderIndex: 6, isSystem: true },
+    { id: 'st_7', label: 'מוכן ממתין להתקנה', isActiveDeal: true, isLead: false, isQuote: false, isCompleted: false, isLost: false, color: 'bg-cyan-100 text-cyan-800', orderIndex: 7, isSystem: true },
+    { id: 'st_8', label: 'נשלח', isActiveDeal: true, isLead: false, isQuote: false, isCompleted: true, isLost: false, color: 'bg-green-100 text-green-800', orderIndex: 8, isSystem: true },
+    { id: 'st_9', label: 'סופק במפעל', isActiveDeal: true, isLead: false, isQuote: false, isCompleted: true, isLost: false, color: 'bg-green-100 text-green-800', orderIndex: 9, isSystem: true },
+    { id: 'st_10', label: 'הותקן', isActiveDeal: true, isLead: false, isQuote: false, isCompleted: true, isLost: false, color: 'bg-green-100 text-green-800', orderIndex: 10, isSystem: true },
+    { id: 'st_11', label: 'בגביה', isActiveDeal: true, isLead: false, isQuote: false, isCompleted: false, isLost: false, color: 'bg-emerald-100 text-emerald-800', orderIndex: 11, isSystem: true },
+    { id: 'st_12', label: 'בוטל / לא רלוונטי', isActiveDeal: false, isLead: false, isQuote: false, isCompleted: false, isLost: true, color: 'bg-gray-100 text-gray-800', orderIndex: 12, isSystem: true },
+    { id: 'st_13', label: 'יקר', isActiveDeal: false, isLead: false, isQuote: false, isCompleted: false, isLost: true, color: 'bg-gray-100 text-gray-800', orderIndex: 13, isSystem: true },
+    { id: 'st_14', label: 'קנה במקום אחר', isActiveDeal: false, isLead: false, isQuote: false, isCompleted: false, isLost: true, color: 'bg-gray-100 text-gray-800', orderIndex: 14, isSystem: true },
 ];
 
 export const PAYMENT_STATUSES_ORDERED: PaymentStatus[] = [
@@ -230,7 +233,7 @@ export const PAYMENT_STATUSES_ORDERED: PaymentStatus[] = [
     PaymentStatus.PAID,
 ];
 
-export const PAYMENT_TERMS_OPTIONS = ['תשלום מיידי', 'שוטף', 'שוטף 30', 'שוטף 45', 'שוטף 60', 'שוטף 90'];
+export const PAYMENT_TERMS_OPTIONS = ['תשלום מיידי', 'שוטף', 'שוטף 30', 'שוטף 45', 'שוטף 60', 'שוטף 90', 'עם סיום העבודה'];
 
 export const DEAL_STAGES_ORDERED: DealStage[] = [
     DealStage.LEAD,
@@ -339,7 +342,7 @@ export const INITIAL_LOANS: Loan[] = [
 ];
 
 export const INITIAL_DEBTS: Debt[] = [
-    { id: 'db_1', name: 'חוב ארנונה', amount: 3500, dueDate: new Date('2023-06-01'), description: 'חוב ישן בפריסה', payments: [] }
+    { id: 'db_1', name: 'חוב ארנונה', amount: 3500, createdAt: new Date('2023-01-01'), dueDate: new Date('2023-06-01'), description: 'חוב ישן בפריסה', payments: [] }
 ];
 
 export const INITIAL_EQUITY: EquityInvestment[] = [

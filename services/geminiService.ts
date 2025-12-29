@@ -1,10 +1,9 @@
 
 import { GoogleGenAI } from "@google/genai";
-// FIX: Added OrderStatus to the import.
-import { Customer, Order, OrderStatus } from '../types';
+import { Customer, Order, OrderStatusConfiguration } from '../types';
 import { calculateOrderTotals } from '../utils/calculations';
 
-export const generateDashboardSummary = async (customers: Customer[], orders: Order[]): Promise<string> => {
+export const generateDashboardSummary = async (customers: Customer[], orders: Order[], statusConfigs: OrderStatusConfiguration[]): Promise<string> => {
     const customerCount = customers.length;
     const orderCount = orders.length;
 
@@ -17,16 +16,13 @@ export const generateDashboardSummary = async (customers: Customer[], orders: Or
 
     const netProfit = totalRevenue - totalCost;
 
+    // Filter open orders dynamically based on flags
     const openOrdersValue = orders
-        .filter(o => ![
-            OrderStatus.SHIPPED, 
-            OrderStatus.DELIVERED_AT_FACTORY, 
-            OrderStatus.INSTALLED, 
-            OrderStatus.IN_COLLECTION,
-            OrderStatus.CANCELED_IRRELEVANT,
-            OrderStatus.CANCELED_EXPENSIVE,
-            OrderStatus.CANCELED_BOUGHT_ELSEWHERE,
-        ].includes(o.orderStatus as OrderStatus))
+        .filter(o => {
+            const config = statusConfigs.find(c => c.label === o.orderStatus);
+            // Open = active but not completed and not lost
+            return config?.isActiveDeal && !config?.isCompleted && !config?.isLost;
+        })
         .reduce((sum, o) => sum + calculateOrderTotals(o).totalAmount, 0);
 
     const prompt = `
@@ -47,11 +43,10 @@ export const generateDashboardSummary = async (customers: Customer[], orders: Or
     `;
 
     try {
-        // FIX: Initialized GoogleGenAI inside the function to prevent app crash if API key is missing at startup
-        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
+        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
         
         const response = await ai.models.generateContent({
-          model: 'gemini-2.5-flash',
+          model: 'gemini-3-flash-preview',
           contents: prompt,
         });
         return response.text || '';

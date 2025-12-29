@@ -1,51 +1,128 @@
 
-// Dictionary of holidays: "D-M-YYYY" -> "Holiday Name"
-// Note: In a real production app, use a library like 'hebcal' or 'kosher-zmanim'.
-const HOLIDAYS: Record<string, string> = {
-    // 2023
-    "5-4-2023": "ערב פסח",
-    "6-4-2023": "פסח",
-    "12-4-2023": "שביעי של פסח",
-    "25-4-2023": "יום הזיכרון",
-    "26-4-2023": "יום העצמאות",
-    "26-5-2023": "שבועות",
-    "16-9-2023": "ראש השנה",
-    "17-9-2023": "ראש השנה",
-    "25-9-2023": "יום כיפור",
-    "30-9-2023": "סוכות",
-    "7-10-2023": "שמחת תורה",
-    "8-12-2023": "חנוכה",
+/**
+ * Jewish Holiday Utility
+ * Detects holidays dynamically based on the Hebrew calendar using the browser's Intl engine.
+ */
 
-    // 2024
-    "22-4-2024": "ערב פסח",
-    "23-4-2024": "פסח",
-    "29-4-2024": "שביעי של פסח",
-    "13-5-2024": "יום הזיכרון",
-    "14-5-2024": "יום העצמאות",
-    "12-6-2024": "שבועות",
-    "3-10-2024": "ראש השנה",
-    "4-10-2024": "ראש השנה",
-    "12-10-2024": "יום כיפור",
-    "17-10-2024": "סוכות",
-    "24-10-2024": "שמחת תורה",
-    "26-12-2024": "חנוכה",
-
-    // 2025
-    "12-4-2025": "ערב פסח",
-    "13-4-2025": "פסח",
-    "19-4-2025": "שביעי של פסח",
-    "30-4-2025": "יום הזיכרון",
-    "1-5-2025": "יום העצמאות",
-    "2-6-2025": "שבועות",
-    "23-9-2025": "ראש השנה",
-    "24-9-2025": "ראש השנה",
-    "2-10-2025": "יום כיפור",
-    "7-10-2025": "סוכות",
-    "14-10-2025": "שמחת תורה",
-    "15-12-2025": "חנוכה",
+const HEBREW_MONTHS_VARIANTS: Record<string, string> = {
+    'תשרי': 'תשרי',
+    'חשון': 'חשוון',
+    'חשוון': 'חשוון',
+    'מרחשון': 'חשוון',
+    'מרחשוון': 'חשוון',
+    'כסלו': 'כסלו',
+    'כסלב': 'כסלו',
+    'טבת': 'טבת',
+    'שבט': 'שבט',
+    'אדר': 'אדר',
+    'אדר א': 'אדר א',
+    'אדר ב': 'אדר ב',
+    'ניסן': 'ניסן',
+    'אייר': 'אייר',
+    'סיון': 'סיוון',
+    'סיוון': 'סיוון',
+    'תמוז': 'תמוז',
+    'אב': 'אב',
+    'אלול': 'אלול'
 };
 
 export const getJewishHoliday = (date: Date): string | null => {
-    const key = `${date.getDate()}-${date.getMonth() + 1}-${date.getFullYear()}`;
-    return HOLIDAYS[key] || null;
+    try {
+        const parts = new Intl.DateTimeFormat('he-IL-u-ca-hebrew', { 
+            day: 'numeric', 
+            month: 'long' 
+        }).formatToParts(date);
+        
+        const day = parseInt(parts.find(p => p.type === 'day')?.value || '0', 10);
+        const monthRaw = parts.find(p => p.type === 'month')?.value || '';
+        const month = HEBREW_MONTHS_VARIANTS[monthRaw] || monthRaw;
+
+        // --- Tishrei ---
+        if (month === 'תשרי') {
+            if (day === 1 || day === 2) return "ראש השנה";
+            if (day === 3) return "צום גדליה";
+            if (day === 9) return "ערב יום כיפור";
+            if (day === 10) return "יום כיפור";
+            if (day === 14) return "ערב סוכות";
+            if (day >= 15 && day <= 21) return day === 21 ? "הושענא רבה" : "סוכות";
+            if (day === 22) return "שמחת תורה";
+        }
+
+        // --- Kislev & Tevet (Hanukkah) ---
+        // Precise logic: Hanukkah starts on 25 Kislev and lasts exactly 8 days.
+        if (month === 'כסלו' && day >= 25) {
+            return `חנוכה (יום ${day - 24})`;
+        }
+        
+        if (month === 'טבת') {
+            if (day <= 3) {
+                // To determine the exact day in Tevet, we must check if Kislev was 29 or 30 days.
+                // We check the Hebrew date of the day before 1st Tevet.
+                const firstOfTevet = new Date(date);
+                firstOfTevet.setDate(date.getDate() - (day - 1));
+                
+                const lastDayOfKislevDate = new Date(firstOfTevet);
+                lastDayOfKislevDate.setDate(firstOfTevet.getDate() - 1);
+                
+                const partsPrev = new Intl.DateTimeFormat('he-IL-u-ca-hebrew', { day: 'numeric' }).formatToParts(lastDayOfKislevDate);
+                const lastDayOfKislev = parseInt(partsPrev.find(p => p.type === 'day')?.value || '0', 10);
+                
+                // If Kislev had 30 days, 1st Tevet is Day 7. If 29 days, 1st Tevet is Day 6.
+                const dayOfHanukkah = (lastDayOfKislev === 30 ? 7 : 6) + (day - 1);
+                
+                if (dayOfHanukkah <= 8) {
+                    return `חנוכה (יום ${dayOfHanukkah})`;
+                }
+            }
+            if (day === 10) return "צום עשרה בטבת";
+        }
+
+        // --- Shevat ---
+        if (month === 'שבט' && day === 15) return "ט\"ו בשבט";
+
+        // --- Adar (Purim) ---
+        if (month === 'אדר' || month === 'אדר ב') {
+            if (day === 13) return "תענית אסתר";
+            if (day === 14) return "פורים";
+            if (day === 15) return "שושן פורים";
+        }
+        if (month === 'אדר א' && day === 14) return "פורים קטן";
+
+        // --- Nisan ---
+        if (month === 'ניסן') {
+            if (day === 14) return "ערב פסח";
+            if (day >= 15 && day <= 21) {
+                if (day === 15) return "פסח";
+                if (day === 21) return "שביעי של פסח";
+                return "חול המועד פסח";
+            }
+        }
+
+        // --- Iyar ---
+        if (month === 'אייר') {
+            if (day === 4) return "יום הזיכרון";
+            if (day === 5) return "יום העצמאות";
+            if (day === 18) return "ל\"ג בעומר";
+            if (day === 28) return "יום ירושלים";
+        }
+
+        // --- Sivan ---
+        if (month === 'סיוון') {
+            if (day === 5) return "ערב שבועות";
+            if (day === 6) return "שבועות";
+        }
+
+        // --- Tammuz & Av & Elul ---
+        if (month === 'תמוז' && day === 17) return "צום י\"ז בתמוז";
+        if (month === 'אב' && day === 9) return "ט' באב";
+        if (month === 'אב' && day === 15) return "ט\"ו באב";
+        if (month === 'אלול' && day === 29) return "ערב ראש השנה";
+
+        // Rosh Chodesh (Optional, but nice for CRM)
+        if (day === 1 || day === 30) return "ראש חודש";
+
+        return null;
+    } catch (e) {
+        return null;
+    }
 };

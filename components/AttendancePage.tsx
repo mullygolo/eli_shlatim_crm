@@ -1,9 +1,9 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
-import { Employee, AttendanceRecord, Order, OrderStatusConfiguration } from '../types';
-import { ClockIcon, EditIcon, PlusIcon, ImportIcon } from './icons';
+import { Employee, AttendanceRecord, Order, OrderStatusConfiguration, AttendanceStatus, PaymentMethod, Attachment, PayrollOverrideMap } from '../types';
+import { ClockIcon, EditIcon, PlusIcon, ImportIcon, DownloadIcon } from './icons';
 import Modal from './Modal';
-import { calculateOrderTotals } from '../utils/calculations';
+import { calculateOrderTotals, getEmployeeSalaryAtDate } from '../utils/calculations';
 import { getJewishHoliday } from '../utils/holidays';
 
 interface AttendancePageProps {
@@ -12,24 +12,87 @@ interface AttendancePageProps {
     setRecords: React.Dispatch<React.SetStateAction<AttendanceRecord[]>>;
     orders: Order[];
     statusConfigs: OrderStatusConfiguration[];
+    payrollOverrides: PayrollOverrideMap;
+    setPayrollOverrides: React.Dispatch<React.SetStateAction<PayrollOverrideMap>>;
 }
 
 // --- Helpers ---
 
-// Helper to convert decimal hours (e.g., 10.62) to HH:MM (e.g., 10:37)
 const formatDecimalHoursToTime = (decimalHours: number): string => {
     if (!decimalHours || isNaN(decimalHours)) return "0:00";
-    
     const totalMinutes = Math.round(decimalHours * 60);
     const hours = Math.floor(totalMinutes / 60);
     const minutes = totalMinutes % 60;
-    
     return `${hours}:${minutes.toString().padStart(2, '0')}`;
 };
 
-// Native Hebrew Date Formatter
+// Helper for live cumulative timer (HH:mm:ss)
+const formatMsToHMS = (ms: number): string => {
+    if (ms < 0) return "00:00:00";
+    const totalSeconds = Math.floor(ms / 1000);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+};
+
+const getGematriaDay = (day: number): string => {
+    if (day === 15) return 'ט"ו';
+    if (day === 16) return 'ט"ז';
+    
+    const units = ["", "א", "ב", "ג", "ד", "ה", "ו", "ז", "ח", "ט"];
+    const tens = ["", "י", "כ", "ל"];
+    
+    const t = Math.floor(day / 10);
+    const u = day % 10;
+    
+    const str = tens[t] + units[u];
+    if (str.length === 1) return str + "'";
+    return str.slice(0, -1) + '"' + str.slice(-1);
+};
+
+const HEBREW_MONTHS_MAP: Record<string, string> = {
+    'תשרי': 'תשרי',
+    'חשון': 'חשוון',
+    'חשוון': 'חשוון',
+    'מרחשון': 'חשוון',
+    'מרחשוון': 'חשוון',
+    'כסלו': 'כסלו',
+    'כסלב': 'כסלו',
+    'טבת': 'טבת',
+    'שבט': 'שבט',
+    'אדר': 'אדר',
+    'אדר א': "אדר א'",
+    'אדר b': "אדר ב'",
+    'ניסן': 'ניסן',
+    'אייר': 'אייר',
+    'סיון': 'סיוון',
+    'סיוון': 'סיוון',
+    'תמוז': 'תמוז',
+    'אב': 'אב',
+    'אלול': 'אלול'
+};
+
 const formatHebrewDate = (date: Date) => {
-    return new Intl.DateTimeFormat('he-IL', { calendar: 'hebrew', day: 'numeric', month: 'long' }).format(date);
+    try {
+        const parts = new Intl.DateTimeFormat('he-IL-u-ca-hebrew', { 
+            day: 'numeric', 
+            month: 'long' 
+        }).formatToParts(date);
+        
+        const dayStr = parts.find(p => p.type === 'day')?.value;
+        const monthStr = parts.find(p => p.type === 'month')?.value;
+        
+        if (!dayStr || !monthStr) return '';
+        
+        const dayNum = parseInt(dayStr, 10);
+        const gematriaDay = getGematriaDay(dayNum);
+        const normalizedMonth = HEBREW_MONTHS_MAP[monthStr] || monthStr;
+        
+        return `${gematriaDay} ב${normalizedMonth}`;
+    } catch (e) {
+        return date.toLocaleDateString('he-IL');
+    }
 };
 
 const getDaysInMonth = (month: number, year: number) => {
@@ -54,7 +117,7 @@ const exportToCSV = (filename: string, rows: any[][]) => {
         }).join(',');
     };
 
-    const csvContent = '\uFEFF' + rows.map(processRow).join('\n'); // Add BOM for Hebrew Excel support
+    const csvContent = '\uFEFF' + rows.map(processRow).join('\n');
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement("a");
     if (link.download !== undefined) {
@@ -68,6 +131,40 @@ const exportToCSV = (filename: string, rows: any[][]) => {
     }
 };
 
+// Component for viewing certificates
+const CertificateViewer: React.FC<{ 
+    file: Attachment; 
+    onClose: () => void 
+}> = ({ file, onClose }) => {
+    const isPdf = file.type === 'application/pdf' || file.fileName.toLowerCase().endsWith('.pdf');
+    const isImage = file.type.startsWith('image/');
+
+    return (
+        <Modal title={`אישור מחלה: ${file.fileName}`} onClose={onClose} size="4xl" zIndex={100}>
+            <div className="flex flex-col h-[70vh]">
+                <div className="flex-1 bg-slate-100 rounded overflow-hidden flex items-center justify-center p-2 relative">
+                    {isImage ? (
+                        <img src={file.dataUrl} alt="Sick Certificate" className="max-w-full max-h-full object-contain" />
+                    ) : isPdf ? (
+                        <iframe src={file.dataUrl} className="w-full h-full border-none bg-white" title="PDF Certificate" />
+                    ) : (
+                        <div className="text-center">
+                            <p className="mb-4">לא ניתן להציג קובץ זה בתצוגה מקדימה.</p>
+                            <a href={file.dataUrl} download={file.fileName} className="px-4 py-2 bg-primary text-white rounded font-bold">הורד קובץ</a>
+                        </div>
+                    )}
+                </div>
+                <div className="mt-4 flex justify-between items-center p-2 bg-slate-50 border rounded">
+                    <span className="text-sm font-medium text-slate-500">{file.fileName}</span>
+                    <a href={file.dataUrl} download={file.fileName} className="text-primary font-bold hover:underline flex items-center gap-1">
+                        <DownloadIcon className="w-4 h-4"/> הורד
+                    </a>
+                </div>
+            </div>
+        </Modal>
+    );
+};
+
 // Correction Request Modal
 const CorrectionRequestModal: React.FC<{ 
     date: Date;
@@ -75,18 +172,46 @@ const CorrectionRequestModal: React.FC<{
     onClose: () => void; 
     onSubmit: (data: any) => void 
 }> = ({ date, record, onClose, onSubmit }) => {
+    const isFuture = date > new Date();
+    const [reportType, setReportType] = useState<'PRESENT' | 'VACATION' | 'SICK'>(
+        isFuture ? 'VACATION' : 'PRESENT'
+    );
+    const [isWFH, setIsWFH] = useState(record?.status === 'WFH');
     const [start, setStart] = useState(record?.clockIn ? new Date(record.clockIn).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : '09:00');
     const [end, setEnd] = useState(record?.clockOut ? new Date(record.clockOut).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : '17:00');
-    const [breakMins, setBreakMins] = useState(record?.breakDurationMinutes || 0);
     const [reason, setReason] = useState('');
+    const [certificate, setCertificate] = useState<Attachment | undefined>(record?.certificate);
+    const [error, setError] = useState('');
+
+    const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        if (e.target.files && e.target.files[0]) {
+            const file = e.target.files[0];
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                if (event.target?.result) {
+                    setCertificate({
+                        id: `cert_${Date.now()}`,
+                        fileName: file.name,
+                        dataUrl: event.target.result as string,
+                        type: file.type,
+                    });
+                }
+            };
+            reader.readAsDataURL(file);
+        }
+    };
 
     const handleSubmit = () => {
-        if (!reason) { alert("חובה לפרט סיבה לשינוי/הוספה"); return; }
-        onSubmit({ start, end, breakMins, reason });
+        if (!reason.trim()) { 
+            setError("חובה למלא סיבה לבקשה"); 
+            return; 
+        }
+        const finalStatus = reportType === 'PRESENT' && isWFH ? 'WFH' : reportType;
+        onSubmit({ start, end, reason, reportType: finalStatus, certificate });
     };
 
     return (
-        <Modal title={record ? "תיקון דיווח קיים" : "דיווח חוסר / הוספה ידנית"} onClose={onClose} size="lg">
+        <Modal title={record ? "תיקון דיווח קיים" : "דיווח חוסר / תכנון חופשה"} onClose={onClose} size="lg">
             <div className="space-y-4 text-start">
                 <div className="bg-blue-50 p-3 rounded border border-blue-100">
                     <p className="text-sm text-blue-800 font-bold">
@@ -94,49 +219,129 @@ const CorrectionRequestModal: React.FC<{
                     </p>
                     <p className="text-xs text-blue-600">{formatHebrewDate(date)}</p>
                 </div>
-                
-                <div className="grid grid-cols-2 gap-4">
-                    <div>
-                        <label className="block text-sm font-medium text-slate-700">כניסה</label>
-                        <input type="time" value={start} onChange={e => setStart(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary" />
-                    </div>
-                    <div>
-                        <label className="block text-sm font-medium text-slate-700">יציאה</label>
-                        <input type="time" value={end} onChange={e => setEnd(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary" />
-                    </div>
-                    <div>
-                        <label className="block text-sm font-medium text-slate-700">זמן הפסקה (דקות)</label>
-                        <input type="number" value={breakMins} onChange={e => setBreakMins(Number(e.target.value))} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary" />
-                    </div>
-                </div>
+
                 <div>
-                    <label className="block text-sm font-medium text-slate-700">סיבה לבקשה</label>
-                    <textarea value={reason} onChange={e => setReason(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary" rows={3} placeholder="לדוג': שכחתי להחתים, הייתי בחופש, מחלה..." />
+                    <label className="block text-sm font-bold text-slate-700 mb-2">סוג הדיווח</label>
+                    <div className="flex gap-2">
+                        {!isFuture && (
+                            <button 
+                                onClick={() => setReportType('PRESENT')} 
+                                className={`flex-1 py-2 px-3 rounded-md border text-sm font-bold transition-all ${reportType === 'PRESENT' ? 'bg-indigo-600 text-white border-indigo-600 shadow-sm' : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50'}`}
+                            >
+                                נוכחות
+                            </button>
+                        )}
+                        <button 
+                            onClick={() => setReportType('VACATION')} 
+                            className={`flex-1 py-2 px-3 rounded-md border text-sm font-bold transition-all ${reportType === 'VACATION' ? 'bg-amber-500 text-white border-amber-600 shadow-sm' : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50'}`}
+                        >
+                            חופשה
+                        </button>
+                        <button 
+                            onClick={() => setReportType('SICK')} 
+                            className={`flex-1 py-2 px-3 rounded-md border text-sm font-bold transition-all ${reportType === 'SICK' ? 'bg-rose-500 text-white border-rose-600 shadow-sm' : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50'}`}
+                        >
+                            מחלה
+                        </button>
+                    </div>
                 </div>
+                
+                {reportType === 'PRESENT' && (
+                    <div className="space-y-4">
+                        <div className="flex items-center gap-2 bg-indigo-50 p-3 rounded-lg border border-indigo-100">
+                            <input 
+                                type="checkbox" 
+                                id="modalWfhToggle" 
+                                checked={isWFH} 
+                                onChange={e => setIsWFH(e.target.checked)}
+                                className="w-5 h-5 text-primary border-slate-300 rounded focus:ring-primary"
+                            />
+                            <label htmlFor="modalWfhToggle" className="text-sm font-bold text-indigo-800 cursor-pointer select-none flex items-center gap-1">
+                                🏠 עבודה מהבית (WFH)
+                            </label>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-4">
+                            <div>
+                                <label className="block text-sm font-medium text-slate-700">שעת כניסה</label>
+                                <input type="time" value={start} onChange={e => setStart(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary" />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-slate-700">שעת יציאה</label>
+                                <input type="time" value={end} onChange={e => setEnd(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary" />
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {reportType === 'SICK' && (
+                    <div className="bg-rose-50 p-4 rounded-lg border border-rose-200 space-y-3">
+                        <h4 className="text-sm font-bold text-rose-800 flex items-center gap-2">
+                             📄 צירוף אישור מחלה
+                        </h4>
+                        <div className="flex items-center gap-3">
+                            <label className="cursor-pointer bg-white border border-rose-300 text-rose-600 px-4 py-2 rounded-md text-sm font-bold hover:bg-rose-100 transition-colors shadow-sm">
+                                {certificate ? 'שנה קובץ' : 'בחר קובץ (PDF/תמונה)'}
+                                <input type="file" className="hidden" accept="image/*,.pdf" onChange={handleFileChange} />
+                            </label>
+                            {certificate && (
+                                <div className="flex-1 flex items-center justify-between text-xs text-slate-600 bg-white/50 p-1.5 rounded border border-rose-100">
+                                    <span className="truncate max-w-[150px]">{certificate.fileName}</span>
+                                    <button type="button" onClick={() => setCertificate(undefined)} className="text-rose-600 font-bold px-1 hover:underline">מחק</button>
+                                </div>
+                            )}
+                        </div>
+                        <p className="text-[10px] text-rose-600 font-medium">מומלץ לצרף אישור רפואי רשמי לצורך זיכוי ימי מחלה ע"י המנהל.</p>
+                    </div>
+                )}
+
+                <div>
+                    <label className="block text-sm font-bold text-slate-700">
+                        סיבה לבקשה <span className="text-red-500">*</span>
+                    </label>
+                    <textarea 
+                        value={reason} 
+                        onChange={e => { setReason(e.target.value); setError(''); }} 
+                        className={`mt-1 block w-full rounded-md shadow-sm focus:border-primary focus:ring-primary ${error ? 'border-red-500 bg-red-50' : 'border-slate-300'}`} 
+                        rows={3} 
+                        placeholder="פרט את סיבת הדיווח (לדוגמה: מחלה, חופשה שנתית, שכחתי להחתים...)" 
+                    />
+                    {error && <p className="text-xs text-red-600 font-bold mt-1">{error}</p>}
+                </div>
+
                 <div className="flex justify-end pt-4 border-t border-slate-100 mt-2">
                     <button onClick={onClose} className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-md me-2">ביטול</button>
-                    <button onClick={handleSubmit} className="bg-primary text-white px-4 py-2 rounded-md hover:bg-indigo-700 shadow-sm">שלח לאישור</button>
+                    <button onClick={handleSubmit} className="bg-primary text-white px-4 py-2 rounded-md hover:bg-indigo-700 shadow-sm font-bold">שלח לאישור</button>
                 </div>
             </div>
         </Modal>
     );
 };
 
-const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, setRecords, orders, statusConfigs }) => {
+const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, setRecords, orders, statusConfigs, payrollOverrides, setPayrollOverrides }) => {
     const [currentEmployeeId, setCurrentEmployeeId] = useState<string>(employees[0]?.id || '');
     const [activeTab, setActiveTab] = useState<'MY_PORTAL' | 'ADMIN_DASHBOARD'>('MY_PORTAL');
-    
-    // Filters (Shared for My Portal History and Admin)
     const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth() + 1);
     const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
-    
-    // Correction State
     const [correctionModalOpen, setCorrectionModalOpen] = useState(false);
     const [selectedDateForCorrection, setSelectedDateForCorrection] = useState<Date | null>(null);
     const [recordForCorrection, setRecordForCorrection] = useState<AttendanceRecord | undefined>(undefined);
-
-    // Live Clock
     const [currentTime, setCurrentTime] = useState(new Date());
+    const [isWFH, setIsWFH] = useState(false);
+    const [viewingCertificate, setViewingCertificate] = useState<Attachment | null>(null);
+
+    // Dynamic Year List: Start from 2023 up to current year + 1
+    const availableYears = useMemo(() => {
+        const startYear = 2023;
+        const currentYear = new Date().getFullYear();
+        const endYear = currentYear + 1;
+        const years = [];
+        for (let y = startYear; y <= endYear; y++) {
+            years.push(y);
+        }
+        return years;
+    }, []);
+
     useEffect(() => {
         const timer = setInterval(() => setCurrentTime(new Date()), 1000);
         return () => clearInterval(timer);
@@ -145,8 +350,6 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
     const currentEmployee = employees.find(e => e.id === currentEmployeeId);
     const isManager = currentEmployee?.roleType === 'ADMIN' || currentEmployee?.roleType === 'MANAGER';
 
-    // --- Logic: Clock In/Out (Multiple Shifts Support) ---
-    
     const todaysRecords = useMemo(() => {
         const todayStr = new Date().toDateString();
         return records
@@ -154,44 +357,41 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
             .sort((a, b) => new Date(a.clockIn || 0).getTime() - new Date(b.clockIn || 0).getTime());
     }, [records, currentEmployeeId]);
 
-    const lastRecord = todaysRecords.length > 0 ? todaysRecords[todaysRecords.length - 1] : null;
-    const isClockedIn = lastRecord && !lastRecord.clockOut;
+    const activeRecord = todaysRecords.find(r => !r.clockOut);
+    const isClockedIn = !!activeRecord;
+
+    // LIVE Shift Duration Logic
+    const liveDuration = useMemo(() => {
+        if (!activeRecord?.clockIn) return "00:00:00";
+        const startMs = new Date(activeRecord.clockIn).getTime();
+        const diffMs = currentTime.getTime() - startMs;
+        return formatMsToHMS(diffMs);
+    }, [activeRecord, currentTime]);
 
     const handleClockAction = (action: 'IN' | 'OUT') => {
         const now = new Date();
-        
         if (action === 'IN') {
-            // Only allow clock in if no records exist OR last record is closed
-            if (lastRecord && !lastRecord.clockOut) {
-                alert("יש לסגור משמרת קודמת לפני פתיחת חדשה.");
-                return;
-            }
-
+            if (activeRecord) return; // Already clocked in
             const newRecord: AttendanceRecord = {
                 id: `att_${Date.now()}`,
                 employeeId: currentEmployeeId,
                 date: now,
                 clockIn: now,
-                breakDurationMinutes: 0,
                 totalHours: 0,
-                status: 'PRESENT',
+                status: isWFH ? 'WFH' : 'PRESENT',
             };
             setRecords(prev => [...prev, newRecord]);
-        } else {
-            // Clock Out
-            if (!lastRecord || lastRecord.clockOut) return;
+        } else if (action === 'OUT') {
+            if (!activeRecord) return;
+            let updatedRecord = { ...activeRecord, clockOut: now };
             
-            const updatedRecord = { ...lastRecord, clockOut: now };
             if (updatedRecord.clockIn) {
                 const durationMs = now.getTime() - new Date(updatedRecord.clockIn).getTime();
-                updatedRecord.totalHours = Math.max(0, (durationMs / (1000 * 60 * 60)) - (updatedRecord.breakDurationMinutes / 60));
+                updatedRecord.totalHours = Math.max(0, (durationMs / (1000 * 60 * 60)));
             }
-            
-            setRecords(prev => prev.map(r => r.id === lastRecord.id ? updatedRecord : r));
+            setRecords(prev => prev.map(r => r.id === activeRecord.id ? updatedRecord : r));
         }
     };
-
-    // --- Logic: Correction Request ---
 
     const openCorrectionModal = (date: Date, record?: AttendanceRecord) => {
         setSelectedDateForCorrection(date);
@@ -202,152 +402,424 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
     const handleCorrectionSubmit = (data: any) => {
         if (!selectedDateForCorrection) return;
 
-        // Parse times relative to the selected date
         const [startH, startM] = data.start.split(':');
         const [endH, endM] = data.end.split(':');
-        
         const reqIn = new Date(selectedDateForCorrection); 
         reqIn.setHours(parseInt(startH), parseInt(startM), 0, 0);
-        
         const reqOut = new Date(selectedDateForCorrection); 
         reqOut.setHours(parseInt(endH), parseInt(endM), 0, 0);
 
+        const recordStatus: AttendanceStatus = 'PENDING_APPROVAL';
+        const isPresence = data.reportType === 'PRESENT' || data.reportType === 'WFH';
+
         if (recordForCorrection) {
-            // Updating existing record
             const updatedRecord: AttendanceRecord = {
                 ...recordForCorrection,
-                status: 'PENDING_APPROVAL',
+                status: recordStatus,
                 correctionRequest: {
                     requestedClockIn: reqIn,
                     requestedClockOut: reqOut,
-                    requestedBreak: data.breakMins,
-                    reason: data.reason
+                    requestedStatus: data.reportType,
+                    reason: `${data.reportType === 'VACATION' ? 'חופשה' : data.reportType === 'SICK' ? 'מחלה' : data.reportType === 'WFH' ? 'עבודה מהבית' : 'נוכחות'}: ${data.reason}`,
+                    certificate: data.certificate
                 }
             };
             setRecords(prev => prev.map(r => r.id === recordForCorrection.id ? updatedRecord : r));
         } else {
-            // Creating new record for missing day/time
             const newRecord: AttendanceRecord = {
                 id: `att_req_${Date.now()}`,
                 employeeId: currentEmployeeId,
                 date: selectedDateForCorrection,
-                clockIn: reqIn, // Use requested time as placeholder display
-                clockOut: reqOut,
-                breakDurationMinutes: data.breakMins,
-                totalHours: 0, // 0 until approved
-                status: 'PENDING_APPROVAL',
-                note: 'נוצר ידנית ע"י עובד',
+                clockIn: isPresence ? reqIn : undefined,
+                clockOut: isPresence ? reqOut : undefined,
+                totalHours: 0,
+                status: recordStatus,
+                note: `בקשת ${data.reportType === 'VACATION' ? 'חופשה' : data.reportType === 'SICK' ? 'מחלה' : data.reportType === 'WFH' ? 'עבודה מהבית' : 'נוכחות'}`,
                 correctionRequest: {
                     requestedClockIn: reqIn,
                     requestedClockOut: reqOut,
-                    requestedBreak: data.breakMins,
-                    reason: data.reason
+                    requestedStatus: data.reportType,
+                    reason: `${data.reportType === 'VACATION' ? 'חופשה' : data.reportType === 'SICK' ? 'מחלה' : data.reportType === 'WFH' ? 'עבודה מהבית' : 'נוכחות'} : ${data.reason}`,
+                    certificate: data.certificate
                 }
             };
             setRecords(prev => [...prev, newRecord]);
         }
-        
         setCorrectionModalOpen(false);
-        setRecordForCorrection(undefined);
     };
 
-    // --- Logic: Stats & Export ---
-
     const getMonthlyStats = (empId: string, month: number, year: number) => {
+        const emp = employees.find(e => e.id === empId);
+        if (!emp) return { totalHours: 0, baseSalary: 0, bonus: 0, totalGross: 0, workDays: 0, isGlobal: false, vacationDays: 0, sickDays: 0, sickCertificates: [], employerCost: 0 };
+
         const empRecords = records.filter(r => {
             const d = new Date(r.date);
             return r.employeeId === empId && d.getMonth() + 1 === month && d.getFullYear() === year;
         });
-
-        // Calculate unique work days (presence)
-        const uniqueDays = new Set(empRecords
-            .filter(r => r.status === 'PRESENT')
-            .map(r => new Date(r.date).toDateString())
+        
+        const uniqueDays = new Set(
+            empRecords
+                .filter(r => r.status === 'PRESENT' || r.status === 'WFH')
+                .map(r => new Date(r.date).toDateString())
         );
         const workDays = uniqueDays.size;
-
-        // Calculate hours (use requested hours if pending approval for display? No, usually 0 until approved)
-        const totalHours = empRecords.reduce((sum, r) => {
-            // If approved/present, use calculated totalHours. 
-            return sum + (r.status === 'PRESENT' ? r.totalHours : 0);
-        }, 0);
-
-        const emp = employees.find(e => e.id === empId);
-        if (!emp) return { totalHours: 0, baseSalary: 0, bonus: 0, totalGross: 0, employerCost: 0, workDays: 0 };
-
-        const baseSalary = totalHours * emp.hourlyWage;
         
-        // Calculate Bonus (Includes Team/Group logic)
-        let bonus = 0;
-        if (emp.hasSalesBonus) {
-            // Identify target employee IDs for bonus calculation (Team or Self)
-            const targetEmployeeIds = emp.bonusBasisEmployeeIds && emp.bonusBasisEmployeeIds.length > 0 
-                ? emp.bonusBasisEmployeeIds 
-                : [emp.id]; // Default to self if empty
+        let hourlyTotalBase = 0;
+        let totalHours = 0;
 
-            const relevantOrders = orders.filter(o => {
-                const d = new Date(o.dealStartDate || o.date);
-                const isWon = statusConfigs.find(c => c.label === o.orderStatus)?.isActiveDeal; 
-                
-                // Check if order belongs to any of the target employees (Team/Self)
-                const belongsToTeam = targetEmployeeIds.includes(o.employeeId);
-
-                // Payment must be PAID
-                return belongsToTeam && 
-                       d.getMonth() + 1 === month && 
-                       d.getFullYear() === year &&
-                       isWon && 
-                       o.paymentStatus === 'שולם'; 
-            });
-            
-            const totalSales = relevantOrders.reduce((sum, o) => sum + calculateOrderTotals(o).totalAmount, 0);
-            bonus = totalSales * (emp.salesBonusPercentage / 100);
-        }
-
-        const totalGross = baseSalary + bonus;
-        const employerCost = totalGross * (1 + emp.employerCostPercentage / 100);
-
-        return { totalHours, baseSalary, bonus, totalGross, employerCost, workDays };
-    };
-
-    const handleExportExcel = () => {
-        const days = getDaysInMonth(selectedMonth, selectedYear);
-        const header = ["תאריך", "יום בשבוע", "תאריך עברי", "כניסה", "יציאה", "הפסקה (דק')", 'סה"כ שעות', "סטטוס", "הערות"];
-        
-        const dataRows: any[][] = [];
-        
-        days.forEach(day => {
-            const dayStr = day.toDateString();
-            const dayRecords = records.filter(r => r.employeeId === currentEmployeeId && new Date(r.date).toDateString() === dayStr);
-            
-            if (dayRecords.length === 0) {
-                dataRows.push([
-                    day.toLocaleDateString('he-IL'),
-                    day.toLocaleDateString('he-IL', { weekday: 'long' }),
-                    formatHebrewDate(day),
-                    '-', '-', '-', '0:00', 'חסר', ''
-                ]);
-            } else {
-                dayRecords.forEach(r => {
-                    dataRows.push([
-                        new Date(r.date).toLocaleDateString('he-IL'),
-                        new Date(r.date).toLocaleDateString('he-IL', { weekday: 'long' }),
-                        formatHebrewDate(new Date(r.date)),
-                        r.clockIn ? new Date(r.clockIn).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : '',
-                        r.clockOut ? new Date(r.clockOut).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : '',
-                        r.breakDurationMinutes,
-                        formatDecimalHoursToTime(r.totalHours),
-                        r.status === 'PENDING_APPROVAL' ? 'ממתין לאישור' : r.status === 'PRESENT' ? 'אושר/נוכח' : r.status,
-                        r.note || (r.correctionRequest ? `בקשת תיקון: ${r.correctionRequest.reason}` : '')
-                    ]);
-                });
+        empRecords.forEach(r => {
+            if (r.status === 'PRESENT' || r.status === 'WFH') {
+                totalHours += r.totalHours;
+                if (emp.salaryType === 'HOURLY') {
+                    const historicalSalary = getEmployeeSalaryAtDate(emp, new Date(r.date));
+                    hourlyTotalBase += (r.totalHours * historicalSalary.amount);
+                }
             }
         });
 
-        exportToCSV(`Attendance_Report_${currentEmployee?.name}_${selectedMonth}_${selectedYear}.csv`, [header, ...dataRows]);
+        const vacationDays = empRecords.filter(r => r.status === 'VACATION').length;
+        const sickRecords = empRecords.filter(r => r.status === 'SICK');
+        const sickDays = sickRecords.length;
+        
+        const sickCertificates = sickRecords
+            .map(r => r.certificate || r.correctionRequest?.certificate)
+            .filter(Boolean) as Attachment[];
+
+        const isGlobal = emp.salaryType === 'GLOBAL';
+        const endOfMonthDate = new Date(year, month, 0);
+        const effectiveGlobalSalary = getEmployeeSalaryAtDate(emp, endOfMonthDate).amount;
+        const baseSalary = isGlobal ? effectiveGlobalSalary : hourlyTotalBase;
+        
+        let bonus = 0;
+        if (emp.hasSalesBonus) {
+            const targetIds = emp.bonusBasisEmployeeIds && emp.bonusBasisEmployeeIds.length > 0 ? emp.bonusBasisEmployeeIds : [emp.id];
+            const relevantOrders = orders.filter(o => {
+                const d = new Date(o.dealStartDate || o.date);
+                const isWon = statusConfigs.find(c => c.label === o.orderStatus)?.isActiveDeal; 
+                return targetIds.includes(o.employeeId) && d.getMonth() + 1 === month && d.getFullYear() === year && isWon && o.paymentStatus === 'שולם'; 
+            });
+            const totalSales = relevantOrders.reduce((sum, o) => sum + calculateOrderTotals(o).totalAmount, 0);
+            bonus = totalSales * (emp.salesBonusPercentage / 100);
+        }
+        
+        let totalGross = baseSalary + bonus;
+        let employerCost = totalGross * (1 + (emp.employerCostPercentage || 0) / 100);
+
+        const override = payrollOverrides[`${empId}_${year}_${month}`];
+        if (override) {
+            if (override.finalGross !== undefined) {
+                totalGross = override.finalGross;
+                if (override.finalEmployerCost === undefined) {
+                    employerCost = totalGross * (1 + (emp.employerCostPercentage || 0) / 100);
+                }
+            }
+            if (override.finalEmployerCost !== undefined) {
+                employerCost = override.finalEmployerCost;
+            }
+        }
+        
+        return { 
+            totalHours, 
+            baseSalary, 
+            bonus, 
+            totalGross, 
+            workDays, 
+            isGlobal, 
+            vacationDays, 
+            sickDays, 
+            sickCertificates, 
+            employerCost,
+            hasGrossOverride: override?.finalGross !== undefined,
+            hasCostOverride: override?.finalEmployerCost !== undefined
+        };
     };
 
-    // --- Views ---
+    const handleOverrideChange = (empId: string, field: 'finalGross' | 'finalEmployerCost', value: string) => {
+        const key = `${empId}_${selectedYear}_${selectedMonth}`;
+        const numVal = value === '' ? undefined : parseFloat(value);
+        
+        setPayrollOverrides(prev => ({
+            ...prev,
+            [key]: {
+                ...(prev[key] || {}),
+                [field]: numVal
+            }
+        }));
+    };
+
+    const handleResetOverride = (empId: string, field: 'finalGross' | 'finalEmployerCost') => {
+        const key = `${empId}_${selectedYear}_${selectedMonth}`;
+        setPayrollOverrides(prev => {
+            const current = prev[key];
+            if (!current) return prev;
+            
+            const updated = { ...current };
+            delete updated[field];
+            
+            if (Object.keys(updated).length === 0) {
+                const { [key]: _, ...rest } = prev;
+                return rest;
+            }
+            
+            return { ...prev, [key]: updated };
+        });
+    };
+
+    const handleExportExcel = () => {
+        const emp = currentEmployee;
+        if (!emp) return;
+        
+        const stats = getMonthlyStats(currentEmployeeId, selectedMonth, selectedYear);
+        const daysInMonth = getDaysInMonth(selectedMonth, selectedYear);
+        
+        const summaryRows = [
+            ["סיכום דוח נוכחות ושכר"],
+            ["שם עובד/ת:", emp.name],
+            ["ת.ז:", emp.idNumber || "-"],
+            ["חודש דיווח:", `${selectedMonth}/${selectedYear}`],
+            ["סוג שכר:", emp.salaryType === 'GLOBAL' ? "גלובלי (חודשי)" : "לפי שעה"],
+            ["תעריף שעתי (עובד מקבל לשעה):", emp.salaryType === 'GLOBAL' ? "-" : `₪${emp.hourlyWage}`],
+            ["שכר בסיס (גלובלי):", emp.monthlyBaseSalary ? `₪${emp.monthlyBaseSalary.toLocaleString()}` : "-"],
+            [""],
+            ["נתוני נוכחות מצטברים"],
+            ["סה\"כ ימי עבודה בפועל:", stats.workDays],
+            ["סה\"כ שעות עבודה נטו:", formatDecimalHoursToTime(stats.totalHours)],
+            ["ימי חופשה:", stats.vacationDays],
+            ["ימי מחלה:", stats.sickDays],
+            [""],
+            ["תחשיב שכר חודשי (סופי לאישור)"],
+            ["שכר בסיס מחושב:", `₪${stats.baseSalary.toLocaleString()}`],
+            ["בונוס מכירות:", `₪${stats.bonus.toLocaleString()}`],
+            ["סה\"כ ברוטו לתשלום:", `₪${stats.totalGross.toLocaleString()}${stats.hasGrossOverride ? ' (ידני)' : ''}`],
+            ["עלות מעביד כוללת:", `₪${stats.employerCost.toLocaleString()}${stats.hasCostOverride ? ' (ידני)' : ''}`],
+            [""],
+            ["פירוט יומי"],
+            ["תאריך", "יום", "כניסה", "יציאה", "סה\"כ שעות", "תעריף שעתי", "לתשלום יומי", "סטטוס", "הערה"]
+        ];
+        
+        const dataRows = daysInMonth.map(date => {
+            const dateKey = date.toDateString();
+            const dayRecords = records.filter(r => 
+                r.employeeId === currentEmployeeId && 
+                new Date(r.date).toDateString() === dateKey
+            );
+            
+            if (dayRecords.length === 0) {
+                return [[date.toLocaleDateString('he-IL'), date.toLocaleDateString('he-IL', { weekday: 'long' }), '-', '-', '0:00', '0', '0', 'חסר', '']];
+            }
+            
+            return dayRecords.map(record => {
+                const isPresence = record.status === 'PRESENT' || record.status === 'WFH';
+                const effectiveSalary = getEmployeeSalaryAtDate(emp, new Date(record.date));
+                const dailyTotal = isPresence && effectiveSalary.type === 'HOURLY' ? (record.totalHours * effectiveSalary.amount).toFixed(2) : '0';
+                
+                return [
+                    date.toLocaleDateString('he-IL'),
+                    date.toLocaleDateString('he-IL', { weekday: 'long' }),
+                    record.clockIn ? new Date(record.clockIn).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : '-',
+                    record.clockOut ? new Date(record.clockOut).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : (isPresence ? 'פעיל' : '-'),
+                    formatDecimalHoursToTime(record.totalHours),
+                    effectiveSalary.type === 'HOURLY' ? effectiveSalary.amount : 'גלובלי',
+                    dailyTotal,
+                    record.status === 'WFH' ? 'מהבית' : record.status === 'PRESENT' ? 'נוכח' : record.status,
+                    record.note || ''
+                ];
+            });
+        }).flat();
+
+        exportToCSV(`payroll_${emp.name}_${selectedMonth}_${selectedYear}.csv`, [...summaryRows, ...dataRows]);
+    };
+
+    const renderAdminDashboard = () => {
+        const allStats = employees.map(emp => ({
+            emp,
+            stats: getMonthlyStats(emp.id, selectedMonth, selectedYear)
+        }));
+
+        const grandTotals = allStats.reduce((acc, { stats }) => {
+            acc.baseSalary += stats.baseSalary;
+            acc.bonus += stats.bonus;
+            acc.totalGross += stats.totalGross;
+            acc.employerCost += stats.employerCost;
+            acc.vacationDays += stats.vacationDays;
+            acc.sickDays += stats.sickDays;
+            acc.totalHours += stats.totalHours;
+            return acc;
+        }, { baseSalary: 0, bonus: 0, totalGross: 0, employerCost: 0, vacationDays: 0, sickDays: 0, totalHours: 0 });
+
+        const handleExportAll = () => {
+            const header = ["עובד", "תפקיד", "סוג שכר", "תעריף / בסיס", "ימי עבודה", "חופשה", "מחלה", "שעות", "שכר בסיס", "בונוס", "סה\"כ ברוטו", "עלות מעביד", "הערה"];
+            const rows = allStats.map(item => {
+                const endOfMonth = new Date(selectedYear, selectedMonth, 0);
+                const salaryAtEnd = getEmployeeSalaryAtDate(item.emp, endOfMonth);
+                return [
+                    item.emp.name,
+                    item.emp.role,
+                    salaryAtEnd.type === 'GLOBAL' ? 'גלובלי' : 'שעתי',
+                    salaryAtEnd.amount,
+                    item.stats.workDays,
+                    item.stats.vacationDays,
+                    item.stats.sickDays,
+                    formatDecimalHoursToTime(item.stats.totalHours),
+                    item.stats.baseSalary,
+                    item.stats.bonus,
+                    item.stats.totalGross,
+                    item.stats.employerCost,
+                    (item.stats.hasGrossOverride || item.stats.hasCostOverride) ? "כולל תיקון ידני" : ""
+                ];
+            });
+            const footerRow = [ "סה\"כ מצטבר", "", "", "", "-", grandTotals.vacationDays, grandTotals.sickDays, formatDecimalHoursToTime(grandTotals.totalHours), grandTotals.baseSalary, grandTotals.bonus, grandTotals.totalGross, grandTotals.employerCost, "" ];
+            exportToCSV(`payroll_summary_${selectedMonth}_${selectedYear}.csv`, [header, ...rows, footerRow]);
+        };
+
+        return (
+            <div className="space-y-6">
+                <div className="flex flex-col sm:flex-row justify-between items-end gap-4 bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                    <div>
+                        <h3 className="text-xl font-bold text-slate-800">דוח ריכוז שכר ונוכחות</h3>
+                        <p className="text-slate-500 text-sm mt-1">סיכום חודשי עבור כלל העובדים</p>
+                        <div className="flex items-center gap-3 mt-4">
+                            <div className="flex items-center gap-2">
+                                <label className="text-xs font-bold text-slate-500">שנה:</label>
+                                <select value={selectedYear} onChange={e => setSelectedYear(Number(e.target.value))} className="text-sm border-slate-300 rounded-md py-1 pe-8">
+                                    {availableYears.map(y => <option key={y} value={y}>{y}</option>)}
+                                </select>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <label className="text-xs font-bold text-slate-500">חודש:</label>
+                                <select value={selectedMonth} onChange={e => setSelectedMonth(Number(e.target.value))} className="text-sm border-slate-300 rounded-md py-1 pe-8">
+                                    {Array.from({length: 12}, (_, i) => i + 1).map(m => <option key={m} value={m}>{new Date(0, m-1).toLocaleString('he-IL', {month: 'long'})}</option>)}
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                    <div className="flex gap-3">
+                         <div className="bg-amber-50 border border-amber-200 p-2.5 rounded-lg text-[11px] text-amber-800 max-w-xs">
+                            <strong>שים לב:</strong> ניתן להזין ברוטו ועלות מעביד ידנית מהתלוש לצורך דיוק בדוחות הכספיים.
+                        </div>
+                        <button onClick={handleExportAll} className="flex items-center gap-2 px-6 py-2.5 bg-green-600 text-white rounded-lg font-bold shadow-md hover:bg-green-700 transition-all">
+                            <DownloadIcon className="w-5 h-5" /> ייצוא דוח מרוכז (Excel)
+                        </button>
+                    </div>
+                </div>
+
+                <div className="bg-white rounded-xl shadow-sm overflow-hidden border border-slate-200">
+                    <div className="overflow-x-auto">
+                        <table className="min-w-full text-sm text-right">
+                            <thead className="bg-slate-50 text-slate-600 font-bold">
+                                <tr>
+                                    <th className="px-6 py-4 border-b">שם עובד</th>
+                                    <th className="px-6 py-4 border-b">סוג שכר ותעריף</th>
+                                    <th className="px-6 py-4 border-b text-center">ימי עבודה</th>
+                                    <th className="px-6 py-4 border-b text-center text-amber-700">חופשה</th>
+                                    <th className="px-6 py-4 border-b text-center text-rose-700">מחלה</th>
+                                    <th className="px-6 py-4 border-b text-center">סה"כ שעות</th>
+                                    <th className="px-6 py-4 border-b">שכר בסיס</th>
+                                    <th className="px-6 py-4 border-b">בונוס</th>
+                                    <th className="px-6 py-4 border-b font-black text-slate-900 bg-slate-100/30">ברוטו סופי (תלוש)</th>
+                                    <th className="px-6 py-4 border-b font-black text-indigo-900 bg-indigo-50/30">עלות מעביד סופית</th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100">
+                                {allStats.map(({ emp, stats }) => {
+                                    const override = payrollOverrides[`${emp.id}_${selectedYear}_${selectedMonth}`];
+                                    const salaryAtEnd = getEmployeeSalaryAtDate(emp, new Date(selectedYear, selectedMonth, 0));
+                                    return (
+                                        <tr key={emp.id} className="hover:bg-slate-50 transition-colors">
+                                            <td className="px-6 py-4">
+                                                <div className="font-bold text-slate-800">{emp.name}</div>
+                                                <div className="text-xs text-slate-400">{emp.role}</div>
+                                            </td>
+                                            <td className="px-6 py-4">
+                                                <div className="flex flex-col">
+                                                    <span className="font-bold text-slate-700">₪{salaryAtEnd.amount.toLocaleString()}</span>
+                                                    <span className={`text-[10px] w-fit px-2 py-0.5 rounded font-black ${salaryAtEnd.type === 'GLOBAL' ? 'bg-indigo-100 text-indigo-700' : 'bg-slate-100 text-slate-600'}`}>
+                                                        {salaryAtEnd.type === 'GLOBAL' ? 'גלובלי' : 'שעתי'}
+                                                    </span>
+                                                </div>
+                                            </td>
+                                            <td className="px-6 py-4 text-center font-medium">{stats.workDays}</td>
+                                            <td className="px-6 py-4 text-center font-bold text-amber-600">{stats.vacationDays || '-'}</td>
+                                            <td className="px-6 py-4 text-center">
+                                                <div className="flex flex-col items-center gap-1">
+                                                    <span className="font-bold text-rose-600">{stats.sickDays || '-'}</span>
+                                                    {stats.sickCertificates.length > 0 && (
+                                                        <button 
+                                                            onClick={() => setViewingCertificate(stats.sickCertificates[0])}
+                                                            className="text-[10px] bg-rose-50 text-rose-700 px-1.5 py-0.5 rounded border border-rose-100 font-bold hover:bg-rose-100 transition-colors shadow-sm"
+                                                            title="לחץ לצפייה באישור רפואי"
+                                                        >📄 אישור</button>
+                                                    )}
+                                                </div>
+                                            </td>
+                                            <td className="px-6 py-4 text-center font-mono font-bold text-slate-700">{formatDecimalHoursToTime(stats.totalHours)}</td>
+                                            <td className="px-6 py-4">₪{stats.baseSalary.toLocaleString()}</td>
+                                            <td className="px-6 py-4 text-green-600 font-medium">₪{stats.bonus.toLocaleString()}</td>
+                                            <td className={`px-6 py-4 bg-slate-100/20 ${stats.hasGrossOverride ? 'bg-yellow-50/30' : ''}`}>
+                                                <div className="flex flex-col gap-1 relative group/field">
+                                                    <div className="relative">
+                                                        <input 
+                                                            type="number"
+                                                            value={override?.finalGross ?? ''}
+                                                            onChange={(e) => handleOverrideChange(emp.id, 'finalGross', e.target.value)}
+                                                            className={`w-full text-sm font-black p-1.5 pe-7 border rounded-md focus:ring-1 focus:ring-primary ${stats.hasGrossOverride ? 'border-amber-400 bg-white text-slate-900 shadow-sm' : 'border-slate-200 text-slate-400'}`}
+                                                            placeholder={stats.totalGross.toFixed(0)}
+                                                        />
+                                                        {stats.hasGrossOverride && (
+                                                            <button 
+                                                                onClick={() => handleResetOverride(emp.id, 'finalGross')}
+                                                                className="absolute left-1 top-1/2 -translate-y-1/2 text-slate-400 hover:text-red-600 transition-colors p-1"
+                                                                title="חזור לערך מחושב"
+                                                            ><svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M6 18L18 6M6 6l12 12" /></svg></button>
+                                                        )}
+                                                    </div>
+                                                    {!stats.hasGrossOverride && <span className="text-[10px] text-slate-400 italic">משוער: ₪{stats.totalGross.toLocaleString()}</span>}
+                                                </div>
+                                            </td>
+                                            <td className={`px-6 py-4 bg-indigo-50/20 ${stats.hasCostOverride ? 'bg-yellow-50/30' : ''}`}>
+                                                <div className="flex flex-col gap-1 relative group/field">
+                                                    <div className="relative">
+                                                        <input 
+                                                            type="number"
+                                                            value={override?.finalEmployerCost ?? ''}
+                                                            onChange={(e) => handleOverrideChange(emp.id, 'finalEmployerCost', e.target.value)}
+                                                            className={`w-full text-sm font-black p-1.5 pe-7 border rounded-md focus:ring-1 focus:ring-primary ${stats.hasCostOverride ? 'border-amber-400 bg-white text-indigo-900 shadow-sm' : 'border-slate-200 text-indigo-400'}`}
+                                                            placeholder={stats.employerCost.toFixed(0)}
+                                                        />
+                                                        {stats.hasCostOverride && (
+                                                            <button 
+                                                                onClick={() => handleResetOverride(emp.id, 'finalEmployerCost')}
+                                                                className="absolute left-1 top-1/2 -translate-y-1/2 text-slate-400 hover:text-red-600 transition-colors p-1"
+                                                                title="חזור לערך מחושב"
+                                                            ><svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M6 18L18 6M6 6l12 12" /></svg></button>
+                                                        )}
+                                                    </div>
+                                                    {!stats.hasCostOverride && <span className="text-[10px] text-indigo-400 italic">משוער: ₪{stats.employerCost.toLocaleString()}</span>}
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    );
+                                })}
+                            </tbody>
+                            <tfoot className="bg-slate-100 font-black border-t-2 border-slate-300 sticky bottom-0 z-10">
+                                <tr>
+                                    <td className="px-6 py-4" colSpan={2}>סה"כ מצטבר לכל העובדים</td>
+                                    <td className="px-6 py-4 text-center text-slate-300">-</td>
+                                    <td className="px-6 py-4 text-center text-amber-700">{grandTotals.vacationDays} ימים</td>
+                                    <td className="px-6 py-4 text-center text-rose-700">{grandTotals.sickDays} ימים</td>
+                                    <td className="px-6 py-4 text-center text-slate-700 font-mono">{formatDecimalHoursToTime(grandTotals.totalHours)}</td>
+                                    <td className="px-6 py-4 text-slate-800">₪{grandTotals.baseSalary.toLocaleString()}</td>
+                                    <td className="px-6 py-4 text-green-700">₪{grandTotals.bonus.toLocaleString()}</td>
+                                    <td className="px-6 py-4 text-slate-900 text-lg bg-slate-200/20">₪{grandTotals.totalGross.toLocaleString()}</td>
+                                    <td className="px-6 py-4 text-primary text-xl bg-indigo-100/50">₪{grandTotals.employerCost.toLocaleString()}</td>
+                                </tr>
+                            </tfoot>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        );
+    };
 
     const renderMyPortal = () => {
         const stats = getMonthlyStats(currentEmployeeId, selectedMonth, selectedYear);
@@ -355,211 +827,136 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
 
         return (
             <div className="space-y-6 pb-10">
-                {/* Top Stats & Clock (Only show Clock if viewing CURRENT month) */}
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                    {/* Clock Widget */}
-                    <div className="lg:col-span-2 bg-white p-6 rounded-xl shadow-sm border border-slate-200 flex flex-col sm:flex-row justify-between items-center gap-6 relative overflow-hidden">
+                    <div className="lg:col-span-2 bg-white p-8 rounded-2xl shadow-md border border-slate-100 flex flex-col sm:flex-row justify-between items-center gap-8 relative overflow-hidden transition-all hover:shadow-lg">
                         <div className="text-center sm:text-start z-10">
-                            <h2 className="text-2xl font-bold text-slate-800 mb-1">שלום, {currentEmployee?.name}</h2>
-                            <p className="text-slate-500">{currentTime.toLocaleDateString('he-IL', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</p>
-                            <p className="text-4xl font-mono font-bold text-primary mt-2 tracking-wider">
-                                {currentTime.toLocaleTimeString('he-IL')}
+                            <h2 className="text-3xl font-black text-slate-800 mb-1">שלום, {currentEmployee?.name}</h2>
+                            <p className="text-slate-500 font-medium">{currentTime.toLocaleDateString('he-IL', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</p>
+                            <p className="text-5xl font-black text-primary mt-6 tracking-tighter drop-shadow-sm font-mono">
+                                {currentTime.toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                             </p>
+                            <div className="mt-8 inline-flex items-center px-4 py-1.5 bg-indigo-50 border border-indigo-100 rounded-full text-indigo-700 text-xs font-black uppercase tracking-wide shadow-sm">
+                                {stats.isGlobal ? `מצב שכר: גלובלי (₪${currentEmployee?.monthlyBaseSalary?.toLocaleString()})` : `מצב שכר: שעתי (₪${currentEmployee?.hourlyWage}/שעה)`}
+                            </div>
                         </div>
-
-                        <div className="flex items-center gap-4 z-10">
-                            {!isClockedIn ? (
-                                <button 
-                                    onClick={() => handleClockAction('IN')}
-                                    className="w-32 h-32 rounded-full flex flex-col items-center justify-center shadow-lg transition-transform hover:scale-105 active:scale-95 bg-green-600 text-white hover:bg-green-700 border-4 border-green-100"
-                                >
-                                    <ClockIcon className="w-8 h-8 mb-1" />
-                                    <span className="font-bold text-lg">כניסה</span>
-                                    {lastRecord && lastRecord.clockOut && <span className="text-[10px] opacity-80 font-normal">(משמרת נוספת)</span>}
-                                </button>
-                            ) : (
-                                <button 
-                                    onClick={() => handleClockAction('OUT')}
-                                    className="w-32 h-32 rounded-full flex flex-col items-center justify-center shadow-lg transition-transform hover:scale-105 active:scale-95 bg-red-500 text-white hover:bg-red-600 border-4 border-red-100"
-                                >
-                                    <ClockIcon className="w-8 h-8 mb-1" />
-                                    <span className="font-bold text-lg">יציאה</span>
-                                </button>
-                            )}
+                        <div className="flex flex-col items-center gap-6 z-10 relative">
+                            <div className="p-3 border-2 border-primary/10 rounded-full shadow-inner bg-slate-50/50">
+                                {!isClockedIn ? (
+                                    <button onClick={() => handleClockAction('IN')} className="w-36 h-36 rounded-full flex flex-col items-center justify-center shadow-2xl transition-all hover:scale-105 active:scale-95 bg-gradient-to-br from-secondary to-green-600 text-white border-4 border-green-100 group relative overflow-hidden">
+                                        <div className="absolute inset-0 bg-white opacity-0 group-hover:opacity-10 transition-opacity"></div>
+                                        <ClockIcon className="w-10 h-10 mb-1 drop-shadow-md" /><span className="font-black text-xl tracking-tight">כניסה</span>
+                                        <div className="absolute top-0 left-0 w-full h-1/2 bg-white/20 blur-xl rounded-full"></div>
+                                    </button>
+                                ) : (
+                                    <button onClick={() => handleClockAction('OUT')} className="w-36 h-36 rounded-full flex flex-col items-center justify-center shadow-2xl transition-all hover:scale-105 active:scale-95 bg-gradient-to-br from-rose-500 to-rose-700 text-white border-4 border-rose-100 group relative overflow-hidden">
+                                        <div className="absolute inset-0 bg-white opacity-0 group-hover:opacity-10 transition-opacity"></div>
+                                        <ClockIcon className="w-10 h-10 mb-1" /><span className="font-black text-xl tracking-tight">יציאה</span>
+                                        <div className="mt-1 text-[10px] font-bold bg-white/20 px-2 py-0.5 rounded-full animate-pulse">במשמרת</div>
+                                    </button>
+                                )}
+                            </div>
+                            <div className="flex flex-col items-center gap-2">
+                                <div className="flex items-center gap-2">
+                                    <input type="checkbox" id="wfhToggle" checked={isWFH} onChange={e => setIsWFH(e.target.checked)} disabled={isClockedIn} className="w-5 h-5 text-primary border-slate-300 rounded focus:ring-primary transition-colors cursor-pointer" />
+                                    <label htmlFor="wfhToggle" className="text-sm font-black text-slate-600 cursor-pointer select-none flex items-center gap-1">🏠 עבודה מהבית היום</label>
+                                </div>
+                                {isClockedIn && (
+                                    <div className="text-sm font-black text-green-600 bg-green-50 px-3 py-1 rounded-lg border border-green-100 flex items-center gap-2 mt-1 shadow-sm">
+                                        <span className="w-2 h-2 rounded-full bg-green-500 animate-ping"></span>זמן נוכחי: {liveDuration}
+                                    </div>
+                                )}
+                            </div>
                         </div>
-                        
-                        {/* Background decoration */}
-                        <div className="absolute right-0 top-0 h-full w-1/3 bg-gradient-to-l from-slate-50 to-transparent pointer-events-none"></div>
+                        <div className="absolute -top-10 -left-10 w-40 h-40 bg-indigo-50 rounded-full blur-3xl opacity-50"></div>
+                        <div className="absolute -bottom-10 -right-10 w-40 h-40 bg-green-50 rounded-full blur-3xl opacity-50"></div>
                     </div>
-
-                    {/* Monthly Summary Card */}
-                    <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 flex flex-col justify-between">
-                        <div className="flex justify-between items-center mb-4">
-                            <h3 className="font-bold text-slate-700">סיכום חודשי</h3>
-                            <span className="text-xs bg-blue-50 text-blue-700 px-2 py-1 rounded font-bold">
-                                {selectedMonth}/{selectedYear}
-                            </span>
-                        </div>
-                        <div className="space-y-4">
-                            <div className="flex justify-between items-center border-b border-slate-50 pb-2">
-                                <span className="text-slate-500 text-sm">ימי עבודה</span>
-                                <span className="font-bold text-xl text-indigo-600">{stats.workDays}</span>
-                            </div>
-                            <div className="flex justify-between items-center border-b border-slate-50 pb-2">
-                                <span className="text-slate-500 text-sm">שעות בפועל</span>
-                                <span className="font-bold text-xl text-slate-800">{formatDecimalHoursToTime(stats.totalHours)}</span>
-                            </div>
-                            <div className="flex justify-between items-center border-b border-slate-50 pb-2">
-                                <span className="text-slate-500 text-sm">שכר בסיס</span>
-                                <span className="font-bold text-lg text-slate-800">₪{stats.baseSalary.toLocaleString()}</span>
-                            </div>
-                            <div className="flex justify-between items-center border-b border-slate-50 pb-2">
-                                <span className="text-slate-500 text-sm">בונוס מכירות</span>
-                                <span className="font-bold text-lg text-green-600">₪{stats.bonus.toLocaleString()}</span>
-                            </div>
-                            <div className="flex justify-between items-center pt-1">
-                                <span className="text-slate-800 font-bold text-sm">סה"כ ברוטו (משוער)</span>
-                                <span className="font-black text-xl text-primary">₪{stats.totalGross.toLocaleString()}</span>
-                            </div>
+                    <div className="bg-white p-8 rounded-2xl shadow-md border border-slate-100 flex flex-col justify-between transition-all hover:shadow-lg relative">
+                        <div className="absolute top-6 left-6"><span className="text-xs bg-blue-100 text-blue-800 px-3 py-1.5 rounded-lg font-black shadow-sm ring-1 ring-blue-200">{selectedMonth}/{selectedYear}</span></div>
+                        <div className="mt-4"><h3 className="font-black text-xl text-slate-800 mb-6 border-b border-slate-50 pb-2">סיכום חודשי</h3></div>
+                        <div className="space-y-5">
+                            <div className="flex justify-between items-center group"><span className="font-bold text-xl text-indigo-600 group-hover:scale-110 transition-transform">{stats.workDays}</span><span className="text-slate-500 text-sm font-bold">ימי עבודה</span></div>
+                            <div className="flex justify-between items-center group"><span className="font-bold text-xl text-slate-800 group-hover:scale-110 transition-transform font-mono">{formatDecimalHoursToTime(stats.totalHours)}</span><span className="text-slate-500 text-sm font-bold">שעות בפועל נטו</span></div>
+                            <div className="flex justify-between items-center group"><span className="font-bold text-lg text-slate-800 group-hover:scale-110 transition-transform">₪{stats.baseSalary.toLocaleString()}</span><span className="text-slate-500 text-sm font-bold">{stats.isGlobal ? 'שכר בסיס (גלובלי)' : 'שכר בסיס (שעתי)'}</span></div>
+                            <div className="flex justify-between items-center group"><span className="font-bold text-lg text-green-600 group-hover:scale-110 transition-transform">₪{stats.bonus.toLocaleString()}</span><span className="text-slate-500 text-sm font-bold">בונוס מכירות</span></div>
+                            <div className="pt-4 border-t-2 border-slate-50 flex justify-between items-center"><span className="font-black text-2xl text-primary drop-shadow-sm">₪{stats.totalGross.toLocaleString()}</span><span className="text-slate-900 font-black text-base uppercase tracking-tight">סה"כ ברוטו (משוער)</span></div>
                         </div>
                     </div>
                 </div>
 
-                {/* Filters & Actions Bar */}
-                <div className="flex flex-col sm:flex-row justify-between items-center gap-4 bg-slate-50 p-3 rounded-lg border border-slate-200">
-                    <div className="flex items-center gap-3 w-full sm:w-auto">
+                <div className="flex flex-col sm:flex-row justify-between items-center gap-4 bg-white p-4 rounded-xl shadow-sm border border-slate-200">
+                    <div className="flex items-center gap-4 w-full sm:w-auto">
                         <div className="flex items-center gap-2">
-                            <label className="text-xs font-bold text-slate-500">שנה:</label>
-                            <select value={selectedYear} onChange={e => setSelectedYear(Number(e.target.value))} className="text-sm border-slate-300 rounded-md py-1 pe-8">
-                                {[2023, 2024, 2025, 2026].map(y => <option key={y} value={y}>{y}</option>)}
-                            </select>
+                            <label className="text-xs font-black text-slate-400 uppercase tracking-widest">שנה</label>
+                            <select value={selectedYear} onChange={e => setSelectedYear(Number(e.target.value))} className="text-sm border-slate-200 rounded-lg py-2 px-4 bg-slate-50 font-bold focus:ring-primary">{availableYears.map(y => <option key={y} value={y}>{y}</option>)}</select>
                         </div>
                         <div className="flex items-center gap-2">
-                            <label className="text-xs font-bold text-slate-500">חודש:</label>
-                            <select value={selectedMonth} onChange={e => setSelectedMonth(Number(e.target.value))} className="text-sm border-slate-300 rounded-md py-1 pe-8">
-                                {Array.from({length: 12}, (_, i) => i + 1).map(m => (
-                                    <option key={m} value={m}>{new Date(0, m-1).toLocaleString('he-IL', {month: 'long'})}</option>
-                                ))}
-                            </select>
+                            <label className="text-xs font-black text-slate-400 uppercase tracking-widest">חודש</label>
+                            <select value={selectedMonth} onChange={e => setSelectedMonth(Number(e.target.value))} className="text-sm border-slate-200 rounded-lg py-2 px-4 bg-slate-50 font-bold focus:ring-primary">{Array.from({length: 12}, (_, i) => i + 1).map(m => <option key={m} value={m}>{new Date(0, m-1).toLocaleString('he-IL', {month: 'long'})}</option>)}</select>
                         </div>
                     </div>
-                    
-                    <button onClick={handleExportExcel} className="flex items-center gap-2 px-4 py-2 bg-white border border-green-600 text-green-700 rounded-md text-sm font-medium hover:bg-green-50 transition-colors w-full sm:w-auto justify-center">
-                        <ImportIcon className="w-4 h-4 transform rotate-180" /> {/* Reusing import icon as export for now */}
-                        הורד דוח שעות (Excel)
+                    <button onClick={handleExportExcel} className="flex items-center gap-2 px-6 py-2.5 bg-white border-2 border-green-600 text-green-700 rounded-xl text-sm font-black hover:bg-green-50 transition-all w-full sm:w-auto justify-center shadow-sm">
+                        <DownloadIcon className="w-5 h-5" /> הורד דוח שכר מלא (Excel)
                     </button>
                 </div>
 
-                {/* Full Month Calendar Table */}
-                <div className="bg-white rounded-lg shadow-sm overflow-hidden border border-slate-200">
+                <div className="bg-white rounded-2xl shadow-md overflow-hidden border border-slate-200">
                     <div className="overflow-x-auto">
                         <table className="min-w-full text-sm text-right">
-                            <thead className="bg-slate-100 text-slate-600 font-bold">
-                                <tr>
-                                    <th className="px-4 py-3 border-b">תאריך</th>
-                                    <th className="px-4 py-3 border-b">יום</th>
-                                    <th className="px-4 py-3 border-b">כניסה</th>
-                                    <th className="px-4 py-3 border-b">יציאה</th>
-                                    <th className="px-4 py-3 border-b">הפסקה</th>
-                                    <th className="px-4 py-3 border-b">סה"כ</th>
-                                    <th className="px-4 py-3 border-b">סטטוס</th>
-                                    <th className="px-4 py-3 border-b">פעולות</th>
-                                </tr>
+                            <thead className="bg-slate-50 text-slate-500 font-black uppercase text-[10px] tracking-widest">
+                                <tr><th className="px-6 py-4 border-b">תאריך</th><th className="px-6 py-4 border-b">יום</th><th className="px-6 py-4 border-b">כניסה</th><th className="px-6 py-4 border-b">יציאה</th><th className="px-6 py-4 border-b">סה"כ שעות</th><th className="px-6 py-4 border-b">סטטוס</th><th className="px-6 py-4 border-b">פעולות</th></tr>
                             </thead>
                             <tbody className="divide-y divide-slate-100">
                                 {daysInMonth.map((date) => {
                                     const dateKey = date.toDateString();
                                     const holiday = getJewishHoliday(date);
-                                    
-                                    // Find all records for this day
                                     const dayRecords = records
                                         .filter(r => r.employeeId === currentEmployeeId && new Date(r.date).toDateString() === dateKey)
                                         .sort((a, b) => new Date(a.clockIn || 0).getTime() - new Date(b.clockIn || 0).getTime());
-
-                                    const isWeekend = date.getDay() === 5 || date.getDay() === 6; // Fri/Sat
+                                    const isWeekend = date.getDay() === 5 || date.getDay() === 6;
                                     const isFuture = date > new Date();
-                                    const hasRecords = dayRecords.length > 0;
-
-                                    if (!hasRecords) {
-                                        if (isFuture) return null; // Don't show future empty days
+                                    if (dayRecords.length === 0) {
                                         return (
-                                            <tr key={dateKey} className={`hover:bg-slate-50 ${holiday ? 'bg-purple-50/50' : isWeekend ? 'bg-slate-50/50' : ''}`}>
-                                                <td className="px-4 py-3">
-                                                    <div className="flex items-center gap-2">
-                                                        <div>
-                                                            <span className="font-medium text-slate-700">{date.toLocaleDateString('he-IL')}</span>
-                                                            <span className="block text-xs text-slate-400">{formatHebrewDate(date)}</span>
-                                                        </div>
-                                                        {holiday && (
-                                                            <span className="text-xs bg-purple-100 text-purple-700 px-2 py-0.5 rounded border border-purple-200 whitespace-nowrap" title={holiday}>
-                                                                🎉 {holiday}
-                                                            </span>
-                                                        )}
+                                            <tr key={dateKey} className={`hover:bg-slate-50 transition-colors ${holiday ? 'bg-purple-50/50' : isWeekend ? 'bg-slate-50/50' : ''}`}>
+                                                <td className="px-6 py-4">
+                                                    <div>
+                                                        <span className="font-bold text-slate-700">{date.toLocaleDateString('he-IL')}</span>
+                                                        <span className="block text-[10px] text-slate-400 font-bold">{formatHebrewDate(date)}</span>
+                                                        {holiday && <span className="block text-[10px] text-purple-600 font-black mt-0.5">{holiday}</span>}
                                                     </div>
                                                 </td>
-                                                <td className="px-4 py-3 text-slate-600">{date.toLocaleDateString('he-IL', { weekday: 'long' })}</td>
-                                                <td className="px-4 py-3 text-slate-300">-</td>
-                                                <td className="px-4 py-3 text-slate-300">-</td>
-                                                <td className="px-4 py-3 text-slate-300">-</td>
-                                                <td className="px-4 py-3 text-slate-300">0:00</td>
-                                                <td className="px-4 py-3"><span className="text-xs text-slate-400 bg-slate-100 px-2 py-1 rounded">חסר</span></td>
-                                                <td className="px-4 py-3">
-                                                    <button onClick={() => openCorrectionModal(date)} className="text-primary hover:underline text-xs font-medium flex items-center gap-1">
-                                                        <PlusIcon className="w-3 h-3"/> השלם חוסר
-                                                    </button>
-                                                </td>
+                                                <td className="px-6 py-4 text-slate-500 font-medium">{date.toLocaleDateString('he-IL', { weekday: 'long' })}</td>
+                                                <td className="px-6 py-4 text-slate-300">-</td><td className="px-6 py-4 text-slate-300">-</td><td className="px-6 py-4 text-slate-300 font-mono">0:00</td>
+                                                <td className="px-6 py-4"><span className="text-[10px] text-slate-400 bg-slate-100 px-2.5 py-1 rounded-full font-black uppercase tracking-tight">{isFuture ? 'עתידי' : 'חסר'}</span></td>
+                                                <td className="px-6 py-4"><button onClick={() => openCorrectionModal(date)} className="text-primary hover:text-indigo-800 text-xs font-black flex items-center gap-1.5 bg-indigo-50 px-3 py-1.5 rounded-lg transition-all hover:shadow-sm"><PlusIcon className="w-3.5 h-3.5"/> {isFuture ? 'תכנון חופשה' : 'דווח ידני'}</button></td>
                                             </tr>
                                         );
                                     }
-
-                                    return dayRecords.map((record, idx) => (
-                                        <tr key={record.id} className={`hover:bg-slate-50 ${record.status === 'PENDING_APPROVAL' ? 'bg-orange-50/60' : holiday ? 'bg-purple-50/30' : ''}`}>
-                                            <td className="px-4 py-3">
-                                                {idx === 0 && (
-                                                    <div className="flex items-center gap-2">
+                                    return dayRecords.map((record, idx) => {
+                                        const isRejected = record.status === 'REJECTED';
+                                        const isLeave = record.status === 'VACATION' || record.status === 'SICK';
+                                        const isWfh = record.status === 'WFH';
+                                        const isPresence = record.status === 'PRESENT' || isWfh;
+                                        const hasCertificate = !!record.certificate || !!record.correctionRequest?.certificate;
+                                        return (
+                                            <tr key={record.id} className={`hover:bg-slate-50 transition-colors ${record.status === 'PENDING_APPROVAL' ? 'bg-orange-50/60' : isRejected ? 'bg-red-50' : isLeave ? 'bg-amber-50/40' : isWfh ? 'bg-indigo-50/40' : holiday ? 'bg-purple-50/30' : ''}`}>
+                                                <td className="px-6 py-4">
+                                                    {idx === 0 && (
                                                         <div>
-                                                            <span className="font-medium text-slate-700">{date.toLocaleDateString('he-IL')}</span>
-                                                            <span className="block text-xs text-slate-400">{formatHebrewDate(date)}</span>
+                                                            <span className="font-bold text-slate-700">{date.toLocaleDateString('he-IL')}</span>
+                                                            <span className="block text-[10px] text-slate-400 font-bold">{formatHebrewDate(date)}</span>
+                                                            {holiday && <span className="block text-[10px] text-purple-600 font-black mt-0.5">{holiday}</span>}
                                                         </div>
-                                                        {holiday && (
-                                                            <span className="text-xs bg-purple-100 text-purple-700 px-2 py-0.5 rounded border border-purple-200 whitespace-nowrap" title={holiday}>
-                                                                🎉 {holiday}
-                                                            </span>
-                                                        )}
-                                                    </div>
-                                                )}
-                                            </td>
-                                            <td className="px-4 py-3 text-slate-600">
-                                                {idx === 0 && date.toLocaleDateString('he-IL', { weekday: 'long' })}
-                                            </td>
-                                            <td className="px-4 py-3 font-mono text-slate-700">
-                                                {record.clockIn ? new Date(record.clockIn).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : '-'}
-                                            </td>
-                                            <td className="px-4 py-3 font-mono text-slate-700">
-                                                {record.clockOut ? new Date(record.clockOut).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : 
-                                                 (record.status === 'PRESENT' ? <span className="text-green-600 text-xs animate-pulse">פעיל...</span> : '-')
-                                                }
-                                            </td>
-                                            <td className="px-4 py-3 text-slate-600">{record.breakDurationMinutes > 0 ? `${record.breakDurationMinutes} ד'` : '-'}</td>
-                                            <td className="px-4 py-3 font-bold text-slate-800">{formatDecimalHoursToTime(record.totalHours)}</td>
-                                            <td className="px-4 py-3">
-                                                {record.status === 'PENDING_APPROVAL' ? (
-                                                    <span className="text-xs bg-orange-100 text-orange-800 px-2 py-1 rounded-full whitespace-nowrap">ממתין לאישור</span>
-                                                ) : record.status === 'REJECTED' ? (
-                                                    <span className="text-xs bg-red-100 text-red-800 px-2 py-1 rounded-full">נדחה</span>
-                                                ) : (
-                                                    <span className="text-xs bg-green-100 text-green-800 px-2 py-1 rounded-full">תקין</span>
-                                                )}
-                                            </td>
-                                            <td className="px-4 py-3">
-                                                {record.status !== 'PENDING_APPROVAL' && (
-                                                    <button onClick={() => openCorrectionModal(date, record)} className="text-blue-600 hover:bg-blue-50 p-1 rounded transition-colors" title="בקש תיקון שעות">
-                                                        <EditIcon className="w-4 h-4"/>
-                                                    </button>
-                                                )}
-                                            </td>
-                                        </tr>
-                                    ));
+                                                    )}
+                                                </td>
+                                                <td className="px-6 py-4 text-slate-500 font-medium">{idx === 0 && date.toLocaleDateString('he-IL', { weekday: 'long' })}</td>
+                                                <td className={`px-6 py-4 font-mono font-bold ${record.status === 'PENDING_APPROVAL' ? 'text-slate-400 italic' : 'text-slate-700'}`}>{record.clockIn ? new Date(record.clockIn).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : (record.correctionRequest?.requestedClockIn ? new Date(record.correctionRequest.requestedClockIn).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : '-')}</td>
+                                                <td className={`px-6 py-4 font-mono font-bold ${record.status === 'PENDING_APPROVAL' ? 'text-slate-400 italic' : 'text-slate-700'}`}>{record.clockOut ? new Date(record.clockOut).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : (record.correctionRequest?.requestedClockOut ? new Date(record.correctionRequest.requestedClockOut).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : (isPresence ? 'פעיל...' : '-'))}</td>
+                                                <td className={`px-6 py-4 font-black ${isLeave ? 'text-slate-400 font-medium italic' : 'text-slate-800'}`}>{isPresence ? formatDecimalHoursToTime(record.totalHours) : (isLeave ? 'ללא שעות' : '0:00')}</td>
+                                                <td className="px-6 py-4"><div className="flex flex-col gap-1">{record.status === 'PENDING_APPROVAL' ? (<span className="text-[10px] bg-orange-100 text-orange-800 px-2 py-1 rounded-full font-black w-fit uppercase tracking-tight">ממתין לאישור</span>) : isRejected ? (<span className="text-[10px] bg-red-100 text-red-800 px-2 py-1 rounded-full font-black w-fit uppercase tracking-tight">נדחה</span>) : record.status === 'VACATION' ? (<span className="text-[10px] bg-amber-100 text-amber-800 px-2 py-1 rounded-full font-black w-fit uppercase tracking-tight">חופשה</span>) : record.status === 'SICK' ? (<button onClick={() => hasCertificate && setViewingCertificate(record.certificate || record.correctionRequest?.certificate || null)} className={`text-[10px] bg-rose-100 text-rose-800 px-2 py-1 rounded-full font-black w-fit flex items-center gap-1 uppercase tracking-tight ${hasCertificate ? 'hover:bg-rose-200 cursor-pointer shadow-sm' : 'cursor-default'}`} title={hasCertificate ? "לחץ לצפייה באישור" : "מחלה"}>מחלה {hasCertificate && <span>📄</span>}</button>) : record.status === 'WFH' ? (<span className="text-[10px] bg-indigo-100 text-indigo-800 px-2.5 py-1 rounded-full font-black w-fit flex items-center gap-1 uppercase tracking-tight shadow-sm ring-1 ring-indigo-200">🏠 מהבית</span>) : (<span className="text-[10px] bg-green-100 text-green-800 px-2.5 py-1 rounded-full font-black w-fit uppercase tracking-tight shadow-sm ring-1 ring-green-200">נוכח</span>)}{record.note && <span className="text-[9px] text-slate-400 font-bold max-w-[120px] truncate" title={record.note}>{record.note}</span>}</div></td>
+                                                <td className="px-6 py-4">{(record.status !== 'PENDING_APPROVAL' && !isRejected) && (<button onClick={() => openCorrectionModal(date, record)} className="text-primary hover:bg-indigo-100 p-2 rounded-full transition-all" title="בקש תיקון"><EditIcon className="w-4 h-4"/></button>)}</td>
+                                            </tr>
+                                        );
+                                    });
                                 })}
                             </tbody>
                         </table>
@@ -569,116 +966,24 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
         );
     };
 
-    const renderAdminDashboard = () => {
-        const allMonthlyStats = employees.map(e => ({
-            ...e,
-            ...getMonthlyStats(e.id, selectedMonth, selectedYear)
-        }));
-
-        const totalCompanyCost = allMonthlyStats.reduce((sum, s) => sum + s.employerCost, 0);
-
-        return (
-            <div className="space-y-6">
-                {/* Filter Bar */}
-                <div className="bg-white p-4 rounded-lg shadow-sm border border-slate-200 flex flex-col sm:flex-row gap-4 items-end sm:items-center justify-between">
-                    <div className="flex gap-4">
-                        <div>
-                            <label className="block text-sm text-slate-600 mb-1">חודש</label>
-                            <select value={selectedMonth} onChange={e => setSelectedMonth(Number(e.target.value))} className="border p-2 rounded w-32">
-                                {Array.from({length: 12}, (_, i) => i + 1).map(m => <option key={m} value={m}>{m}</option>)}
-                            </select>
-                        </div>
-                        <div>
-                            <label className="block text-sm text-slate-600 mb-1">שנה</label>
-                            <select value={selectedYear} onChange={e => setSelectedYear(Number(e.target.value))} className="border p-2 rounded w-32">
-                                {[2023, 2024, 2025, 2026].map(y => <option key={y} value={y}>{y}</option>)}
-                            </select>
-                        </div>
-                    </div>
-                    <div className="bg-slate-800 text-white px-6 py-3 rounded-lg shadow">
-                        <span className="block text-xs opacity-75">סה"כ עלות מעביד (חודשי)</span>
-                        <span className="text-xl font-bold">₪{totalCompanyCost.toLocaleString()}</span>
-                    </div>
-                </div>
-
-                {/* Summary Table */}
-                <div className="bg-white rounded-lg shadow-sm overflow-hidden border border-slate-200">
-                    <table className="min-w-full text-sm text-right">
-                        <thead className="bg-slate-50 text-slate-600 font-bold">
-                            <tr>
-                                <th className="px-4 py-3">שם העובד</th>
-                                <th className="px-4 py-3">תפקיד</th>
-                                <th className="px-4 py-3">ימי עבודה</th>
-                                <th className="px-4 py-3">שעות</th>
-                                <th className="px-4 py-3">שכר בסיס</th>
-                                <th className="px-4 py-3">בונוס מכירות</th>
-                                <th className="px-4 py-3">ברוטו משוער</th>
-                                <th className="px-4 py-3">עלות מעביד</th>
-                            </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100">
-                            {allMonthlyStats.map(stat => (
-                                <tr key={stat.id} className="hover:bg-slate-50">
-                                    <td className="px-4 py-3 font-medium text-slate-800">{stat.name}</td>
-                                    <td className="px-4 py-3 text-slate-500">{stat.role}</td>
-                                    <td className="px-4 py-3 text-indigo-600 font-bold">{stat.workDays}</td>
-                                    <td className="px-4 py-3 font-mono">{formatDecimalHoursToTime(stat.totalHours)}</td>
-                                    <td className="px-4 py-3">₪{stat.baseSalary.toLocaleString()}</td>
-                                    <td className="px-4 py-3 text-green-600">₪{stat.bonus.toLocaleString()}</td>
-                                    <td className="px-4 py-3 font-bold text-primary">₪{stat.totalGross.toLocaleString()}</td>
-                                    <td className="px-4 py-3 text-slate-500 font-bold">₪{stat.employerCost.toLocaleString()}</td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        );
-    };
-
     return (
         <div>
-            {/* Top Controls */}
-            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 gap-4">
-                <div className="flex space-x-1 space-x-reverse w-full sm:w-auto bg-slate-100 p-1 rounded-lg">
-                    <button 
-                        onClick={() => setActiveTab('MY_PORTAL')} 
-                        className={`flex-1 sm:flex-none px-6 py-2 rounded-md font-medium transition-all text-sm ${activeTab === 'MY_PORTAL' ? 'bg-white text-primary shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
-                    >
-                        הנוכחות שלי
-                    </button>
-                    {isManager && (
-                        <button 
-                            onClick={() => setActiveTab('ADMIN_DASHBOARD')} 
-                            className={`flex-1 sm:flex-none px-6 py-2 rounded-md font-medium transition-all text-sm ${activeTab === 'ADMIN_DASHBOARD' ? 'bg-white text-primary shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
-                        >
-                            דוחות שכר (מנהל)
-                        </button>
-                    )}
+            {viewingCertificate && <CertificateViewer file={viewingCertificate} onClose={() => setViewingCertificate(null)} />}
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-8 gap-4">
+                <div className="flex space-x-1 space-x-reverse w-full sm:auto bg-slate-100 p-1 rounded-xl shadow-inner border border-slate-200">
+                    <button onClick={() => setActiveTab('MY_PORTAL')} className={`flex-1 sm:flex-none px-8 py-2.5 rounded-lg font-black transition-all text-sm ${activeTab === 'MY_PORTAL' ? 'bg-white text-primary shadow-md' : 'text-slate-500 hover:text-slate-700'}`}>הנוכחות שלי</button>
+                    {isManager && (<button onClick={() => setActiveTab('ADMIN_DASHBOARD')} className={`flex-1 sm:flex-none px-8 py-2.5 rounded-lg font-black transition-all text-sm ${activeTab === 'ADMIN_DASHBOARD' ? 'bg-white text-primary shadow-md' : 'text-slate-500 hover:text-slate-700'}`}>דוחות שכר (מנהל)</button>)}
                 </div>
-                
-                {/* User Switcher for Demo Purposes */}
-                <div className="flex items-center gap-2 bg-white p-1.5 rounded-lg border border-slate-200 shadow-sm">
-                    <span className="text-xs text-slate-400 ps-2 font-medium">מציג כ:</span>
-                    <select 
-                        value={currentEmployeeId} 
-                        onChange={(e) => setCurrentEmployeeId(e.target.value)}
-                        className="text-sm border-none focus:ring-0 py-1 pe-8 font-bold text-slate-700 bg-transparent"
-                    >
+                <div className="flex items-center gap-3 bg-white p-2 rounded-xl border border-slate-200 shadow-sm transition-all hover:shadow-md">
+                    <span className="text-xs font-black text-slate-400 ps-2 uppercase tracking-widest border-l border-slate-100 ml-2">מציג כ:</span>
+                    <select value={currentEmployeeId} onChange={(e) => setCurrentEmployeeId(e.target.value)} className="text-sm border-none focus:ring-0 py-1 pe-10 font-black text-slate-700 bg-transparent cursor-pointer">
                         {employees.map(e => <option key={e.id} value={e.id}>{e.name} ({e.roleType === 'ADMIN' ? 'מנהל' : 'עובד'})</option>)}
                     </select>
                 </div>
             </div>
-
             {activeTab === 'MY_PORTAL' ? renderMyPortal() : renderAdminDashboard()}
-
             {correctionModalOpen && selectedDateForCorrection && (
-                <CorrectionRequestModal 
-                    date={selectedDateForCorrection}
-                    record={recordForCorrection}
-                    onClose={() => setCorrectionModalOpen(false)} 
-                    onSubmit={handleCorrectionSubmit} 
-                />
+                <CorrectionRequestModal date={selectedDateForCorrection} record={recordForCorrection} onClose={() => setCorrectionModalOpen(false)} onSubmit={handleCorrectionSubmit} />
             )}
         </div>
     );

@@ -1,6 +1,6 @@
 
 import React, { useState, useCallback } from 'react';
-import { Customer, Order, Activity, Supplier, Employee, Page, OrderStatusConfiguration, FixedExpense, VariableExpense, Loan, EquityInvestment, Debt, AttendanceRecord } from './types';
+import { Customer, Order, Activity, Supplier, Employee, Page, OrderStatusConfiguration, FixedExpense, VariableExpense, Loan, EquityInvestment, Debt, AttendanceRecord, ManualEvent, PayrollOverrideMap, Receivable } from './types';
 import { INITIAL_CUSTOMERS, INITIAL_ORDERS, INITIAL_ACTIVITY, INITIAL_SUPPLIERS, INITIAL_EMPLOYEES, INITIAL_ORDER_STATUS_CONFIGS, INITIAL_FIXED_EXPENSES, INITIAL_VARIABLE_EXPENSES, INITIAL_LOANS, INITIAL_EQUITY, INITIAL_DEBTS, INITIAL_ATTENDANCE_RECORDS } from './constants';
 import Sidebar from './components/Sidebar';
 import Dashboard from './components/Dashboard';
@@ -52,10 +52,15 @@ const App: React.FC = () => {
     const [variableExpenses, setVariableExpenses] = useState<VariableExpense[]>(INITIAL_VARIABLE_EXPENSES);
     const [loans, setLoans] = useState<Loan[]>(INITIAL_LOANS);
     const [debts, setDebts] = useState<Debt[]>(INITIAL_DEBTS);
+    const [receivables, setReceivables] = useState<Receivable[]>([]);
     const [equity, setEquity] = useState<EquityInvestment[]>(INITIAL_EQUITY);
 
     // Attendance State
     const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>(INITIAL_ATTENDANCE_RECORDS);
+    const [payrollOverrides, setPayrollOverrides] = useState<PayrollOverrideMap>({});
+
+    // Calendar Manual Events
+    const [manualEvents, setManualEvents] = useState<ManualEvent[]>([]);
 
     const [openOrderId, setOpenOrderId] = useState<string | null>(null);
     
@@ -83,16 +88,18 @@ const App: React.FC = () => {
         setActivities(prev => [newActivity, ...prev].slice(0, 10)); // Keep last 10 activities
     }, []);
 
+    const addManualEvent = useCallback((event: ManualEvent) => {
+        setManualEvents(prev => [...prev, event]);
+        addActivity(`אירוע חדש ביומן: ${event.title}`);
+    }, [addActivity]);
+
     // Logic to generate sequential order numbers
     const getNextOrderNumber = useCallback(() => {
         if (!orders || !Array.isArray(orders)) return 'ORD-1001';
 
-        // Filter out orders that look like dates (e.g., 20230401 which is > 1,000,000)
-        // We only want to increment the new sequential series (e.g., 1001, 1002)
         const sequentialOrders = orders.filter(o => {
             if (!o || !o.orderNumber) return false;
             try {
-                // Defensive: Ensure orderNumber is treated as string
                 const orderNumStr = String(o.orderNumber);
                 const numPart = parseInt(orderNumStr.replace(/\D/g, ''), 10);
                 return !isNaN(numPart) && numPart < 1000000; 
@@ -102,7 +109,6 @@ const App: React.FC = () => {
         });
 
         if (sequentialOrders.length === 0) {
-            // If no sequential orders exist yet (only legacy date-based ones), start from 1001
             return 'ORD-1001';
         }
         
@@ -115,7 +121,7 @@ const App: React.FC = () => {
             } catch (e) {
                 return max;
             }
-        }, 1000); // Start base from 1000
+        }, 1000); 
 
         return `ORD-${maxNumber + 1}`;
     }, [orders]);
@@ -134,6 +140,8 @@ const App: React.FC = () => {
                             statusConfigs={statusConfigs}
                             vatRate={vatRate}
                             systemMessage={systemMessage}
+                            manualEvents={manualEvents}
+                            addManualEvent={addManualEvent}
                         />;
             case 'Customers':
                 return <CustomersPage 
@@ -163,7 +171,6 @@ const App: React.FC = () => {
             case 'Suppliers':
                 return <SuppliersPage suppliers={suppliers} setSuppliers={setSuppliers} addActivity={addActivity} orders={orders} />;
             case 'Employees':
-                // Legacy page, might not be reachable if sidebar is updated
                 return <EmployeesPage 
                     employees={employees} 
                     setEmployees={setEmployees} 
@@ -180,16 +187,26 @@ const App: React.FC = () => {
             case 'Quotes':
                  return <QuotesPage quotes={quotes} setQuotes={setQuotes} customers={customers} addActivity={addActivity} />;
             case 'Reports':
-                return <ReportsPage orders={orders} suppliers={suppliers} onNavigateToOrder={handleNavigateToOrder} setOrders={setOrders} statusConfigs={statusConfigs} />;
+                return <ReportsPage 
+                            orders={orders} 
+                            suppliers={suppliers} 
+                            onNavigateToOrder={handleNavigateToOrder} 
+                            setOrders={setOrders} 
+                            statusConfigs={statusConfigs} 
+                            vatRate={vatRate}
+                        />;
             case 'Finance':
                 return <FinancePage 
                             fixedExpenses={fixedExpenses} setFixedExpenses={setFixedExpenses}
                             variableExpenses={variableExpenses} setVariableExpenses={setVariableExpenses}
                             loans={loans} setLoans={setLoans}
                             debts={debts} setDebts={setDebts}
+                            receivables={receivables} setReceivables={setReceivables}
                             equity={equity} setEquity={setEquity}
                             addActivity={addActivity}
                             vatRate={vatRate}
+                            orders={orders}
+                            setOrders={setOrders}
                         />;
             case 'Attendance':
                 return <AttendancePage 
@@ -198,6 +215,8 @@ const App: React.FC = () => {
                     setRecords={setAttendanceRecords} 
                     orders={orders}
                     statusConfigs={statusConfigs}
+                    payrollOverrides={payrollOverrides}
+                    setPayrollOverrides={setPayrollOverrides}
                 />;
             case 'Settings':
                 return <SettingsPage 
@@ -214,7 +233,7 @@ const App: React.FC = () => {
                             setAttendanceRecords={setAttendanceRecords}
                         />;
             default:
-                return <Dashboard customers={customers} orders={orders} activities={activities} monthlyGoal={monthlyGoal} setMonthlyGoal={setMonthlyGoal} employees={employees} onNavigateToOrder={handleNavigateToOrder} statusConfigs={statusConfigs} vatRate={vatRate} systemMessage={systemMessage} />;
+                return <Dashboard customers={customers} orders={orders} activities={activities} monthlyGoal={monthlyGoal} setMonthlyGoal={setMonthlyGoal} employees={employees} onNavigateToOrder={handleNavigateToOrder} statusConfigs={statusConfigs} vatRate={vatRate} systemMessage={systemMessage} manualEvents={manualEvents} addManualEvent={addManualEvent} />;
         }
     };
 

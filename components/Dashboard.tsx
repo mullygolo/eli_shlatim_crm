@@ -1,7 +1,8 @@
 
 import React, { useState, useMemo, useEffect } from 'react';
-import { Customer, Order, Activity, OrderStatus, Employee, OrderStatusConfiguration, PaymentStatus } from '../types';
-import { TaskIcon, SettingsIcon, MegaphoneIcon } from './icons'; 
+// Fixed error: Removed 'OrderStatus' which is not exported from '../types'
+import { Customer, Order, Activity, Employee, OrderStatusConfiguration, PaymentStatus, ManualEvent, PaymentMethod } from '../types';
+import { TaskIcon, SettingsIcon, MegaphoneIcon, TruckIcon, CashIcon, CalendarPlusIcon } from './icons'; 
 import { calculateOrderTotals, calculateDueDate } from '../utils/calculations';
 import Modal from './Modal'; 
 
@@ -16,6 +17,21 @@ interface DashboardProps {
     statusConfigs: OrderStatusConfiguration[];
     vatRate: number;
     systemMessage: string;
+    manualEvents: ManualEvent[];
+    addManualEvent: (event: ManualEvent) => void;
+}
+
+// --- Internal Interfaces for Calendar ---
+interface CalendarItem {
+    id: string;
+    date: Date;
+    type: 'LOGISTICS' | 'FINANCE' | 'MANUAL';
+    title: string;
+    subtitle?: string;
+    colorClass: string;
+    icon: React.ReactNode;
+    time?: string;
+    refId?: string; // Order ID or Payment ID
 }
 
 // --- Monthly Goal Widget ---
@@ -92,6 +108,281 @@ const SystemMessageWidget: React.FC<{ message: string }> = ({ message }) => {
     );
 };
 
+// --- Smart Operations Calendar Components ---
+
+const AddEventModal: React.FC<{
+    onSave: (event: ManualEvent) => void;
+    onClose: () => void;
+    initialDate?: Date;
+}> = ({ onSave, onClose, initialDate }) => {
+    const [title, setTitle] = useState('');
+    const [date, setDate] = useState(initialDate ? initialDate.toISOString().split('T')[0] : new Date().toISOString().split('T')[0]);
+    const [time, setTime] = useState('09:00');
+    const [description, setDescription] = useState('');
+
+    const handleSubmit = () => {
+        if (!title || !date) return;
+        
+        // Construct date object
+        const fullDate = new Date(date);
+        const [hours, minutes] = time.split(':').map(Number);
+        fullDate.setHours(hours || 0, minutes || 0);
+
+        onSave({
+            id: `manual_${Date.now()}`,
+            title,
+            date: fullDate,
+            time,
+            description
+        });
+        onClose();
+    };
+
+    return (
+        <Modal title="הוספת אירוע ליומן" onClose={onClose} size="lg">
+            <div className="space-y-4 text-start">
+                <div>
+                    <label className="block text-sm font-medium text-slate-700">כותרת אירוע</label>
+                    <input type="text" value={title} onChange={e => setTitle(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" placeholder="לדוג': פגישה עם ספק, הרמת כוסית..." autoFocus />
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                    <div>
+                        <label className="block text-sm font-medium text-slate-700">תאריך</label>
+                        <input type="date" value={date} onChange={e => setDate(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-slate-700">שעה</label>
+                        <input type="time" value={time} onChange={e => setTime(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+                    </div>
+                </div>
+                <div>
+                    <label className="block text-sm font-medium text-slate-700">תיאור / הערות</label>
+                    <textarea value={description} onChange={e => setDescription(e.target.value)} rows={3} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+                </div>
+                <div className="flex justify-end pt-4">
+                    <button onClick={handleSubmit} className="px-4 py-2 bg-primary text-white rounded-md hover:bg-indigo-700 shadow-sm">הוסף ליומן</button>
+                </div>
+            </div>
+        </Modal>
+    );
+};
+
+const OperationsCalendarWidget: React.FC<{
+    orders: Order[];
+    manualEvents: ManualEvent[];
+    addManualEvent: (event: ManualEvent) => void;
+    onNavigateToOrder?: (orderId: string) => void;
+}> = ({ orders, manualEvents, addManualEvent, onNavigateToOrder }) => {
+    const [selectedDate, setSelectedDate] = useState<Date>(new Date());
+    const [currentMonth, setCurrentMonth] = useState(new Date().getMonth());
+    const [currentYear, setCurrentYear] = useState(new Date().getFullYear());
+    const [isAddEventModalOpen, setIsAddEventModalOpen] = useState(false);
+
+    // 1. Aggregate Data
+    const calendarItems = useMemo(() => {
+        const items: CalendarItem[] = [];
+
+        // Logistics (Services from Orders)
+        orders.forEach(order => {
+            order.additionalServices.forEach(service => {
+                if (service.scheduledDate) {
+                    items.push({
+                        id: service.id,
+                        date: new Date(service.scheduledDate),
+                        type: 'LOGISTICS',
+                        title: service.description || 'שירות/התקנה',
+                        subtitle: `${order.orderNumber} - ${order.description}`,
+                        colorClass: 'bg-blue-100 text-blue-700 border-blue-200',
+                        icon: <TruckIcon className="w-4 h-4" />,
+                        time: new Date(service.scheduledDate).toLocaleTimeString('he-IL', {hour:'2-digit', minute:'2-digit'}),
+                        refId: order.id
+                    });
+                }
+            });
+            
+            // Finance (Check Repayment)
+            order.payments.forEach(payment => {
+                if (payment.method === PaymentMethod.CHECK && payment.repaymentDate) {
+                    items.push({
+                        id: payment.id,
+                        date: new Date(payment.repaymentDate),
+                        type: 'FINANCE',
+                        title: `פירעון צ'ק`,
+                        subtitle: `ע"ס ₪${payment.amount.toLocaleString()} (הזמנה ${order.orderNumber})`,
+                        colorClass: 'bg-red-100 text-red-700 border-red-200',
+                        icon: <CashIcon className="w-4 h-4" />,
+                        refId: order.id
+                    });
+                }
+            });
+        });
+
+        // Manual Events
+        manualEvents.forEach(evt => {
+            items.push({
+                id: evt.id,
+                date: new Date(evt.date),
+                type: 'MANUAL',
+                title: evt.title,
+                subtitle: evt.description,
+                colorClass: 'bg-purple-100 text-purple-700 border-purple-200',
+                icon: <CalendarPlusIcon className="w-4 h-4" />,
+                time: evt.time
+            });
+        });
+
+        return items;
+    }, [orders, manualEvents]);
+
+    // 2. Calendar Logic
+    const getDaysInMonth = (month: number, year: number) => {
+        const date = new Date(year, month, 1);
+        const days = [];
+        while (date.getMonth() === month) {
+            days.push(new Date(date));
+            date.setDate(date.getDate() + 1);
+        }
+        return days;
+    };
+
+    const days = getDaysInMonth(currentMonth, currentYear);
+    const firstDayIndex = new Date(currentYear, currentMonth, 1).getDay(); // 0 = Sunday
+    const blanks = Array.from({ length: firstDayIndex });
+
+    const handlePrevMonth = () => {
+        if (currentMonth === 0) {
+            setCurrentMonth(11);
+            setCurrentYear(currentYear - 1);
+        } else {
+            setCurrentMonth(currentMonth - 1);
+        }
+    };
+
+    const handleNextMonth = () => {
+        if (currentMonth === 11) {
+            setCurrentMonth(0);
+            setCurrentYear(currentYear + 1);
+        } else {
+            setCurrentMonth(currentMonth + 1);
+        }
+    };
+
+    const getItemsForDay = (date: Date) => {
+        return calendarItems.filter(item => 
+            item.date.getDate() === date.getDate() &&
+            item.date.getMonth() === date.getMonth() &&
+            item.date.getFullYear() === date.getFullYear()
+        );
+    };
+
+    const selectedDayItems = useMemo(() => getItemsForDay(selectedDate), [selectedDate, calendarItems]);
+
+    return (
+        <div className="bg-white rounded-lg shadow-md border border-slate-200 h-[500px] flex flex-col md:flex-row overflow-hidden">
+            {/* Left Side: Calendar Grid */}
+            <div className="md:w-7/12 p-4 flex flex-col border-b md:border-b-0 md:border-l border-slate-200">
+                <div className="flex justify-between items-center mb-4 px-2">
+                    <button onClick={handlePrevMonth} className="text-slate-400 hover:text-primary text-xl font-bold px-2">&lt;</button>
+                    <h3 className="font-bold text-slate-800 text-lg">
+                        {new Date(currentYear, currentMonth).toLocaleString('he-IL', { month: 'long', year: 'numeric' })}
+                    </h3>
+                    <button onClick={handleNextMonth} className="text-slate-400 hover:text-primary text-xl font-bold px-2">&gt;</button>
+                </div>
+                
+                <div className="grid grid-cols-7 text-center text-xs font-medium text-slate-500 mb-2">
+                    <div>א'</div><div>ב'</div><div>ג'</div><div>ד'</div><div>ה'</div><div>ו'</div><div>ש'</div>
+                </div>
+                
+                <div className="grid grid-cols-7 gap-1 flex-1">
+                    {blanks.map((_, i) => <div key={`blank-${i}`} className="h-full"></div>)}
+                    {days.map(day => {
+                        const isToday = day.toDateString() === new Date().toDateString();
+                        const isSelected = day.toDateString() === selectedDate.toDateString();
+                        const items = getItemsForDay(day);
+                        const hasLogistics = items.some(i => i.type === 'LOGISTICS');
+                        const hasFinance = items.some(i => i.type === 'FINANCE');
+                        const hasManual = items.some(i => i.type === 'MANUAL');
+
+                        return (
+                            <div 
+                                key={day.toISOString()} 
+                                onClick={() => setSelectedDate(day)}
+                                className={`relative flex flex-col items-center justify-start pt-1 rounded-lg cursor-pointer transition-all hover:bg-slate-50 ${isSelected ? 'bg-indigo-50 ring-2 ring-indigo-200' : ''}`}
+                            >
+                                <span className={`text-sm w-7 h-7 flex items-center justify-center rounded-full ${isToday ? 'bg-primary text-white font-bold shadow-sm' : 'text-slate-700'}`}>
+                                    {day.getDate()}
+                                </span>
+                                <div className="flex gap-0.5 mt-1">
+                                    {hasLogistics && <span className="w-1.5 h-1.5 rounded-full bg-blue-500"></span>}
+                                    {hasFinance && <span className="w-1.5 h-1.5 rounded-full bg-red-500"></span>}
+                                    {hasManual && <span className="w-1.5 h-1.5 rounded-full bg-purple-500"></span>}
+                                </div>
+                            </div>
+                        );
+                    })}
+                </div>
+            </div>
+
+            {/* Right Side: Agenda / List */}
+            <div className="md:w-5/12 p-4 bg-slate-50 flex flex-col">
+                <div className="flex justify-between items-center mb-4">
+                    <div>
+                        <h4 className="font-bold text-slate-800">
+                            {selectedDate.toLocaleDateString('he-IL', { weekday: 'long', day: 'numeric', month: 'long' })}
+                        </h4>
+                        <p className="text-xs text-slate-500">
+                            {selectedDayItems.length} אירועים היום
+                        </p>
+                    </div>
+                    <button 
+                        onClick={() => setIsAddEventModalOpen(true)}
+                        className="p-2 bg-white border border-slate-200 rounded-full shadow-sm text-primary hover:bg-indigo-50 transition-colors"
+                        title="הוסף אירוע ידני"
+                    >
+                        <CalendarPlusIcon className="w-5 h-5" />
+                    </button>
+                </div>
+
+                <div className="flex-1 overflow-y-auto space-y-3 custom-scrollbar pe-1">
+                    {selectedDayItems.length === 0 ? (
+                        <div className="h-full flex flex-col items-center justify-center text-slate-400 opacity-60">
+                            <div className="w-16 h-16 bg-slate-200 rounded-full flex items-center justify-center mb-3">
+                                <span className="text-3xl">📅</span>
+                            </div>
+                            <p className="text-sm">אין אירועים ליום זה</p>
+                        </div>
+                    ) : (
+                        selectedDayItems.map((item, idx) => (
+                            <div 
+                                key={`${item.id}_${idx}`} 
+                                className={`p-3 rounded-lg border shadow-sm bg-white ${item.colorClass} border-l-4 cursor-pointer hover:shadow-md transition-all`}
+                                onClick={() => item.refId && onNavigateToOrder && onNavigateToOrder(item.refId)}
+                            >
+                                <div className="flex justify-between items-start">
+                                    <div className="flex items-center gap-2 mb-1">
+                                        {item.icon}
+                                        <span className="font-bold text-sm text-slate-800">{item.title}</span>
+                                    </div>
+                                    {item.time && <span className="text-xs font-mono bg-white/50 px-1 rounded">{item.time}</span>}
+                                </div>
+                                {item.subtitle && <p className="text-xs text-slate-600 line-clamp-2">{item.subtitle}</p>}
+                            </div>
+                        ))
+                    )}
+                </div>
+            </div>
+
+            {isAddEventModalOpen && (
+                <AddEventModal 
+                    onSave={addManualEvent} 
+                    onClose={() => setIsAddEventModalOpen(false)} 
+                    initialDate={selectedDate}
+                />
+            )}
+        </div>
+    );
+};
+
 // --- Strong Number Widget Components ---
 
 interface FinancialMetric {
@@ -134,6 +425,7 @@ const StrongNumberCard: React.FC<{
         const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
         const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
         const startOfYear = new Date(now.getFullYear(), 0, 1);
+        const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
 
         // Filter active deals (Approved transactions)
         const activeDeals = orders.filter(order => {
@@ -151,8 +443,39 @@ const StrongNumberCard: React.FC<{
         const monthlyDeals = activeDeals.filter(o => checkDate(o, startOfMonth));
         const yearlyDeals = activeDeals.filter(o => checkDate(o, startOfYear));
 
-        const untouchedLeads = orders.filter(o => o.orderStatus === OrderStatus.NEW_LEAD);
-        const openQuotes = orders.filter(o => o.orderStatus === OrderStatus.QUOTE_SENT);
+        // Use the isLead flag configuration to count new leads
+        const leadStatuses = new Set(statusConfigs.filter(c => c.isLead).map(c => c.label));
+        const untouchedLeads = orders.filter(o => leadStatuses.has(o.orderStatus));
+        
+        // Use the isQuote flag configuration to count open quotes
+        const quoteStatuses = new Set(statusConfigs.filter(c => c.isQuote).map(c => c.label));
+        const openQuotes = orders.filter(o => quoteStatuses.has(o.orderStatus));
+
+        // Lost Deals Calculation (Current Month - Event Based Logic)
+        const lostStatuses = new Set(statusConfigs.filter(c => c.isLost).map(c => c.label));
+        const monthlyLostDeals = orders.filter(o => {
+            // 1. Must be currently in a "Lost" status
+            if (!lostStatuses.has(o.orderStatus)) return false;
+
+            // 2. Determine when it became "Lost". Use statusHistory to find the event date.
+            let eventDate = new Date(o.date); // Default to creation date if no history
+            
+            if (o.statusHistory && o.statusHistory.length > 0) {
+                const historyEntry = o.statusHistory.find(h => h.status === o.orderStatus);
+                if (historyEntry) {
+                    eventDate = new Date(historyEntry.startDate);
+                } else {
+                    // Fallback: use the latest history entry
+                    const sortedHistory = [...o.statusHistory].sort((a,b) => new Date(b.startDate).getTime() - new Date(a.startDate).getTime());
+                    if (sortedHistory.length > 0) {
+                        eventDate = new Date(sortedHistory[0].startDate);
+                    }
+                }
+            }
+
+            // 3. Check if that event happened this month
+            return eventDate.getTime() >= startOfMonth.getTime() && eventDate.getTime() < nextMonth.getTime();
+        });
 
         // Collection Stats Logic
         let collectionOverdue = { count: 0, amountInclVat: 0 };
@@ -161,10 +484,20 @@ const StrongNumberCard: React.FC<{
         activeDeals.forEach(order => {
             if (order.paymentStatus === PaymentStatus.PAID) return;
 
+            // Logic for "Upon Completion"
+            if (order.paymentTerms === 'עם סיום העבודה') {
+                const config = statusConfigs.find(c => c.label === order.orderStatus);
+                // If not completed yet, skip collection stats (it's not due)
+                if (!config?.isCompleted) return;
+            }
+
             const { totalAmount } = calculateOrderTotals(order);
             const totalInclVat = totalAmount * (1 + vatRate / 100);
             
-            const dueDate = calculateDueDate(order.date, order.paymentTerms);
+            // LOGIC CHANGE: Use dealStartDate for payment calculation if available
+            const calculationBaseDate = order.dealStartDate || order.date;
+            const dueDate = calculateDueDate(calculationBaseDate, order.paymentTerms);
+            
             // Normalize dates to midnight for comparison
             const dueDateClean = new Date(dueDate);
             dueDateClean.setHours(0,0,0,0);
@@ -187,6 +520,7 @@ const StrongNumberCard: React.FC<{
             daily: calculateMetrics(dailyDeals),
             monthly: calculateMetrics(monthlyDeals),
             yearly: calculateMetrics(yearlyDeals),
+            lost: calculateMetrics(monthlyLostDeals),
             leads: untouchedLeads.length,
             quotes: {
                 count: openQuotes.length,
@@ -199,7 +533,7 @@ const StrongNumberCard: React.FC<{
         };
     }, [orders, statusConfigs, vatRate]);
 
-    const formatCurrency = (val: number) => val.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', maximumFractionDigits: 0 });
+    const formatCurrency = (val: number) => val.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 0, maximumFractionDigits: 0 });
     
     const TimeFrameBlock = ({ title, data, colorClass, bgClass }: { title: string, data: FinancialMetric, colorClass: string, bgClass: string }) => (
         <div className={`p-4 rounded-xl border border-slate-100 flex flex-col justify-between min-h-[130px] hover:shadow-md transition-all ${bgClass}`}>
@@ -216,10 +550,6 @@ const StrongNumberCard: React.FC<{
             </div>
             
             <div className="space-y-1 pt-2 border-t border-slate-200/50">
-                <div className="flex justify-between text-xs items-center">
-                    <span className="text-slate-500">כולל מע"מ:</span>
-                    <span className="font-medium text-slate-700">{formatCurrency(data.revenueInclVat)}</span>
-                </div>
                 <div className="flex justify-between text-xs items-center">
                     <span className="text-slate-500">רווח:</span>
                     <span className="font-bold text-emerald-600">{formatCurrency(data.profit)}</span>
@@ -248,7 +578,7 @@ const StrongNumberCard: React.FC<{
                 </div>
             </div>
             
-            <div className="p-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4 bg-white">
+            <div className="p-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-4 bg-white">
                 <TimeFrameBlock title="היום" data={stats.daily} colorClass="text-indigo-600" bgClass="bg-indigo-50/30" />
                 <TimeFrameBlock title="החודש" data={stats.monthly} colorClass="text-blue-600" bgClass="bg-blue-50/30" />
                 <TimeFrameBlock title="השנה" data={stats.yearly} colorClass="text-sky-700" bgClass="bg-sky-50/30" />
@@ -310,6 +640,33 @@ const StrongNumberCard: React.FC<{
                         </span>
                     </div>
                 </div>
+
+                {/* Lost Potential (New Card) */}
+                <div className="bg-red-50/60 border border-red-200 p-4 rounded-xl flex flex-col justify-between min-h-[130px] hover:shadow-md transition-all group">
+                    <div className="flex justify-between items-start">
+                        <div>
+                            <div className="text-3xl font-black text-red-600">{stats.lost.count}</div>
+                            <div className="text-xs font-bold text-red-800 mt-1">עסקאות אבודות</div>
+                            <div className="text-[10px] text-red-400">(החודש)</div>
+                        </div>
+                        <div className="bg-white p-1.5 rounded-full border border-red-100 text-red-500">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5">
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 6L9 12.75l4.286-4.286a11.948 11.948 0 014.306 6.43l.776 2.898m0 0l3.182-5.511m-3.182 5.51l-5.511-3.181" />
+                            </svg>
+                        </div>
+                    </div>
+                    <div className="border-t border-red-200/50 pt-2 mt-2">
+                        <div className="flex justify-between items-center">
+                            <span className="text-[10px] font-medium text-red-500">אובדן הכנסה:</span>
+                            <span className="text-xs font-bold text-red-700">{formatCurrency(stats.lost.revenueExclVat)}</span>
+                        </div>
+                        <div className="flex justify-between items-center mt-1">
+                            <span className="text-[10px] font-medium text-red-500">אובדן רווח:</span>
+                            <span className="text-xs font-bold text-red-800 bg-red-100 px-1.5 py-0.5 rounded">{formatCurrency(stats.lost.profit)}</span>
+                        </div>
+                    </div>
+                </div>
+
             </div>
         </div>
     );
@@ -318,19 +675,30 @@ const StrongNumberCard: React.FC<{
 // --- TaskItem Component ---
 const TaskItem: React.FC<{ task: any, onNavigate: (id: string) => void }> = ({ task, onNavigate }) => {
     return (
-        <div className="p-3 bg-white border border-slate-200 rounded-lg mb-2 flex items-start gap-3 hover:shadow-sm transition-shadow">
-             <div className="mt-0.5 text-slate-400">
-                 <TaskIcon className="w-5 h-5" />
+        <div 
+            className="p-3 bg-white border border-slate-200 rounded-lg mb-2 flex items-start gap-3 hover:shadow-md transition-all cursor-pointer group" 
+            onClick={() => onNavigate(task.orderId)}
+        >
+             <div className={`mt-1 p-1.5 rounded-full ${task.isOverdue ? 'bg-red-50 text-red-500' : 'bg-blue-50 text-blue-500'}`}>
+                 <TaskIcon className="w-4 h-4" />
              </div>
-             <div className="flex-1 cursor-pointer" onClick={() => onNavigate(task.orderId)}>
-                 <p className="text-sm font-medium text-slate-800 line-clamp-1">{task.content}</p>
-                 <div className="flex justify-between items-center mt-1">
-                     <span className="text-xs text-slate-500">
-                        הזמנה: <span className="font-mono font-bold text-primary">{task.orderNumber}</span>
-                     </span>
-                     <span className={`text-xs font-bold ${task.isOverdue ? 'text-red-600' : 'text-slate-400'}`}>
-                        {new Date(task.dueDate).toLocaleDateString('he-IL')}
-                     </span>
+             <div className="flex-1">
+                 <div className="flex justify-between items-start">
+                    <p className="text-sm font-semibold text-slate-800 line-clamp-2 group-hover:text-primary transition-colors">{task.content}</p>
+                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full whitespace-nowrap ms-2 ${task.isOverdue ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-600'}`}>
+                        תאריך יעד: {new Date(task.dueDate).toLocaleDateString('he-IL', {day: '2-digit', month: '2-digit', year: '2-digit'})}
+                    </span>
+                 </div>
+                 
+                 <div className="flex items-center gap-3 mt-1.5 text-xs text-slate-500">
+                     <div className="flex items-center gap-1 min-w-0">
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3 text-slate-400">
+                            <path d="M7 8a3 3 0 100-6 3 3 0 000 6zM14.5 9a2.5 2.5 0 100-5 2.5 2.5 0 000 5zM1.615 16.428a1.224 1.224 0 01-.569-1.175 6.002 6.002 0 0111.908 0c.058.467-.172.92-.57 1.174A9.953 9.953 0 017 18a9.953 9.953 0 01-5.385-1.572zM14.5 16h-.106c.07-.297.088-.611.048-.933a7.47 7.47 0 00-1.588-3.755 4.502 4.502 0 015.874 2.636.818.818 0 01-.36.98A7.465 7.465 0 0114.5 16z" />
+                        </svg>
+                        <span className="truncate font-medium">{task.customerName}</span>
+                     </div>
+                     <div className="w-px h-3 bg-slate-300"></div>
+                     <div className="font-mono text-slate-400">#{task.orderNumber}</div>
                  </div>
              </div>
         </div>
@@ -339,7 +707,7 @@ const TaskItem: React.FC<{ task: any, onNavigate: (id: string) => void }> = ({ t
 
 // --- Dashboard Component ---
 const Dashboard: React.FC<DashboardProps> = ({ 
-    customers, orders, activities, monthlyGoal, setMonthlyGoal, employees, onNavigateToOrder, statusConfigs, vatRate, systemMessage 
+    customers, orders, activities, monthlyGoal, setMonthlyGoal, employees, onNavigateToOrder, statusConfigs, vatRate, systemMessage, manualEvents, addManualEvent 
 }) => {
     const [isGoalModalOpen, setIsGoalModalOpen] = useState(false);
     const [newGoal, setNewGoal] = useState(monthlyGoal);
@@ -358,12 +726,15 @@ const Dashboard: React.FC<DashboardProps> = ({
                         const dueDate = new Date(event.dueDate);
                         dueDate.setHours(0,0,0,0);
                         
+                        const customer = customers.find(c => c.id === order.customerId);
+
                         tasks.push({
                             id: event.id,
                             content: event.content,
                             dueDate: dueDate,
                             orderId: order.id,
                             orderNumber: order.orderNumber,
+                            customerName: customer?.name || 'לקוח כללי',
                             isOverdue: dueDate < today,
                             isToday: dueDate.getTime() === today.getTime(),
                             assigneeId: event.assigneeId
@@ -373,7 +744,7 @@ const Dashboard: React.FC<DashboardProps> = ({
             }
         });
         return tasks.sort((a,b) => a.dueDate.getTime() - b.dueDate.getTime());
-    }, [orders]);
+    }, [orders, customers]);
 
     const taskCounts = useMemo(() => {
         return {
@@ -426,10 +797,21 @@ const Dashboard: React.FC<DashboardProps> = ({
             {/* Strong Numbers Row */}
             <StrongNumberCard orders={orders} statusConfigs={statusConfigs} vatRate={vatRate} />
 
-            {/* Bottom Section: Tasks & Activity */}
+            {/* Bottom Section: Operations Calendar & Tasks */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                 
+                 {/* Smart Operations Calendar (New) */}
+                 <div className="lg:col-span-2">
+                    <OperationsCalendarWidget 
+                        orders={orders} 
+                        manualEvents={manualEvents}
+                        addManualEvent={addManualEvent}
+                        onNavigateToOrder={onNavigateToOrder}
+                    />
+                 </div>
+
                  {/* Tasks Hub Widget */}
-                <div className="lg:col-span-2 bg-white rounded-lg shadow-md flex flex-col h-[500px] border border-slate-100">
+                <div className="bg-white rounded-lg shadow-md flex flex-col h-[500px] border border-slate-100">
                      <div className="p-4 border-b border-slate-100 flex justify-between items-center bg-white rounded-t-lg">
                         <h2 className="text-lg font-bold text-slate-800 flex items-center">
                             <TaskIcon className="w-5 h-5 me-2 text-primary"/>
@@ -438,24 +820,24 @@ const Dashboard: React.FC<DashboardProps> = ({
                         <div className="flex bg-slate-50 rounded-lg p-1 border border-slate-200">
                             <button 
                                 onClick={() => setTaskFilter('TODAY')}
-                                className={`px-4 py-1.5 text-sm font-medium rounded-md transition-colors flex items-center gap-2 ${taskFilter === 'TODAY' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                                className={`px-2 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1 ${taskFilter === 'TODAY' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
                             >
-                                לביצוע היום
-                                {taskCounts.TODAY > 0 && <span className="bg-emerald-100 text-emerald-800 px-1.5 rounded-full text-xs">{taskCounts.TODAY}</span>}
+                                היום
+                                {taskCounts.TODAY > 0 && <span className="bg-emerald-100 text-emerald-800 px-1 rounded-full text-[10px]">{taskCounts.TODAY}</span>}
                             </button>
                              <button 
                                 onClick={() => setTaskFilter('OVERDUE')}
-                                className={`px-4 py-1.5 text-sm font-medium rounded-md transition-colors flex items-center gap-2 ${taskFilter === 'OVERDUE' ? 'bg-white text-red-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                                className={`px-2 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1 ${taskFilter === 'OVERDUE' ? 'bg-white text-red-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
                             >
-                                בפיגור
-                                {taskCounts.OVERDUE > 0 && <span className="bg-red-100 text-red-800 px-1.5 rounded-full text-xs">{taskCounts.OVERDUE}</span>}
+                                איחור
+                                {taskCounts.OVERDUE > 0 && <span className="bg-red-100 text-red-800 px-1 rounded-full text-[10px]">{taskCounts.OVERDUE}</span>}
                             </button>
                             <button 
                                 onClick={() => setTaskFilter('FUTURE')}
-                                className={`px-4 py-1.5 text-sm font-medium rounded-md transition-colors flex items-center gap-2 ${taskFilter === 'FUTURE' ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                                className={`px-2 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1 ${taskFilter === 'FUTURE' ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
                             >
-                                עתידי
-                                {taskCounts.FUTURE > 0 && <span className="bg-blue-100 text-blue-800 px-1.5 rounded-full text-xs">{taskCounts.FUTURE}</span>}
+                                עתיד
+                                {taskCounts.FUTURE > 0 && <span className="bg-blue-100 text-blue-800 px-1 rounded-full text-[10px]">{taskCounts.FUTURE}</span>}
                             </button>
                         </div>
                      </div>
@@ -477,23 +859,6 @@ const Dashboard: React.FC<DashboardProps> = ({
                      </div>
                      <div className="p-3 bg-slate-50 text-xs text-center text-slate-400 border-t border-slate-100 rounded-b-lg">
                         מציג {displayedTasks.length} משימות מתוך {allTasks.length} סה"כ
-                     </div>
-                </div>
-
-                {/* Recent Activity */}
-                <div className="bg-white p-5 rounded-lg shadow-md h-[500px] flex flex-col border border-slate-100">
-                     <h2 className="text-lg font-bold mb-4 pb-2 border-b border-slate-100 text-slate-800">פעילות אחרונה</h2>
-                     <div className="flex-1 overflow-y-auto pe-2 custom-scrollbar">
-                        <ul className="space-y-0 relative">
-                            <div className="absolute top-2 bottom-2 right-1.5 w-px bg-slate-200"></div>
-                            {activities.map((activity, idx) => (
-                                <li key={activity.id} className="text-sm text-slate-600 py-3 relative pr-6">
-                                    <div className="absolute right-0 top-4 w-3 h-3 rounded-full border-2 border-white bg-slate-300 z-10"></div>
-                                    <p className="font-medium text-slate-800">{activity.description}</p>
-                                    <p className="text-xs text-slate-400 mt-1">{activity.timestamp.toLocaleString('he-IL')}</p>
-                                </li>
-                            ))}
-                        </ul>
                      </div>
                 </div>
             </div>

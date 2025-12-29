@@ -1,7 +1,6 @@
-
-import React, { useState, useMemo, useEffect } from 'react';
-import { Order, Supplier, SupplierPayment, PaymentMethod, Attachment, LineItem, AdditionalService, OrderStatusConfiguration } from '../types';
-import { PlusIcon, EditIcon, DeleteIcon } from './icons';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
+import { Order, Supplier, SupplierPayment, PaymentMethod, Attachment, LineItem, AdditionalService, OrderStatusConfiguration, TransactionStatus } from '../types';
+import { PlusIcon, EditIcon, DeleteIcon, DownloadIcon } from './icons';
 import Modal from './Modal';
 
 // --- Helpers & Logic ---
@@ -14,13 +13,15 @@ interface PayableItem {
     orderNumber: string;
     orderDescription: string;
     itemDescription: string;
-    cost: number;
+    cost: number; // Net Cost
+    costGross: number; // Cost + VAT
     paidAmount: number;
-    remainingAmount: number;
+    remainingAmount: number; // Gross - Paid
     orderDate: Date;
     dueDate: Date; // Calculated or Custom
     isCustomDueDate: boolean;
-    status: 'שולם' | 'שולם חלקית' | 'איחור' | 'לתשלום החודש' | 'צפוי';
+    status: 'שולם' | 'שולם חלקית' | 'איחור' | 'לתשלום החודש' | 'צפוי' | 'ממתין לסיום';
+    timeStatus: 'איחור' | 'לתשלום החודש' | 'צפוי' | 'ממתין לסיום'; // Status based purely on time/logic, ignoring partial payments
     payments: SupplierPayment[];
     
     // Helper to locate the item in the original structure
@@ -30,7 +31,7 @@ interface PayableItem {
 
 interface SupplierGroup {
     supplierName: string;
-    totalDue: number;
+    totalDue: number; // Gross Total
     totalPaid: number;
     items: PayableItem[];
 }
@@ -38,12 +39,41 @@ interface SupplierGroup {
 interface MonthlyGroup {
     monthYearKey: string; // "YYYY-MM"
     label: string; // "ינואר 2024"
-    totalDue: number;
+    totalDue: number; // Gross Total
     totalPaid: number;
     items: PayableItem[];
     suppliers: {
         [supplierId: string]: SupplierGroup;
     };
+}
+
+// New Interface for Payment Log Grouping
+interface GroupedPaymentTransaction {
+    id: string; // synthetic ID
+    supplierId: string;
+    supplierName: string;
+    date: Date;
+    method: PaymentMethod;
+    reference: string;
+    totalAmount: number;
+    notes?: string;
+    attachment?: Attachment;
+    sourceLinks: { 
+        orderId: string;
+        itemType: 'lineItem' | 'additionalService';
+        itemIndex: number;
+        paymentId: string;
+    }[];
+    itemsCovered: {
+        uniqueId: string;
+        orderId: string;
+        orderNumber: string;
+        orderDescription: string;
+        itemDescription: string;
+        amountPaid: number;
+        itemRemaining: number;
+        isItemPaidOff: boolean;
+    }[];
 }
 
 const calculateDueDate = (orderDate: Date, paymentTerms: string, customDueDate?: Date): Date => {
@@ -61,6 +91,7 @@ const calculateDueDate = (orderDate: Date, paymentTerms: string, customDueDate?:
         case 'שוטף':
             return endOfMonth;
         case 'תשלום מיידי':
+        case 'עם סיום העבודה': // For calculations, assume "now" if not passed specifically, but logic handles status separately
             return orderDateObj;
         default:
             // Handle simple days like "30"
@@ -74,6 +105,32 @@ const calculateDueDate = (orderDate: Date, paymentTerms: string, customDueDate?:
     }
 };
 
+const exportToCSV = (filename: string, rows: any[][]) => {
+    const processRow = (row: any[]) => {
+        return row.map(val => {
+            if (val === null || val === undefined) return '';
+            let result = val.toString();
+            if (val instanceof Date) result = val.toLocaleString('he-IL');
+            result = result.replace(/"/g, '""');
+            if (result.search(/("|,|\n)/g) >= 0) result = `"${result}"`;
+            return result;
+        }).join(',');
+    };
+
+    const csvContent = '\uFEFF' + rows.map(processRow).join('\n'); // Add BOM for Hebrew Excel support
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement("a");
+    if (link.download !== undefined) {
+        const url = URL.createObjectURL(blob);
+        link.setAttribute("href", url);
+        link.setAttribute("download", filename);
+        link.style.visibility = 'hidden';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    }
+};
+
 // --- Components ---
 
 const StatCard: React.FC<{ title: string; value: string; color?: string }> = ({ title, value, color = "text-slate-900" }) => (
@@ -83,18 +140,135 @@ const StatCard: React.FC<{ title: string; value: string; color?: string }> = ({ 
     </div>
 );
 
+const SmartSupplierSelect: React.FC<{
+    suppliers: Supplier[];
+    selectedId: string;
+    onChange: (id: string) => void;
+}> = ({ suppliers, selectedId, onChange }) => {
+    const [isOpen, setIsOpen] = useState(false);
+    const [searchTerm, setSearchTerm] = useState('');
+    const wrapperRef = useRef<HTMLDivElement>(null);
+
+    // Close on click outside
+    useEffect(() => {
+        function handleClickOutside(event: MouseEvent) {
+            if (wrapperRef.current && !wrapperRef.current.contains(event.target as Node)) {
+                setIsOpen(false);
+            }
+        }
+        document.addEventListener("mousedown", handleClickOutside);
+        return () => document.removeEventListener("mousedown", handleClickOutside);
+    }, []);
+
+    // Sync search term with selection
+    useEffect(() => {
+        if (selectedId === 'all') {
+            setSearchTerm('כל הספקים');
+        } else {
+            const s = suppliers.find(s => s.id === selectedId);
+            setSearchTerm(s ? s.name : '');
+        }
+    }, [selectedId, suppliers]);
+
+    const sortedSuppliers = useMemo(() => {
+        return [...suppliers].sort((a, b) => a.name.localeCompare(b.name, 'he'));
+    }, [suppliers]);
+
+    const filteredSuppliers = useMemo(() => {
+        if (!searchTerm || searchTerm === 'כל הספקים') return sortedSuppliers;
+        return sortedSuppliers.filter(s => s.name.toLowerCase().includes(searchTerm.toLowerCase()));
+    }, [sortedSuppliers, searchTerm]);
+
+    return (
+        <div className="relative w-48" ref={wrapperRef}>
+            <label className="block text-xs font-bold text-slate-500 mb-1">ספק:</label>
+            <div className="relative">
+                <input
+                    type="text"
+                    className="w-full text-sm border border-slate-300 rounded px-2 py-1.5 focus:ring-primary focus:border-primary cursor-pointer truncate pr-8"
+                    value={searchTerm}
+                    onChange={(e) => {
+                        setSearchTerm(e.target.value);
+                        setIsOpen(true);
+                        if (e.target.value === '') onChange('all');
+                    }}
+                    onFocus={() => {
+                        setIsOpen(true);
+                        if (searchTerm === 'כל הספקים') setSearchTerm('');
+                    }}
+                    placeholder="בחר ספק..."
+                />
+                <div className="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none">
+                    <svg className="h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
+                </div>
+            </div>
+
+            {isOpen && (
+                <ul className="absolute z-50 mt-1 w-full bg-white shadow-lg max-h-60 rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 overflow-auto focus:outline-none sm:text-sm custom-scrollbar border border-slate-200">
+                    <li
+                        className="text-gray-900 cursor-pointer select-none relative py-2 pl-3 pr-4 hover:bg-indigo-50 border-b border-slate-100"
+                        onClick={() => {
+                            onChange('all');
+                            setSearchTerm('כל הספקים');
+                            setIsOpen(false);
+                        }}
+                    >
+                        <span className="font-bold block truncate">כל הספקים</span>
+                    </li>
+                    {filteredSuppliers.length === 0 ? (
+                        <li className="text-gray-500 select-none relative py-2 pl-3 pr-9">לא נמצאו תוצאות</li>
+                    ) : (
+                        filteredSuppliers.map((supplier) => (
+                            <li
+                                key={supplier.id}
+                                className={`text-gray-900 cursor-pointer select-none relative py-2 pl-3 pr-4 hover:bg-indigo-50 ${selectedId === supplier.id ? 'bg-indigo-50 text-primary' : ''}`}
+                                onClick={() => {
+                                    onChange(supplier.id);
+                                    setSearchTerm(supplier.name);
+                                    setIsOpen(false);
+                                }}
+                            >
+                                <span className={`block truncate ${selectedId === supplier.id ? 'font-semibold' : 'font-normal'}`}>
+                                    {supplier.name}
+                                </span>
+                            </li>
+                        ))
+                    )}
+                </ul>
+            )}
+        </div>
+    );
+};
+
 const PaymentManagementModal: React.FC<{
-    item: PayableItem;
+    item: PayableItem | null;
+    selectedItems?: PayableItem[]; // New prop for bulk payment
     orders: Order[];
     setOrders: (orders: Order[]) => void;
     onClose: () => void;
-}> = ({ item, orders, setOrders, onClose }) => {
-    const [amount, setAmount] = useState<number>(item.remainingAmount);
+}> = ({ item, selectedItems, orders, setOrders, onClose }) => {
+    // If selectedItems is present, we are in bulk mode. Otherwise single item mode.
+    const isBulk = !!selectedItems && selectedItems.length > 0;
+    const itemsToPay = isBulk ? selectedItems! : (item ? [item] : []);
+    
+    // Default to Full Remaining (Gross)
+    const totalRemaining = itemsToPay.reduce((sum, i) => sum + i.remainingAmount, 0);
+    const supplierName = itemsToPay[0]?.supplierName || '';
+
+    const [amount, setAmount] = useState<number>(totalRemaining);
+    // Date Issued (Transaction Date)
     const [date, setDate] = useState<string>(new Date().toISOString().split('T')[0]);
+    // Repayment Date (Check Maturity)
+    const [repaymentDate, setRepaymentDate] = useState<string>(''); 
+
     const [method, setMethod] = useState<PaymentMethod>(PaymentMethod.BANK_TRANSFER);
     const [reference, setReference] = useState('');
     const [notes, setNotes] = useState('');
-    const [overrideDate, setOverrideDate] = useState<string>(item.dueDate.toISOString().split('T')[0]);
+    
+    // Only for single item:
+    const [overrideDate, setOverrideDate] = useState<string>(item ? item.dueDate.toISOString().split('T')[0] : '');
     const [attachment, setAttachment] = useState<Attachment | undefined>(undefined);
     const [activeTab, setActiveTab] = useState<'new' | 'history' | 'settings'>('new');
 
@@ -117,52 +291,80 @@ const PaymentManagementModal: React.FC<{
     };
 
     const handleSavePayment = () => {
-        const newPayment: SupplierPayment = {
-            id: `sp_${Date.now()}`,
-            amount: Number(amount),
-            date: new Date(date),
-            method,
-            reference,
-            notes,
-            attachment
-        };
+        if (method === PaymentMethod.CHECK) {
+            if (!reference) {
+                alert("חובה להזין מספר צ'ק בשדה אסמכתא");
+                return;
+            }
+            if (!repaymentDate) {
+                alert("חובה להזין תאריך פירעון עבור צ'ק");
+                return;
+            }
+        }
 
         const newOrders = [...orders];
-        const orderIndex = newOrders.findIndex(o => o.id === item.orderId);
-        if (orderIndex === -1) return;
-
-        const order = { ...newOrders[orderIndex] };
+        const paymentIdBase = `sp_${Date.now()}`;
         
-        if (item.itemType === 'lineItem') {
-             const newItems = [...order.lineItems];
-             const targetItem = { ...newItems[item.itemIndex] };
-             targetItem.supplierPayments = [...(targetItem.supplierPayments || []), newPayment];
-             newItems[item.itemIndex] = targetItem;
-             order.lineItems = newItems;
-        } else {
-             const newServices = [...order.additionalServices];
-             const targetService = { ...newServices[item.itemIndex] };
-             targetService.supplierPayments = [...(targetService.supplierPayments || []), newPayment];
-             newServices[item.itemIndex] = targetService;
-             order.additionalServices = newServices;
-        }
-        
-        // Log to Timeline
-        const timelineEvent: any = { 
-            id: `tl_pay_${Date.now()}`,
-            timestamp: new Date(),
-            user: 'מערכת',
-            type: 'LOG',
-            content: `תשלום ספק בסך ₪${newPayment.amount.toLocaleString()} נרשם עבור ${item.itemDescription}. הערות: ${notes || '-'}`
-        };
-        order.timeline = [timelineEvent, ...order.timeline];
+        let amountToDistribute = Number(amount);
 
-        newOrders[orderIndex] = order;
+        itemsToPay.forEach((targetItem, idx) => {
+            if (amountToDistribute <= 0.01) return;
+
+            const amountForThisItem = Math.min(targetItem.remainingAmount, amountToDistribute);
+            
+            // Deduct from pool
+            amountToDistribute -= amountForThisItem;
+
+            const newPayment: SupplierPayment = {
+                id: `${paymentIdBase}_${idx}`,
+                amount: amountForThisItem,
+                date: new Date(date), // Date Issued
+                repaymentDate: method === PaymentMethod.CHECK ? new Date(repaymentDate) : undefined, // Check Maturity
+                method,
+                reference,
+                notes: isBulk ? `תשלום מרוכז. ${notes}` : notes,
+                attachment, // Same attachment linked to all
+                status: 'PENDING' // Default status for new check
+            };
+
+            const orderIndex = newOrders.findIndex(o => o.id === targetItem.orderId);
+            if (orderIndex === -1) return;
+
+            const order = { ...newOrders[orderIndex] };
+            
+            if (targetItem.itemType === 'lineItem') {
+                 const newItems = [...order.lineItems];
+                 const tItem = { ...newItems[targetItem.itemIndex] };
+                 tItem.supplierPayments = [...(tItem.supplierPayments || []), newPayment];
+                 newItems[targetItem.itemIndex] = tItem;
+                 order.lineItems = newItems;
+            } else {
+                 const newServices = [...order.additionalServices];
+                 const tService = { ...newServices[targetItem.itemIndex] };
+                 tService.supplierPayments = [...(tService.supplierPayments || []), newPayment];
+                 newServices[targetItem.itemIndex] = tService;
+                 order.additionalServices = newServices;
+            }
+            
+            // Log to Timeline
+            const timelineEvent: any = { 
+                id: `tl_pay_${Date.now()}_${idx}`,
+                timestamp: new Date(),
+                user: 'מערכת',
+                type: 'LOG',
+                content: `תשלום ספק בסך ₪${newPayment.amount.toLocaleString()} נרשם עבור ${targetItem.itemDescription}.`
+            };
+            order.timeline = [timelineEvent, ...order.timeline];
+            newOrders[orderIndex] = order;
+        });
+
         setOrders(newOrders);
         onClose();
     };
 
     const handleUpdateDueDate = () => {
+        if (isBulk || !item) return; // Only for single item
+
          const newOrders = [...orders];
         const orderIndex = newOrders.findIndex(o => o.id === item.orderId);
         if (orderIndex === -1) return;
@@ -189,23 +391,54 @@ const PaymentManagementModal: React.FC<{
     };
 
     return (
-        <Modal title={`ניהול תשלום - ${item.supplierName}`} onClose={onClose} size="xl">
-            <div className="mb-4 border-b border-slate-200">
-                 <nav className="-mb-px flex space-x-6 space-x-reverse">
-                    <button onClick={() => setActiveTab('new')} className={`pb-2 border-b-2 font-medium text-sm ${activeTab === 'new' ? 'border-primary text-primary' : 'border-transparent text-slate-500 hover:text-slate-700'}`}>תשלום חדש</button>
-                    <button onClick={() => setActiveTab('history')} className={`pb-2 border-b-2 font-medium text-sm ${activeTab === 'history' ? 'border-primary text-primary' : 'border-transparent text-slate-500 hover:text-slate-700'}`}>היסטוריה ({item.payments.length})</button>
-                    <button onClick={() => setActiveTab('settings')} className={`pb-2 border-b-2 font-medium text-sm ${activeTab === 'settings' ? 'border-primary text-primary' : 'border-transparent text-slate-500 hover:text-slate-700'}`}>שינוי תאריכים</button>
-                </nav>
-            </div>
+        <Modal title={isBulk ? `תשלום מרוכז - ${supplierName}` : `ניהול תשלום - ${item?.supplierName}`} onClose={onClose} size="xl">
+            {!isBulk && (
+                <div className="mb-4 border-b border-slate-200">
+                     <nav className="-mb-px flex space-x-6 space-x-reverse">
+                        <button onClick={() => setActiveTab('new')} className={`pb-2 border-b-2 font-medium text-sm ${activeTab === 'new' ? 'border-primary text-primary' : 'border-transparent text-slate-500 hover:text-slate-700'}`}>תשלום חדש</button>
+                        <button onClick={() => setActiveTab('history')} className={`pb-2 border-b-2 font-medium text-sm ${activeTab === 'history' ? 'border-primary text-primary' : 'border-transparent text-slate-500 hover:text-slate-700'}`}>היסטוריה ({item?.payments.length})</button>
+                        <button onClick={() => setActiveTab('settings')} className={`pb-2 border-b-2 font-medium text-sm ${activeTab === 'settings' ? 'border-primary text-primary' : 'border-transparent text-slate-500 hover:text-slate-700'}`}>שינוי תאריכים</button>
+                    </nav>
+                </div>
+            )}
 
             {activeTab === 'new' && (
                 <div className="space-y-4 text-start">
                     <div className="bg-slate-50 p-3 rounded border border-slate-200 mb-4">
-                        <p className="text-sm text-slate-600">עבור: <strong>{item.orderNumber}</strong> - {item.itemDescription}</p>
-                        <div className="flex justify-between mt-2">
-                            <span>סה"כ עלות: ₪{item.cost.toLocaleString()}</span>
-                            <span className="text-red-600 font-bold">יתרה לתשלום: ₪{item.remainingAmount.toLocaleString()}</span>
-                        </div>
+                        {isBulk ? (
+                            <div className="flex justify-between items-center">
+                                <div>
+                                    <p className="font-bold text-slate-800">נבחרו {itemsToPay.length} פריטים לתשלום</p>
+                                    <p className="text-xs text-slate-500">ספק: {supplierName}</p>
+                                </div>
+                                <div className="text-left">
+                                    <span className="block text-xs text-slate-500">סה"כ לתשלום</span>
+                                    <span className="text-xl font-bold text-red-600">₪{totalRemaining.toLocaleString()}</span>
+                                </div>
+                            </div>
+                        ) : (
+                            <>
+                                <p className="text-sm text-slate-600">עבור: <strong>{item?.orderNumber}</strong> - {item?.itemDescription}</p>
+                                <div className="flex flex-col gap-1 mt-2 bg-white p-2 rounded border border-slate-200">
+                                    <div className="flex justify-between text-xs text-slate-500">
+                                        <span>עלות (נטו):</span>
+                                        <span>₪{item?.cost.toLocaleString()}</span>
+                                    </div>
+                                    <div className="flex justify-between text-xs font-bold text-slate-700">
+                                        <span>עלות (כולל מע"מ):</span>
+                                        <span>₪{item?.costGross.toLocaleString()}</span>
+                                    </div>
+                                    <div className="flex justify-between border-t pt-1 mt-1 text-sm">
+                                        <span>שולם עד כה:</span>
+                                        <span className="text-green-600">₪{item?.paidAmount.toLocaleString()}</span>
+                                    </div>
+                                    <div className="flex justify-between text-sm font-bold text-red-600">
+                                        <span>יתרה לתשלום:</span>
+                                        <span>₪{item?.remainingAmount.toLocaleString()}</span>
+                                    </div>
+                                </div>
+                            </>
+                        )}
                     </div>
 
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -214,21 +447,36 @@ const PaymentManagementModal: React.FC<{
                             <input type="number" value={amount} onChange={e => setAmount(Number(e.target.value))} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
                         </div>
                         <div>
-                            <label className="block text-sm font-medium text-slate-700">תאריך ביצוע</label>
-                            <input type="date" value={date} onChange={e => setDate(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
-                        </div>
-                        <div>
                             <label className="block text-sm font-medium text-slate-700">אמצעי תשלום</label>
                             <select value={method} onChange={e => setMethod(e.target.value as PaymentMethod)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm">
                                 {Object.values(PaymentMethod).map(m => <option key={m} value={m}>{m}</option>)}
                             </select>
                         </div>
                         <div>
-                            <label className="block text-sm font-medium text-slate-700">אסמכתא</label>
-                            <input type="text" value={reference} onChange={e => setReference(e.target.value)} placeholder="מס' צ'ק / אישור העברה" className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+                            <label className="block text-sm font-medium text-slate-700">תאריך ביצוע/מסירה</label>
+                            <input type="date" value={date} onChange={e => setDate(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+                        </div>
+                        <div>
+                            <label className="block text-sm font-medium text-slate-700">
+                                אסמכתא {method === PaymentMethod.CHECK && <span className="text-red-500">*</span>}
+                            </label>
+                            <input 
+                                type="text" 
+                                value={reference} 
+                                onChange={e => setReference(e.target.value)} 
+                                placeholder={method === PaymentMethod.CHECK ? "הזן מספר צ'ק (חובה)" : "מס' צ'ק / אישור העברה"} 
+                                className={`mt-1 block w-full rounded-md shadow-sm focus:border-primary focus:ring-primary sm:text-sm ${method === PaymentMethod.CHECK && !reference ? 'border-red-300' : 'border-slate-300'}`} 
+                            />
                         </div>
                     </div>
                     
+                    {method === PaymentMethod.CHECK && (
+                        <div className="bg-yellow-50 p-3 rounded border border-yellow-200">
+                            <label className="block text-sm font-bold text-yellow-800">תאריך פירעון הצ'ק (מועד הגבייה מהבנק)</label>
+                            <input type="date" value={repaymentDate} onChange={e => setRepaymentDate(e.target.value)} className="mt-1 block w-full rounded-md border-yellow-300 shadow-sm focus:border-yellow-500 focus:ring-yellow-500 sm:text-sm" required />
+                        </div>
+                    )}
+
                     <div>
                         <label className="block text-sm font-medium text-slate-700">קובץ אסמכתא</label>
                         <input type="file" onChange={handleFileChange} className="mt-1 block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100" />
@@ -241,12 +489,14 @@ const PaymentManagementModal: React.FC<{
                     </div>
 
                     <div className="flex justify-end pt-4">
-                        <button onClick={handleSavePayment} className="px-4 py-2 bg-primary text-white rounded-md hover:bg-indigo-700">שמור תשלום</button>
+                        <button onClick={handleSavePayment} className="px-4 py-2 bg-primary text-white rounded-md hover:bg-indigo-700">
+                            {isBulk ? 'בצע תשלום מרוכז' : 'שמור תשלום'}
+                        </button>
                     </div>
                 </div>
             )}
 
-            {activeTab === 'history' && (
+            {activeTab === 'history' && !isBulk && item && (
                 <div className="space-y-3">
                     {item.payments.length === 0 ? (
                         <p className="text-slate-500 text-center py-4">אין היסטוריית תשלומים לפריט זה.</p>
@@ -257,7 +507,7 @@ const PaymentManagementModal: React.FC<{
                                     <th className="px-3 py-2 text-start text-xs font-medium text-slate-500">תאריך</th>
                                     <th className="px-3 py-2 text-start text-xs font-medium text-slate-500">סכום</th>
                                     <th className="px-3 py-2 text-start text-xs font-medium text-slate-500">שיטה</th>
-                                    <th className="px-3 py-2 text-start text-xs font-medium text-slate-500">אסמכתא</th>
+                                    <th className="px-3 py-2 text-start text-xs font-medium text-slate-500">סטטוס</th>
                                     <th className="px-3 py-2 text-start text-xs font-medium text-slate-500">הערות</th>
                                     <th className="px-3 py-2 text-start text-xs font-medium text-slate-500">קובץ</th>
                                 </tr>
@@ -265,10 +515,17 @@ const PaymentManagementModal: React.FC<{
                             <tbody className="bg-white divide-y divide-slate-200">
                                 {item.payments.map(p => (
                                     <tr key={p.id}>
-                                        <td className="px-3 py-2 text-sm">{new Date(p.date).toLocaleDateString('he-IL')}</td>
+                                        <td className="px-3 py-2 text-sm">
+                                            {new Date(p.date).toLocaleDateString('he-IL')}
+                                            {p.repaymentDate && <div className="text-xs text-slate-400">פירעון: {new Date(p.repaymentDate).toLocaleDateString('he-IL')}</div>}
+                                        </td>
                                         <td className="px-3 py-2 text-sm font-semibold text-green-600">₪{p.amount.toLocaleString()}</td>
                                         <td className="px-3 py-2 text-sm">{p.method}</td>
-                                        <td className="px-3 py-2 text-sm">{p.reference || '-'}</td>
+                                        <td className="px-3 py-2 text-sm">
+                                            <span className={`text-xs px-2 py-0.5 rounded ${p.status === 'BOUNCED' || p.status === 'CANCELED' ? 'bg-red-100 text-red-800' : 'bg-green-100 text-green-800'}`}>
+                                                {p.status || 'שולם'}
+                                            </span>
+                                        </td>
                                         <td className="px-3 py-2 text-sm max-w-xs truncate" title={p.notes}>{p.notes || '-'}</td>
                                         <td className="px-3 py-2 text-sm">
                                             {p.attachment ? (
@@ -283,7 +540,7 @@ const PaymentManagementModal: React.FC<{
                 </div>
             )}
 
-            {activeTab === 'settings' && (
+            {activeTab === 'settings' && !isBulk && item && (
                 <div className="space-y-4 text-start">
                     <div className="bg-yellow-50 border border-yellow-200 p-4 rounded text-sm text-yellow-800">
                         כאן ניתן לשנות ידנית את תאריך היעד לתשלום עבור פריט זה בלבד.<br/>
@@ -312,13 +569,38 @@ interface ReportsPageProps {
     onNavigateToOrder: (orderId: string) => void;
     setOrders?: React.Dispatch<React.SetStateAction<Order[]>>;
     statusConfigs: OrderStatusConfiguration[];
+    vatRate: number; // Added VAT rate
 }
 
-const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigateToOrder, setOrders, statusConfigs }) => {
-    const [viewMode, setViewMode] = useState<'forecast' | 'purchase_history'>('forecast');
+const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigateToOrder, setOrders, statusConfigs, vatRate }) => {
+    // --- State ---
+    const [viewMode, setViewMode] = useState<'forecast' | 'purchase_history' | 'payment_log'>('forecast');
+    
+    // Filters
+    const [supplierFilterId, setSupplierFilterId] = useState<string>('all');
+    // Default start date: 3 months ago to show recent history + future
+    const [dateStart, setDateStart] = useState<string>(() => {
+        const d = new Date();
+        d.setMonth(d.getMonth() - 3);
+        return d.toISOString().split('T')[0];
+    });
+    const [dateEnd, setDateEnd] = useState<string>(''); // Open ended by default
+    const [showPaid, setShowPaid] = useState(false);
+
+    // Expansion
     const [expandedMonths, setExpandedMonths] = useState<Set<string>>(new Set());
     const [expandedSuppliers, setExpandedSuppliers] = useState<Set<string>>(new Set());
-    const [selectedItemForPayment, setSelectedItemForPayment] = useState<PayableItem | null>(null);
+    // For Payment Log
+    const [expandedPaymentIds, setExpandedPaymentIds] = useState<Set<string>>(new Set());
+    
+    // Quick Edit State
+    const [editingPaymentGroupId, setEditingPaymentGroupId] = useState<string | null>(null);
+    const [editForm, setEditForm] = useState({ reference: '', notes: '' });
+
+    // Selection for Bulk Payment
+    const [selectedItemIds, setSelectedItemIds] = useState<Set<string>>(new Set());
+    const [selectedItemForPayment, setSelectedItemForPayment] = useState<PayableItem | null>(null); // Single payment
+    const [isBulkPaymentModalOpen, setIsBulkPaymentModalOpen] = useState(false); // Bulk payment
 
     const canManagePayments = !!setOrders;
 
@@ -333,11 +615,13 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
         // Filter out non-deal orders based on dynamic status configuration
         const activeOrders = orders.filter(order => {
             const statusConfig = statusConfigs.find(c => c.label === order.orderStatus);
-            // Default to true if config not found (to be safe), or use the flag
             return statusConfig ? statusConfig.isActiveDeal : true;
         });
 
         activeOrders.forEach(order => {
+             const currentOrderVat = order.vatRate ?? vatRate;
+             const vatMultiplier = 1 + (currentOrderVat / 100);
+
              const process = (costItem: LineItem | AdditionalService, type: 'lineItem' | 'additionalService', index: number) => {
                 if (!costItem.cost || costItem.cost <= 0) return;
                 
@@ -346,35 +630,68 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
                 const supplier = supplierMap.get(supplierId);
                 if (!supplier) return;
 
-                const dueDate = calculateDueDate(order.date, supplier.paymentTerms, costItem.customDueDate);
+                const calculationBaseDate = order.dealStartDate || order.date;
+                let effectivePaymentTerms = supplier.paymentTerms;
+                const dueDate = calculateDueDate(calculationBaseDate, effectivePaymentTerms, costItem.customDueDate);
                 
-                // Calculate total cost for the item based on type
                 let totalItemCost = costItem.cost;
                 if (type === 'lineItem') {
                      const li = costItem as LineItem;
                      totalItemCost = li.cost * (li.quantity || 1);
                 }
 
-                // Calculate totals
-                const payments = costItem.supplierPayments || [];
-                const paidAmount = payments.reduce((sum, p) => sum + p.amount, 0);
-                const remainingAmount = totalItemCost - paidAmount;
+                // Calculate Gross (Including VAT)
+                const costGross = totalItemCost * vatMultiplier;
 
-                // Determine Status
-                let status: PayableItem['status'] = 'צפוי';
-                if (remainingAmount <= 0.1) { // Floating point tolerance
-                    status = 'שולם';
-                } else if (paidAmount > 0) {
-                    status = 'שולם חלקית';
-                } else {
+                const payments = costItem.supplierPayments || [];
+                
+                // IMPORTANT: Calculate paid amount EXCLUDING canceled/bounced checks
+                const paidAmount = payments.reduce((sum, p) => {
+                    const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
+                    if (p.status && invalidStatuses.includes(p.status)) {
+                        return sum;
+                    }
+                    return sum + p.amount;
+                }, 0);
+                
+                // Balance calculation is based on Gross Amount
+                const remainingAmount = costGross - paidAmount;
+
+                // Determine Time-based Status (ignoring payments) to properly categorize partials
+                let timeStatus: PayableItem['timeStatus'] = 'צפוי';
+                
+                 if (effectivePaymentTerms === 'עם סיום העבודה') {
+                     const config = statusConfigs.find(c => c.label === order.orderStatus);
+                     if (!config?.isCompleted) {
+                         timeStatus = 'ממתין לסיום';
+                     } else {
+                         const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+                         const endOfMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+                         
+                         if (dueDate < today) {
+                             timeStatus = 'איחור';
+                         } else if (dueDate >= startOfMonth && dueDate <= endOfMonth) {
+                             timeStatus = 'לתשלום החודש';
+                         }
+                     }
+                 } else {
                      const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
                      const endOfMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0);
                      
                      if (dueDate < today) {
-                         status = 'איחור';
+                         timeStatus = 'איחור';
                      } else if (dueDate >= startOfMonth && dueDate <= endOfMonth) {
-                         status = 'לתשלום החודש';
+                         timeStatus = 'לתשלום החודש';
                      }
+                 }
+
+                // Determine Display Status (Includes payment state)
+                let status: PayableItem['status'] = timeStatus; 
+                
+                if (remainingAmount <= 0.1) {
+                    status = 'שולם';
+                } else if (paidAmount > 0) {
+                    status = 'שולם חלקית';
                 }
 
                 items.push({
@@ -385,13 +702,15 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
                     orderNumber: order.orderNumber,
                     orderDescription: order.description,
                     itemDescription: costItem.description,
-                    cost: totalItemCost,
+                    cost: totalItemCost, // Net
+                    costGross: costGross, // Gross
                     paidAmount,
                     remainingAmount: Math.max(0, remainingAmount),
                     orderDate: order.date,
                     dueDate,
                     isCustomDueDate: !!costItem.customDueDate,
                     status,
+                    timeStatus, // Added for correct stats calculation
                     payments,
                     itemType: type,
                     itemIndex: index,
@@ -402,17 +721,139 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
              order.additionalServices.forEach((as, idx) => process(as, 'additionalService', idx));
         });
         return items;
-    }, [orders, suppliers, statusConfigs]);
+    }, [orders, suppliers, statusConfigs, vatRate]);
 
+    // --- Payment Log Grouping ---
+    const groupedPayments = useMemo(() => {
+        const groups = new Map<string, GroupedPaymentTransaction>();
+        
+        rawPayables.forEach(item => {
+            if (item.payments && item.payments.length > 0) {
+                item.payments.forEach(p => {
+                    const dateStr = p.date.toISOString().split('T')[0];
+                    const safeRef = p.reference || 'NO_REF';
+                    // Group Key: Date + Supplier + Reference + Method
+                    const key = `${dateStr}_${item.supplierId}_${safeRef}_${p.method}`;
+                    
+                    if (!groups.has(key)) {
+                        groups.set(key, {
+                            id: key,
+                            supplierId: item.supplierId,
+                            supplierName: item.supplierName,
+                            date: p.date,
+                            method: p.method,
+                            reference: p.reference || '',
+                            totalAmount: 0,
+                            notes: p.notes, // Take first note
+                            attachment: p.attachment, // Take first attachment
+                            sourceLinks: [],
+                            itemsCovered: []
+                        });
+                    }
+                    
+                    const group = groups.get(key)!;
+                    
+                    // Logic update: Ensure note is captured if present in any of the items in the group
+                    if (!group.notes && p.notes) {
+                        group.notes = p.notes;
+                    }
+
+                    group.totalAmount += p.amount;
+                    
+                    // Add source link for edit/update logic
+                    group.sourceLinks.push({
+                        orderId: item.orderId,
+                        itemType: item.itemType,
+                        itemIndex: item.itemIndex,
+                        paymentId: p.id
+                    });
+
+                    group.itemsCovered.push({
+                        uniqueId: item.uniqueId,
+                        orderId: item.orderId,
+                        orderNumber: item.orderNumber,
+                        orderDescription: item.orderDescription, // Project/Context
+                        itemDescription: item.itemDescription,
+                        amountPaid: p.amount,
+                        itemRemaining: item.remainingAmount,
+                        isItemPaidOff: item.remainingAmount <= 0.1
+                    });
+                });
+            }
+        });
+
+        // Convert map to array and sort by date descending
+        let result = Array.from(groups.values());
+        
+        // Apply Filters to Payment Log as well
+        if (supplierFilterId !== 'all') {
+            result = result.filter(g => g.supplierId === supplierFilterId);
+        }
+        
+        // Date filters for Log (based on payment date)
+        const start = dateStart ? new Date(dateStart) : null;
+        const end = dateEnd ? new Date(dateEnd) : null;
+        if (start) start.setHours(0,0,0,0);
+        if (end) end.setHours(23,59,59,999);
+
+        result = result.filter(g => {
+            if (start && g.date < start) return false;
+            if (end && g.date > end) return false;
+            return true;
+        });
+
+        return result.sort((a,b) => b.date.getTime() - a.date.getTime());
+    }, [rawPayables, supplierFilterId, dateStart, dateEnd]);
+
+
+    // --- Filtering Logic ---
+    const filteredItems = useMemo(() => {
+        let items = rawPayables;
+
+        // 1. Supplier Filter
+        if (supplierFilterId !== 'all') {
+            items = items.filter(i => i.supplierId === supplierFilterId);
+        }
+
+        // 2. Paid Filter (Hide fully paid if toggle off)
+        if (!showPaid) {
+            items = items.filter(i => i.status !== 'שולם');
+        }
+
+        // 3. Date Range Filter (BUT keep overdue items visible!)
+        const start = dateStart ? new Date(dateStart) : null;
+        const end = dateEnd ? new Date(dateEnd) : null;
+        
+        if (start) start.setHours(0,0,0,0);
+        if (end) end.setHours(23,59,59,999);
+
+        items = items.filter(item => {
+            // Always show overdue unpaid items regardless of date filter
+            // Note: use timeStatus to check if it *should* be paid, even if paid partially
+            if (item.timeStatus === 'איחור' && item.remainingAmount > 1) return true;
+
+            const dateToCheck = viewMode === 'forecast' ? item.dueDate : item.orderDate;
+            if (start && dateToCheck < start) return false;
+            if (end && dateToCheck > end) return false;
+            return true;
+        });
+
+        // Sort items by date (oldest first for payments usually, but visual preference varies)
+        return items.sort((a,b) => {
+             const dateA = viewMode === 'forecast' ? a.dueDate : a.orderDate;
+             const dateB = viewMode === 'forecast' ? b.dueDate : b.orderDate;
+             return dateA.getTime() - dateB.getTime();
+        });
+
+    }, [rawPayables, supplierFilterId, dateStart, dateEnd, showPaid, viewMode]);
+
+    // --- Grouping Logic ---
     const groupedData = useMemo(() => {
         const groups: Record<string, MonthlyGroup> = {};
-        
-        // Helper to get month key
         const getMonthKey = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
         const getMonthLabel = (date: Date) => date.toLocaleString('he-IL', { month: 'long', year: 'numeric' });
 
-        rawPayables.forEach(item => {
-            // Determine grouping key based on View Mode
+        filteredItems.forEach(item => {
             const keyDate = viewMode === 'forecast' ? item.dueDate : item.orderDate;
             const key = getMonthKey(keyDate);
 
@@ -427,12 +868,10 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
                 };
             }
 
-            // Accumulate Month Totals
-            groups[key].totalDue += item.cost;
+            groups[key].totalDue += item.costGross; // Use Gross for totals
             groups[key].totalPaid += item.paidAmount;
             groups[key].items.push(item);
 
-            // Group by Supplier inside Month
             if (!groups[key].suppliers[item.supplierId]) {
                 groups[key].suppliers[item.supplierId] = {
                     supplierName: item.supplierName,
@@ -442,16 +881,16 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
                 };
             }
             
-            groups[key].suppliers[item.supplierId].totalDue += item.cost;
+            groups[key].suppliers[item.supplierId].totalDue += item.costGross; // Use Gross for totals
             groups[key].suppliers[item.supplierId].totalPaid += item.paidAmount;
             groups[key].suppliers[item.supplierId].items.push(item);
         });
 
-        // Sort months
+        // Sort months: For forecast, we want overdue/current first (ascending).
         return Object.values(groups).sort((a, b) => a.monthYearKey.localeCompare(b.monthYearKey));
-    }, [rawPayables, viewMode]);
+    }, [filteredItems, viewMode, supplierFilterId]);
 
-    // --- Interactions ---
+    // --- Handlers ---
 
     const toggleMonth = (key: string) => {
         const newSet = new Set(expandedMonths);
@@ -467,13 +906,175 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
         setExpandedSuppliers(newSet);
     };
 
+    const togglePaymentGroup = (key: string) => {
+        const newSet = new Set(expandedPaymentIds);
+        if (newSet.has(key)) newSet.delete(key);
+        else newSet.add(key);
+        setExpandedPaymentIds(newSet);
+    }
+
+    // --- Selection Handlers ---
+    const handleCheckboxChange = (itemId: string, supplierId: string) => {
+        setSelectedItemIds(prev => {
+            const newSet = new Set(prev);
+            // Check if adding: allow only if same supplier as currently selected items (if any)
+            if (!newSet.has(itemId)) {
+                if (newSet.size > 0) {
+                    // Check if current selection has mixed suppliers (shouldn't happen with UI logic, but safe guard)
+                    const firstId = Array.from(newSet)[0];
+                    const firstItem = rawPayables.find(i => i.uniqueId === firstId);
+                    if (firstItem && firstItem.supplierId !== supplierId) {
+                        alert("לא ניתן לבחור פריטים מספקים שונים לתשלום מרוכז.");
+                        return prev;
+                    }
+                }
+                newSet.add(itemId);
+            } else {
+                newSet.delete(itemId);
+            }
+            return newSet;
+        });
+    };
+
+    const getSelectedItems = () => {
+        return rawPayables.filter(i => selectedItemIds.has(i.uniqueId));
+    };
+
+    const openBulkPayment = () => {
+        const selected = getSelectedItems();
+        if (selected.length === 0) return;
+        setIsBulkPaymentModalOpen(true);
+    };
+
+    // --- Payment Edit Handlers ---
+    const startEditingGroup = (group: GroupedPaymentTransaction) => {
+        setEditForm({ reference: group.reference, notes: group.notes || '' });
+        setEditingPaymentGroupId(group.id);
+    };
+
+    const cancelEditingGroup = () => {
+        setEditingPaymentGroupId(null);
+    };
+
+    const saveGroupEdit = (group: GroupedPaymentTransaction) => {
+        if (!setOrders) return;
+        
+        // Clone orders to mutate
+        const newOrders = [...orders];
+        let hasChanges = false;
+
+        // Iterate through all source links in the group and update them
+        group.sourceLinks.forEach(link => {
+            const orderIndex = newOrders.findIndex(o => o.id === link.orderId);
+            if (orderIndex === -1) return;
+
+            const order = { ...newOrders[orderIndex] };
+            let updated = false;
+
+            if (link.itemType === 'lineItem') {
+                const newItems = [...order.lineItems];
+                const item = { ...newItems[link.itemIndex] };
+                if (item.supplierPayments) {
+                    item.supplierPayments = item.supplierPayments.map(p => {
+                        if (p.id === link.paymentId) {
+                            updated = true;
+                            return { ...p, reference: editForm.reference, notes: editForm.notes };
+                        }
+                        return p;
+                    });
+                    newItems[link.itemIndex] = item;
+                    order.lineItems = newItems;
+                }
+            } else {
+                const newServices = [...order.additionalServices];
+                const service = { ...newServices[link.itemIndex] };
+                if (service.supplierPayments) {
+                    service.supplierPayments = service.supplierPayments.map(p => {
+                        if (p.id === link.paymentId) {
+                            updated = true;
+                            return { ...p, reference: editForm.reference, notes: editForm.notes };
+                        }
+                        return p;
+                    });
+                    newServices[link.itemIndex] = service;
+                    order.additionalServices = newServices;
+                }
+            }
+
+            if (updated) {
+                newOrders[orderIndex] = order;
+                hasChanges = true;
+            }
+        });
+
+        if (hasChanges) {
+            setOrders(newOrders);
+        }
+        setEditingPaymentGroupId(null);
+    };
+
+    // Auto-expand current month + overdue
+    useEffect(() => {
+        const nowKey = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
+        setExpandedMonths(prev => {
+            const next = new Set(prev);
+            groupedData.forEach(g => {
+                if (g.monthYearKey <= nowKey) next.add(g.monthYearKey);
+            });
+            return next;
+        });
+    }, [groupedData.length]);
+
     // --- Summary Stats ---
     const totalDebt = rawPayables.reduce((sum, item) => sum + item.remainingAmount, 0);
-    const overdueDebt = rawPayables.filter(i => i.status === 'איחור').reduce((sum, item) => sum + item.remainingAmount, 0);
-    const thisMonthDue = rawPayables.filter(i => i.status === 'לתשלום החודש').reduce((sum, item) => sum + item.remainingAmount, 0);
+    
+    // Updated calculation: Use timeStatus instead of status to catch partially paid items that are overdue/due this month
+    const overdueDebt = rawPayables
+        .filter(i => i.remainingAmount > 0.1 && i.timeStatus === 'איחור')
+        .reduce((sum, item) => sum + item.remainingAmount, 0);
+        
+    const thisMonthDue = rawPayables
+        .filter(i => i.remainingAmount > 0.1 && i.timeStatus === 'לתשלום החודש')
+        .reduce((sum, item) => sum + item.remainingAmount, 0);
+
+    const selectedItemsTotal = getSelectedItems().reduce((sum, i) => sum + i.remainingAmount, 0);
+
+    const handleExport = () => {
+        let filename = `report_${viewMode}_${new Date().toISOString().split('T')[0]}.csv`;
+        let header: string[] = [];
+        let rows: any[][] = [];
+
+        if (viewMode === 'payment_log') {
+            header = ["תאריך", "ספק", "שיטה", "אסמכתא", 'סה"כ שולם', "הערות"];
+            rows = groupedPayments.map(g => [
+                g.date.toLocaleDateString('he-IL'),
+                g.supplierName,
+                g.method,
+                g.reference,
+                g.totalAmount,
+                g.notes || ''
+            ]);
+        } else {
+            header = ["ספק", "הזמנה", "פריט", "תאריך הזמנה", "תאריך יעד", "עלות נטו", "עלות ברוטו", "שולם", "יתרה", "סטטוס"];
+            rows = filteredItems.map(item => [
+                item.supplierName,
+                item.orderNumber,
+                item.itemDescription,
+                item.orderDate.toLocaleDateString('he-IL'),
+                item.dueDate.toLocaleDateString('he-IL'),
+                item.cost,
+                item.costGross,
+                item.paidAmount,
+                item.remainingAmount,
+                item.status
+            ]);
+        }
+
+        exportToCSV(filename, [header, ...rows]);
+    };
 
     return (
-        <div className="space-y-6 pb-20">
+        <div className="space-y-6 pb-24 relative">
             {/* Stats Row */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <StatCard title='סה"כ חוב פתוח' value={`₪${totalDebt.toLocaleString()}`} />
@@ -481,134 +1082,213 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
                 <StatCard title="לתשלום החודש" value={`₪${thisMonthDue.toLocaleString()}`} color="text-orange-600" />
             </div>
 
-            {/* View Switcher */}
-            <div className="flex justify-center mb-6">
-                <div className="bg-white p-1 rounded-lg shadow border border-slate-200 flex">
-                    <button
-                        onClick={() => setViewMode('forecast')}
-                        className={`px-6 py-2 rounded-md text-sm font-medium transition-colors ${viewMode === 'forecast' ? 'bg-primary text-white shadow-sm' : 'text-slate-600 hover:bg-slate-50'}`}
-                    >
-                        תחזית תזרים (לפי תאריך תשלום)
-                    </button>
-                    <button
-                        onClick={() => setViewMode('purchase_history')}
-                        className={`px-6 py-2 rounded-md text-sm font-medium transition-colors ${viewMode === 'purchase_history' ? 'bg-primary text-white shadow-sm' : 'text-slate-600 hover:bg-slate-50'}`}
-                    >
-                        היסטוריית רכש (לפי תאריך הזמנה)
-                    </button>
+            {/* Filter Bar */}
+            <div className="bg-white p-4 rounded-lg shadow-sm border border-slate-200 flex flex-col md:flex-row gap-4 items-end md:items-center justify-between">
+                <div className="flex flex-wrap gap-4 w-full md:w-auto">
+                    {/* View Mode */}
+                    <div className="flex bg-slate-100 rounded p-1">
+                        <button onClick={() => setViewMode('forecast')} className={`px-3 py-1.5 text-xs font-medium rounded transition-colors ${viewMode === 'forecast' ? 'bg-white shadow text-primary' : 'text-slate-600'}`}>תחזית תזרים</button>
+                        <button onClick={() => setViewMode('purchase_history')} className={`px-3 py-1.5 text-xs font-medium rounded transition-colors ${viewMode === 'purchase_history' ? 'bg-white shadow text-primary' : 'text-slate-600'}`}>היסטוריית רכש</button>
+                        <button onClick={() => setViewMode('payment_log')} className={`px-3 py-1.5 text-xs font-medium rounded transition-colors ${viewMode === 'payment_log' ? 'bg-white shadow text-primary' : 'text-slate-600'}`}>יומן תשלומים</button>
+                    </div>
+
+                    {/* Supplier Select with Smart Search */}
+                    <SmartSupplierSelect 
+                        suppliers={suppliers} 
+                        selectedId={supplierFilterId} 
+                        onChange={(id) => setSupplierFilterId(id)}
+                    />
+
+                    {/* Date Range */}
+                    <div className="flex items-center gap-2">
+                        <div>
+                            <label className="block text-xs font-bold text-slate-500 mb-1">מ-:</label>
+                            <input type="date" value={dateStart} onChange={e => setDateStart(e.target.value)} className="text-sm border border-slate-300 rounded px-2 py-1.5 w-32" />
+                        </div>
+                        <div>
+                            <label className="block text-xs font-bold text-slate-500 mb-1">עד:</label>
+                            <input type="date" value={dateEnd} onChange={e => setDateEnd(e.target.value)} className="text-sm border border-slate-300 rounded px-2 py-1.5 w-32" />
+                        </div>
+                    </div>
+
+                    {/* Show Paid Toggle (Only relevant for item views) */}
+                    {viewMode !== 'payment_log' && (
+                        <div className="flex items-center mt-4">
+                            <input type="checkbox" id="showPaid" checked={showPaid} onChange={e => setShowPaid(e.target.checked)} className="h-4 w-4 text-primary border-gray-300 rounded focus:ring-primary me-2" />
+                            <label htmlFor="showPaid" className="text-sm text-slate-600 select-none">הצג שולמו</label>
+                        </div>
+                    )}
                 </div>
+
+                {/* Export Button */}
+                <button onClick={handleExport} className="flex items-center gap-2 bg-green-50 text-green-700 px-4 py-2 rounded-md hover:bg-green-100 transition-colors border border-green-200 text-sm font-bold">
+                    <DownloadIcon className="w-4 h-4" />
+                    ייצוא נתונים
+                </button>
             </div>
 
-            {/* Accordion List */}
+            {/* Content Area */}
             <div className="space-y-4">
-                {groupedData.length === 0 && <div className="text-center text-slate-500 py-10">לא נמצאו נתונים להצגה.</div>}
                 
-                {groupedData.map(group => (
-                    <div key={group.monthYearKey} className="bg-white rounded-lg shadow-sm border border-slate-200 overflow-hidden">
-                        {/* Month Header */}
-                        <div 
-                            onClick={() => toggleMonth(group.monthYearKey)}
-                            className="flex items-center justify-between p-4 bg-slate-50 cursor-pointer hover:bg-slate-100 transition-colors"
-                        >
-                            <div className="flex items-center gap-3">
-                                <div className={`transform transition-transform ${expandedMonths.has(group.monthYearKey) ? 'rotate-180' : ''}`}>
-                                    <svg className="h-5 w-5 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
-                                </div>
-                                <h3 className="text-lg font-semibold text-slate-800">{group.label}</h3>
-                                <span className="text-xs bg-slate-200 text-slate-600 px-2 py-0.5 rounded-full">{group.items.length} פריטים</span>
+                {/* PAYMENT LOG VIEW */}
+                {viewMode === 'payment_log' ? (
+                    groupedPayments.length === 0 ? (
+                        <div className="text-center text-slate-500 py-10">לא נמצאו תשלומים בטווח התאריכים הנבחר.</div>
+                    ) : (
+                        <div className="space-y-3">
+                            <div className="hidden md:grid grid-cols-12 gap-4 px-4 py-2 text-xs font-bold text-slate-500 bg-slate-100 rounded-t-lg border-b border-slate-200 text-center">
+                                <div className="col-span-2">תאריך</div>
+                                <div className="col-span-2">ספק</div>
+                                <div className="col-span-2">שיטה / אסמכתא</div>
+                                <div className="col-span-2">סה"כ שולם</div>
+                                <div className="col-span-3">הערות</div>
+                                <div className="col-span-1">פרטים</div>
                             </div>
-                            <div className="flex gap-6 text-sm">
-                                <div className="hidden md:block">
-                                    <span className="text-slate-500">סה"כ:</span> <span className="font-semibold">₪{group.totalDue.toLocaleString()}</span>
-                                </div>
-                                <div>
-                                    <span className="text-slate-500">לתשלום:</span> <span className="font-bold text-red-600">₪{(group.totalDue - group.totalPaid).toLocaleString()}</span>
-                                </div>
-                            </div>
-                        </div>
+                            {groupedPayments.map(group => {
+                                const isExpanded = expandedPaymentIds.has(group.id);
+                                const isEditing = editingPaymentGroupId === group.id;
+                                
+                                // Financials Breakdown - use system VAT as fallback for log view baseline if needed, but really it's based on group total
+                                const total = group.totalAmount;
+                                const base = total / (1 + vatRate / 100);
+                                const vat = total - base;
 
-                        {/* Supplier List within Month */}
-                        {expandedMonths.has(group.monthYearKey) && (
-                            <div className="divide-y divide-slate-100">
-                                {Object.values(group.suppliers).map((supplierGroup: SupplierGroup, idx) => {
-                                    const uniqueSupplierKey = `${group.monthYearKey}-${idx}`; // Just for UI unique key
-                                    const remainingForSupplier = supplierGroup.totalDue - supplierGroup.totalPaid;
-                                    const isPaidOff = remainingForSupplier <= 1;
-
-                                    return (
-                                        <div key={idx} className="bg-white">
-                                            {/* Supplier Header */}
-                                            <div 
-                                                onClick={() => toggleSupplier(uniqueSupplierKey)}
-                                                className="flex items-center justify-between p-3 pl-6 pr-8 cursor-pointer hover:bg-slate-50"
-                                            >
-                                                <div className="flex items-center gap-2">
-                                                    <div className={`transform transition-transform ${expandedSuppliers.has(uniqueSupplierKey) ? 'rotate-180' : ''}`}>
-                                                        <svg className="h-4 w-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
-                                                    </div>
-                                                    <span className="font-medium text-slate-700">{supplierGroup.supplierName}</span>
-                                                    {isPaidOff && <span className="text-xs bg-green-100 text-green-800 px-2 py-0.5 rounded">שולם</span>}
-                                                </div>
-                                                <div className="text-sm text-slate-600">
-                                                    {isPaidOff ? (
-                                                         <span className="text-green-600 font-medium">הכל שולם</span>
-                                                    ) : (
-                                                        <span>יתרה: <span className="font-semibold text-slate-900">₪{remainingForSupplier.toLocaleString()}</span></span>
-                                                    )}
-                                                </div>
+                                return (
+                                    <div key={group.id} className="bg-white rounded-lg shadow-sm border border-slate-200 overflow-hidden text-center">
+                                        <div 
+                                            className={`grid grid-cols-2 md:grid-cols-12 gap-4 px-4 py-3 items-center cursor-pointer transition-colors ${isExpanded ? 'bg-indigo-50' : 'hover:bg-slate-50'}`}
+                                            onClick={() => togglePaymentGroup(group.id)}
+                                        >
+                                            <div className="col-span-1 md:col-span-2 font-medium">{group.date.toLocaleDateString('he-IL')}</div>
+                                            <div className="col-span-1 md:col-span-2 font-medium text-slate-800">{group.supplierName}</div>
+                                            
+                                            <div className="col-span-1 md:col-span-2 text-sm text-slate-600 flex flex-col justify-center">
+                                                <span>{group.method}</span>
+                                                {group.reference && <span className="font-mono text-xs text-slate-400">{group.reference}</span>}
                                             </div>
+                                            
+                                            <div className="col-span-1 md:col-span-2 font-bold text-green-700 text-lg">₪{group.totalAmount.toLocaleString()}</div>
+                                            
+                                            <div className="hidden md:block md:col-span-3 text-xs text-slate-500 text-start truncate px-2" title={group.notes}>
+                                                {group.notes || '-'}
+                                            </div>
+                                            
+                                            <div className="col-span-2 md:col-span-1 flex justify-center text-xs text-slate-400">
+                                                {isExpanded ? 'סגור' : 'פרטים'}
+                                                <svg className={`w-4 h-4 ms-1 transition-transform ${isExpanded ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+                                            </div>
+                                        </div>
+                                        
+                                        {isExpanded && (
+                                            <div className="bg-slate-50 px-4 py-3 border-t border-slate-200 text-start">
+                                                
+                                                {/* Header & Stats */}
+                                                <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-4 gap-4 pb-4 border-b border-slate-200">
+                                                    <div className="flex gap-4 text-xs">
+                                                        <div className="bg-white px-2 py-1 rounded border border-slate-200">
+                                                            <span className="text-slate-500 block">בסיס (משוער)</span>
+                                                            <span className="font-bold">₪{base.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
+                                                        </div>
+                                                        <div className="bg-white px-2 py-1 rounded border border-slate-200">
+                                                            <span className="text-slate-500 block">מע"מ (משוער)</span>
+                                                            <span className="font-bold">₪{vat.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
+                                                        </div>
+                                                        <div className="bg-green-50 px-2 py-1 rounded border border-green-200 text-green-800">
+                                                            <span className="block text-green-600">סה"כ שולם</span>
+                                                            <span className="font-bold">₪{total.toLocaleString()}</span>
+                                                        </div>
+                                                    </div>
 
-                                            {/* Items Table */}
-                                            {expandedSuppliers.has(uniqueSupplierKey) && (
-                                                <div className="bg-slate-50 p-3 pl-10 pr-6 border-t border-slate-100">
-                                                    <table className="min-w-full text-xs md:text-sm">
-                                                        <thead>
-                                                            <tr className="text-slate-500 text-start">
-                                                                <th className="pb-2 font-medium">הזמנה</th>
-                                                                <th className="pb-2 font-medium">תיאור פריט</th>
-                                                                <th className="pb-2 font-medium">תאריך הזמנה</th>
-                                                                <th className="pb-2 font-medium">יעד לתשלום</th>
-                                                                <th className="pb-2 font-medium">סכום</th>
-                                                                <th className="pb-2 font-medium">יתרה</th>
-                                                                <th className="pb-2 font-medium">סטטוס</th>
-                                                                <th className="pb-2 font-medium">פעולות</th>
+                                                    <div className="flex gap-2">
+                                                        {group.attachment && (
+                                                            <a 
+                                                                href={group.attachment.dataUrl} 
+                                                                download={group.attachment.fileName} 
+                                                                className="flex items-center gap-1 text-xs bg-white border border-slate-300 px-3 py-1.5 rounded hover:bg-slate-50 text-slate-700 font-medium"
+                                                            >
+                                                                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414 5.656a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" /></svg>
+                                                                צפה באסמכתא
+                                                            </a>
+                                                        )}
+                                                        {canManagePayments && !isEditing && (
+                                                            <button 
+                                                                onClick={() => startEditingGroup(group)}
+                                                                className="flex items-center gap-1 text-xs bg-white border border-slate-300 px-3 py-1.5 rounded hover:bg-slate-50 text-slate-700 font-medium"
+                                                            >
+                                                                <EditIcon className="w-3 h-3"/>
+                                                                ערוך פרטים
+                                                            </button>
+                                                        )}
+                                                    </div>
+                                                </div>
+
+                                                {/* Edit Form */}
+                                                {isEditing && (
+                                                    <div className="bg-yellow-50 p-3 rounded border border-yellow-200 mb-4 flex flex-col md:flex-row gap-3 items-end">
+                                                        <div className="flex-grow">
+                                                            <label className="block text-xs font-bold text-slate-600 mb-1">אסמכתא</label>
+                                                            <input 
+                                                                type="text" 
+                                                                value={editForm.reference} 
+                                                                onChange={e => setEditForm({...editForm, reference: e.target.value})} 
+                                                                className="w-full text-sm p-1.5 rounded border border-yellow-300"
+                                                            />
+                                                        </div>
+                                                        <div className="flex-grow-[2]">
+                                                            <label className="block text-xs font-bold text-slate-600 mb-1">הערות</label>
+                                                            <input 
+                                                                type="text" 
+                                                                value={editForm.notes} 
+                                                                onChange={e => setEditForm({...editForm, notes: e.target.value})} 
+                                                                className="w-full text-sm p-1.5 rounded border border-yellow-300"
+                                                            />
+                                                        </div>
+                                                        <div className="flex gap-2">
+                                                            <button onClick={cancelEditingGroup} className="px-3 py-1.5 bg-white border border-slate-300 text-slate-600 rounded text-xs hover:bg-slate-50">ביטול</button>
+                                                            <button onClick={() => saveGroupEdit(group)} className="px-3 py-1.5 bg-green-600 text-white rounded text-xs hover:bg-green-700 shadow-sm font-bold">שמור שינויים</button>
+                                                        </div>
+                                                    </div>
+                                                )}
+
+                                                {/* Items Table */}
+                                                <div className="overflow-x-auto">
+                                                    <table className="min-w-full text-sm text-right">
+                                                        <thead className="bg-slate-100 text-slate-500 font-medium text-xs">
+                                                            <tr>
+                                                                <th className="px-3 py-2">הזמנה</th>
+                                                                <th className="px-3 py-2">פרויקט / לקוח</th>
+                                                                <th className="px-3 py-2">פריט</th>
+                                                                <th className="px-3 py-2">סכום שולם</th>
+                                                                <th className="px-3 py-2">סטטוס יתרה</th>
                                                             </tr>
                                                         </thead>
-                                                        <tbody className="divide-y divide-slate-200">
-                                                            {supplierGroup.items.map(item => (
-                                                                <tr key={item.uniqueId}>
-                                                                    <td className="py-2">
-                                                                        <button onClick={() => onNavigateToOrder(item.orderId)} className="text-primary hover:underline font-semibold">
+                                                        <tbody className="divide-y divide-slate-200 bg-white">
+                                                            {group.itemsCovered.map((item, i) => (
+                                                                <tr key={i} className="hover:bg-slate-50">
+                                                                    <td className="px-3 py-2 whitespace-nowrap">
+                                                                        <button onClick={() => onNavigateToOrder(item.orderId)} className="text-primary hover:underline font-bold font-mono">
                                                                             {item.orderNumber}
                                                                         </button>
                                                                     </td>
-                                                                    <td className="py-2 text-slate-600">{item.itemDescription}</td>
-                                                                    <td className="py-2">{item.orderDate.toLocaleDateString('he-IL')}</td>
-                                                                    <td className="py-2">
-                                                                        {item.dueDate.toLocaleDateString('he-IL')}
-                                                                        {item.isCustomDueDate && <span className="text-xs text-orange-500 ms-1">(ידני)</span>}
+                                                                    <td className="px-3 py-2 text-slate-600 font-medium max-w-[150px] truncate" title={item.orderDescription}>
+                                                                        {item.orderDescription}
                                                                     </td>
-                                                                    <td className="py-2">₪{item.cost.toLocaleString()}</td>
-                                                                    <td className="py-2 font-semibold text-slate-700">₪{item.remainingAmount.toLocaleString()}</td>
-                                                                    <td className="py-2">
-                                                                        <span className={`px-2 py-0.5 rounded text-xs ${
-                                                                            item.status === 'שולם' ? 'bg-green-100 text-green-800' :
-                                                                            item.status === 'איחור' ? 'bg-red-100 text-red-800' :
-                                                                            item.status === 'לתשלום החודש' ? 'bg-orange-100 text-orange-800' :
-                                                                            item.status === 'שולם חלקית' ? 'bg-blue-100 text-blue-800' :
-                                                                            'bg-slate-200 text-slate-600'
-                                                                        }`}>
-                                                                            {item.status}
-                                                                        </span>
+                                                                    <td className="px-3 py-2 text-slate-500 max-w-[200px] truncate">
+                                                                        {item.itemDescription}
                                                                     </td>
-                                                                    <td className="py-2">
-                                                                        {canManagePayments && (
-                                                                            <button 
-                                                                                onClick={() => setSelectedItemForPayment(item)}
-                                                                                className="text-primary hover:bg-indigo-50 px-2 py-1 rounded transition-colors"
-                                                                            >
-                                                                                נהל תשלום
-                                                                            </button>
+                                                                    <td className="px-3 py-2 font-bold text-slate-800">
+                                                                        ₪{item.amountPaid.toLocaleString()}
+                                                                    </td>
+                                                                    <td className="px-3 py-2 text-xs">
+                                                                        {item.isItemPaidOff ? (
+                                                                            <span className="text-green-600 flex items-center gap-1 font-medium bg-green-50 px-2 py-0.5 rounded w-fit">
+                                                                                <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" /></svg>
+                                                                                סגור
+                                                                            </span>
+                                                                        ) : (
+                                                                            <span className="text-red-500 font-medium bg-red-50 px-2 py-0.5 rounded border border-red-100 w-fit block">
+                                                                                יתרה: ₪{item.itemRemaining.toLocaleString()}
+                                                                            </span>
                                                                         )}
                                                                     </td>
                                                                 </tr>
@@ -616,22 +1296,183 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
                                                         </tbody>
                                                     </table>
                                                 </div>
-                                            )}
+
+                                                {group.notes && !isEditing && (
+                                                    <div className="mt-3 text-xs text-slate-500 bg-white p-2 rounded border border-slate-100">
+                                                        <strong>הערות לתשלום:</strong> {group.notes}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )
+                ) : (
+                    /* ITEM FORECAST / HISTORY VIEW (Existing Logic) */
+                    <>
+                        {groupedData.length === 0 && <div className="text-center text-slate-500 py-10">לא נמצאו נתונים להצגה.</div>}
+                        
+                        {groupedData.map(group => (
+                            <div key={group.monthYearKey} className="bg-white rounded-lg shadow-sm border border-slate-200 overflow-hidden">
+                                {/* Month Header */}
+                                <div 
+                                    onClick={() => toggleMonth(group.monthYearKey)}
+                                    className="flex items-center justify-between p-4 bg-slate-50 cursor-pointer hover:bg-slate-100 transition-colors"
+                                >
+                                    <div className="flex items-center gap-3">
+                                        <div className={`transform transition-transform ${expandedMonths.has(group.monthYearKey) ? 'rotate-180' : ''}`}>
+                                            <svg className="h-5 w-5 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
                                         </div>
-                                    );
-                                })}
+                                        <h3 className="text-lg font-semibold text-slate-800">{group.label}</h3>
+                                        <span className="text-xs bg-slate-200 text-slate-600 px-2 py-0.5 rounded-full">{group.items.length} פריטים</span>
+                                    </div>
+                                    <div className="flex gap-6 text-sm">
+                                        <div className="hidden md:block">
+                                            <span className="text-slate-500">סה"כ:</span> <span className="font-semibold">₪{group.totalDue.toLocaleString()}</span>
+                                        </div>
+                                        <div>
+                                            <span className="text-slate-500">לתשלום:</span> <span className="font-bold text-red-600">₪{(group.totalDue - group.totalPaid).toLocaleString()}</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                {expandedMonths.has(group.monthYearKey) && (
+                                    <div className="p-4 pt-0">
+                                        {/* Nested Supplier Groups */}
+                                        {/* FIX: Cast Object.entries result to resolve 'unknown' type errors for sGroup */}
+                                        {(Object.entries(group.suppliers) as [string, SupplierGroup][]).map(([sId, sGroup]) => {
+                                            const sKey = `${group.monthYearKey}_${sId}`;
+                                            const isSExpanded = expandedSuppliers.has(sKey);
+                                            return (
+                                                <div key={sId} className="mt-2 border rounded border-slate-100 overflow-hidden">
+                                                    <div 
+                                                        onClick={() => toggleSupplier(sKey)}
+                                                        className="flex items-center justify-between p-3 bg-white hover:bg-slate-50 cursor-pointer"
+                                                    >
+                                                        <div className="flex items-center gap-2">
+                                                            <div className={`transform transition-transform ${isSExpanded ? 'rotate-180' : ''}`}>
+                                                                <svg className="h-4 w-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+                                                            </div>
+                                                            <span className="font-bold text-slate-700">{sGroup.supplierName}</span>
+                                                            <span className="text-[10px] bg-slate-100 px-1.5 py-0.5 rounded">{sGroup.items.length}</span>
+                                                        </div>
+                                                        <div className="text-sm font-bold text-red-600">
+                                                            ₪{(sGroup.totalDue - sGroup.totalPaid).toLocaleString()}
+                                                        </div>
+                                                    </div>
+                                                    {isSExpanded && (
+                                                        <div className="overflow-x-auto bg-slate-50/50">
+                                                            <table className="min-w-full text-xs text-right">
+                                                                <thead className="bg-slate-100 text-slate-500 font-bold uppercase">
+                                                                    <tr>
+                                                                        {canManagePayments && <th className="px-4 py-2 w-8"></th>}
+                                                                        <th className="px-4 py-2">הזמנה</th>
+                                                                        <th className="px-4 py-2">פריט</th>
+                                                                        <th className="px-4 py-2">{viewMode === 'forecast' ? 'תאריך יעד' : 'תאריך הזמנה'}</th>
+                                                                        <th className="px-4 py-2">סה"כ (ברוטו)</th>
+                                                                        <th className="px-4 py-2">שולם</th>
+                                                                        <th className="px-4 py-2">יתרה</th>
+                                                                        <th className="px-4 py-2">סטטוס</th>
+                                                                        {canManagePayments && <th className="px-4 py-2"></th>}
+                                                                    </tr>
+                                                                </thead>
+                                                                <tbody className="divide-y divide-slate-100">
+                                                                    {sGroup.items.map(item => (
+                                                                        <tr key={item.uniqueId} className="hover:bg-white transition-colors">
+                                                                            {canManagePayments && (
+                                                                                <td className="px-4 py-2">
+                                                                                    <input 
+                                                                                        type="checkbox" 
+                                                                                        checked={selectedItemIds.has(item.uniqueId)}
+                                                                                        onChange={() => handleCheckboxChange(item.uniqueId, item.supplierId)}
+                                                                                        className="h-4 w-4 text-primary rounded border-gray-300 focus:ring-primary"
+                                                                                    />
+                                                                                </td>
+                                                                            )}
+                                                                            <td className="px-4 py-2">
+                                                                                <button onClick={() => onNavigateToOrder(item.orderId)} className="text-primary hover:underline font-mono font-bold">
+                                                                                    {item.orderNumber}
+                                                                                </button>
+                                                                            </td>
+                                                                            <td className="px-4 py-2 text-slate-700 font-medium">{item.itemDescription}</td>
+                                                                            <td className="px-4 py-2 text-slate-500">
+                                                                                {(viewMode === 'forecast' ? item.dueDate : item.orderDate).toLocaleDateString('he-IL')}
+                                                                            </td>
+                                                                            <td className="px-4 py-2 text-slate-600">₪{item.costGross.toLocaleString()}</td>
+                                                                            <td className="px-4 py-2 text-green-600 font-medium">₪{item.paidAmount.toLocaleString()}</td>
+                                                                            <td className="px-4 py-2 font-bold text-red-600">₪{item.remainingAmount.toLocaleString()}</td>
+                                                                            <td className="px-4 py-2">
+                                                                                <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                                                                    item.status === 'שולם' ? 'bg-green-100 text-green-700' :
+                                                                                    item.status === 'איחור' ? 'bg-red-100 text-red-700' :
+                                                                                    'bg-slate-100 text-slate-700'
+                                                                                }`}>
+                                                                                    {item.status}
+                                                                                </span>
+                                                                            </td>
+                                                                            {canManagePayments && (
+                                                                                <td className="px-4 py-2 text-left">
+                                                                                    <button 
+                                                                                        onClick={() => setSelectedItemForPayment(item)}
+                                                                                        className="text-[10px] font-bold text-primary hover:underline"
+                                                                                    >
+                                                                                        נהל תשלום
+                                                                                    </button>
+                                                                                </td>
+                                                                            )}
+                                                                        </tr>
+                                                                    ))}
+                                                                </tbody>
+                                                            </table>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                )}
                             </div>
-                        )}
-                    </div>
-                ))}
+                        ))}
+                    </>
+                )}
             </div>
 
-            {selectedItemForPayment && canManagePayments && setOrders && (
+            {/* Sticky Bulk Action Bar */}
+            {canManagePayments && selectedItemIds.size > 0 && (
+                <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 bg-slate-900 text-white px-6 py-4 rounded-2xl shadow-2xl flex items-center gap-8 border border-slate-700 animate-slideUp">
+                    <div className="flex flex-col">
+                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">פריטים שנבחרו ({selectedItemIds.size})</span>
+                        <span className="text-xl font-black text-white">₪{selectedItemsTotal.toLocaleString()}</span>
+                    </div>
+                    <div className="h-8 w-px bg-slate-700"></div>
+                    <div className="flex gap-3">
+                        <button onClick={() => setSelectedItemIds(new Set())} className="px-4 py-2 text-sm font-bold text-slate-400 hover:text-white transition-colors">בטל בחירה</button>
+                        <button onClick={openBulkPayment} className="px-6 py-2 bg-primary hover:bg-indigo-600 text-white rounded-lg font-black shadow-lg transition-all flex items-center gap-2">
+                            <PlusIcon className="w-5 h-5"/>
+                            בצע תשלום מרוכז
+                        </button>
+                    </div>
+                </div>
+            )}
+
+            {/* Modals */}
+            {selectedItemForPayment && (
                 <PaymentManagementModal 
                     item={selectedItemForPayment} 
                     orders={orders} 
-                    setOrders={setOrders} 
+                    setOrders={setOrders!} 
                     onClose={() => setSelectedItemForPayment(null)} 
+                />
+            )}
+
+            {isBulkPaymentModalOpen && (
+                <PaymentManagementModal 
+                    item={null}
+                    selectedItems={getSelectedItems()}
+                    orders={orders}
+                    setOrders={setOrders!}
+                    onClose={() => setIsBulkPaymentModalOpen(false)}
                 />
             )}
         </div>

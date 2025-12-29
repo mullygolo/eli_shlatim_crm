@@ -254,7 +254,7 @@ const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, custo
                         {editableCustomer.contacts.map((contact, index) => {
                              let whatsappUrl = '';
                              let telUrl = '';
-                             let mailtoUrl = '';
+                             let gmailUrl = '';
 
                              if (contact.phone) {
                                  let cleanPhone = contact.phone.replace(/[^0-9]/g, '');
@@ -262,10 +262,11 @@ const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, custo
                                  if (cleanPhone.startsWith('0')) {
                                      cleanPhone = `972${cleanPhone.substring(1)}`;
                                  }
-                                 whatsappUrl = `https://wa.me/${cleanPhone}`;
+                                 whatsappUrl = `https://web.whatsapp.com/send?phone=${cleanPhone}`;
                              }
                              if (contact.email) {
-                                 mailtoUrl = `mailto:${contact.email}`;
+                                 // Explicit Gmail Compose URL to force Gmail in a named tab
+                                 gmailUrl = `https://mail.google.com/mail/?view=cm&fs=1&to=${contact.email}`;
                              }
 
                              return (
@@ -321,10 +322,10 @@ const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, custo
                                         {/* Icons Row */}
                                         <div className="flex items-center gap-1">
                                             {whatsappUrl ? (
-                                                 <a href={whatsappUrl} target="_blank" rel="noopener noreferrer" title="וואטסאפ" className="p-1.5 rounded-full text-slate-400 hover:text-green-500 hover:bg-green-50 transition-all"><WhatsAppIcon className="h-4 w-4"/></a>
+                                                 <a href={whatsappUrl} target="crm_whatsapp" title="וואטסאפ" className="p-1.5 rounded-full text-slate-400 hover:text-green-500 hover:bg-green-50 transition-all"><WhatsAppIcon className="h-4 w-4"/></a>
                                             ) : <span className="w-7"></span>}
-                                            {mailtoUrl ? (
-                                                 <a href={mailtoUrl} title="אימייל" className="p-1.5 rounded-full text-slate-400 hover:text-blue-500 hover:bg-blue-50 transition-all"><EmailIcon className="h-4 w-4"/></a>
+                                            {gmailUrl ? (
+                                                 <a href={gmailUrl} target="crm_email" title="Gmail" className="p-1.5 rounded-full text-slate-400 hover:text-blue-500 hover:bg-blue-50 transition-all"><EmailIcon className="h-4 w-4"/></a>
                                             ) : <span className="w-7"></span>}
                                             {telUrl ? (
                                                  <a href={telUrl} title="חיוג" className="p-1.5 rounded-full text-slate-400 hover:text-indigo-500 hover:bg-indigo-50 transition-all"><PhoneIcon className="h-4 w-4"/></a>
@@ -627,7 +628,7 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
                             const primaryContact = customer.contacts.find(c => c.isDefault) || customer.contacts.find(c => c.isBillingContact) || customer.contacts[0];
                             let whatsappUrl = '';
                             let telUrl = '';
-                            let mailtoUrl = '';
+                            let gmailUrl = '';
 
                             if (primaryContact) {
                                 if (primaryContact.phone) {
@@ -636,10 +637,11 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
                                     if (cleanPhone.startsWith('0')) {
                                         cleanPhone = `972${cleanPhone.substring(1)}`;
                                     }
-                                    whatsappUrl = `https://wa.me/${cleanPhone}`;
+                                    whatsappUrl = `https://web.whatsapp.com/send?phone=${cleanPhone}`;
                                 }
                                 if (primaryContact.email) {
-                                    mailtoUrl = `mailto:${primaryContact.email}`;
+                                    // Switch to explicit Gmail compose URL
+                                    gmailUrl = `https://mail.google.com/mail/?view=cm&fs=1&to=${primaryContact.email}`;
                                 }
                             }
                             return(
@@ -653,8 +655,8 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
                                         <div className="flex items-center gap-3">
                                             <span>{primaryContact?.name || '---'}</span>
                                             <div className="flex items-center gap-2">
-                                                {whatsappUrl && <a href={whatsappUrl} target="_blank" rel="noopener noreferrer" title={`שלח וואטסאפ ל-${primaryContact.phone}`} className="text-green-500 hover:text-green-700"><WhatsAppIcon className="h-5 w-5"/></a>}
-                                                {mailtoUrl && <a href={mailtoUrl} title={`שלח אימייל ל-${primaryContact.email}`} className="text-slate-500 hover:text-primary"><EmailIcon className="h-5 w-5"/></a>}
+                                                {whatsappUrl && <a href={whatsappUrl} target="crm_whatsapp" title={`שלח וואטסאפ ל-${primaryContact.phone}`} className="text-green-500 hover:text-green-700"><WhatsAppIcon className="h-5 w-5"/></a>}
+                                                {gmailUrl && <a href={gmailUrl} target="crm_email" title={`שלח אימייל ל-${primaryContact.email}`} className="text-slate-500 hover:text-primary"><EmailIcon className="h-5 w-5"/></a>}
                                                 {telUrl && <a href={telUrl} title={`התקשר ל-${primaryContact.phone}`} className="text-slate-500 hover:text-primary"><PhoneIcon className="h-5 w-5"/></a>}
                                             </div>
                                         </div>

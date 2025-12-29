@@ -1,7 +1,7 @@
 
 import React from 'react';
 import { Page } from '../types';
-import { DashboardIcon, OrdersIcon, CustomersIcon, SuppliersIcon, EmployeesIcon, ReportsIcon, SettingsIcon, FinanceIcon, ClockIcon } from './icons';
+import { DashboardIcon, OrdersIcon, CustomersIcon, SuppliersIcon, ReportsIcon, SettingsIcon, FinanceIcon, ClockIcon } from './icons';
 import { PAGE_TITLES } from '../App';
 
 interface SidebarProps {
@@ -12,12 +12,12 @@ interface SidebarProps {
 const Sidebar: React.FC<SidebarProps> = ({ currentPage, setCurrentPage }) => {
     const navItems: { page: Page; icon: React.ReactNode; label?: string }[] = [
         { page: 'Dashboard', icon: <DashboardIcon className="h-6 w-6" /> },
-        { page: 'Attendance', icon: <ClockIcon className="h-6 w-6" />, label: 'נוכחות ושכר' },
         { page: 'Orders', icon: <OrdersIcon className="h-6 w-6" /> },
         { page: 'Customers', icon: <CustomersIcon className="h-6 w-6" /> },
         { page: 'Suppliers', icon: <SuppliersIcon className="h-6 w-6" /> },
-        { page: 'Finance', icon: <FinanceIcon className="h-6 w-6" />, label: 'דוחות כספיים' },
         { page: 'Reports', icon: <ReportsIcon className="h-6 w-6" />, label: 'תשלום לספקים' },
+        { page: 'Finance', icon: <FinanceIcon className="h-6 w-6" />, label: 'דוחות כספיים' },
+        { page: 'Attendance', icon: <ClockIcon className="h-6 w-6" />, label: 'נוכחות ושכר' },
     ];
 
     return (

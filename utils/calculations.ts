@@ -1,15 +1,17 @@
 
-import { LineItem, AdditionalService } from '../types';
+import { LineItem, AdditionalService, CustomerPayment, TransactionStatus, Employee } from '../types';
 
 interface Totalable {
     lineItems: LineItem[];
     additionalServices?: AdditionalService[];
+    payments?: CustomerPayment[]; // Added
 }
 
 export const calculateOrderTotals = (order: Totalable) => {
     // Defensive checks
     const lineItems = order?.lineItems || [];
     const additionalServices = order?.additionalServices || [];
+    const payments = order?.payments || [];
 
     const totalAmountFromItems = lineItems.reduce((sum, item) => {
         const qty = item?.quantity || 0;
@@ -32,11 +34,22 @@ export const calculateOrderTotals = (order: Totalable) => {
     const profit = totalAmount - totalCost;
     const margin = totalAmount > 0 ? (profit / totalAmount) * 100 : 0;
 
+    // Calculate Total Paid (excluding BOUNCED, CANCELED, RETURNED)
+    // If status is undefined, assume valid (legacy support)
+    const totalPaid = payments.reduce((sum, p) => {
+        const invalidStatuses: TransactionStatus[] = ['BOUNCED', 'CANCELED', 'RETURNED'];
+        if (p.status && invalidStatuses.includes(p.status)) {
+            return sum;
+        }
+        return sum + p.amount;
+    }, 0);
+
     return {
         totalAmount,
         totalCost,
         profit,
         margin,
+        totalPaid
     };
 };
 
@@ -53,8 +66,10 @@ export const calculateDueDate = (orderDate: Date | string, paymentTerms?: string
     
     if (!paymentTerms) return dateObj;
 
-    // Handle "Instant" payments
-    if (['תשלום מיידי', 'מזומן'].includes(paymentTerms)) {
+    // Handle "Instant" payments and "Upon Completion"
+    // "Upon Completion" technically means due date is the date of completion. 
+    // The calling function should pass the completion date as `orderDate` in that scenario.
+    if (['תשלום מיידי', 'מזומן', 'עם סיום העבודה'].includes(paymentTerms)) {
         return dateObj;
     }
 
@@ -102,4 +117,47 @@ export const calculateDueDate = (orderDate: Date | string, paymentTerms?: string
     }
 
     return dateObj;
+};
+
+/**
+ * NEW: Finds the effective salary for an employee at a specific point in time.
+ * Logic: 
+ * 1. Look in salaryHistory for records where effectiveDate <= targetDate.
+ * 2. If multiple found, pick the newest one.
+ * 3. If none found, fall back to current fields (Employee's top-level wage/salary).
+ */
+export const getEmployeeSalaryAtDate = (employee: Employee, targetDate: Date) => {
+    if (!employee.salaryHistory || employee.salaryHistory.length === 0) {
+        return { 
+            amount: employee.salaryType === 'GLOBAL' ? (employee.monthlyBaseSalary || 0) : employee.hourlyWage, 
+            type: employee.salaryType 
+        };
+    }
+
+    // Sort history by date descending (newest first)
+    const sortedHistory = [...employee.salaryHistory].sort((a, b) => 
+        new Date(b.effectiveDate).getTime() - new Date(a.effectiveDate).getTime()
+    );
+
+    // Find the first record that was in effect on the target date
+    const effectiveRecord = sortedHistory.find(record => {
+        const recordDate = new Date(record.effectiveDate);
+        recordDate.setHours(0, 0, 0, 0);
+        const compareDate = new Date(targetDate);
+        compareDate.setHours(0, 0, 0, 0);
+        return recordDate <= compareDate;
+    });
+
+    if (effectiveRecord) {
+        return { 
+            amount: effectiveRecord.amount, 
+            type: effectiveRecord.salaryType 
+        };
+    }
+
+    // Fallback to current values if no history entry covers the target date
+    return { 
+        amount: employee.salaryType === 'GLOBAL' ? (employee.monthlyBaseSalary || 0) : employee.hourlyWage, 
+        type: employee.salaryType 
+    };
 };

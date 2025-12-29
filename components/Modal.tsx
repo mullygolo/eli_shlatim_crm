@@ -1,3 +1,4 @@
+
 import React from 'react';
 
 type ModalSize = 'lg' | 'xl' | '2xl' | '3xl' | '4xl' | '5xl';
@@ -7,9 +8,10 @@ interface ModalProps {
     onClose: () => void;
     children: React.ReactNode;
     size?: ModalSize;
+    zIndex?: number; // Added prop
 }
 
-const Modal: React.FC<ModalProps> = ({ title, onClose, children, size = 'lg' }) => {
+const Modal: React.FC<ModalProps> = ({ title, onClose, children, size = 'lg', zIndex = 50 }) => {
     
     const sizeClasses: Record<ModalSize, string> = {
         'lg': 'max-w-lg',
@@ -21,7 +23,11 @@ const Modal: React.FC<ModalProps> = ({ title, onClose, children, size = 'lg' }) 
     };
 
     return (
-        <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex justify-center items-center p-4" onClick={onClose}>
+        <div 
+            className="fixed inset-0 bg-black bg-opacity-50 flex justify-center items-center p-4" 
+            style={{ zIndex }} 
+            onClick={onClose}
+        >
             <div 
                 className={`bg-white rounded-lg shadow-xl w-full ${sizeClasses[size]} max-h-[90vh] flex flex-col`} 
                 onClick={e => e.stopPropagation()}

@@ -283,6 +283,21 @@ const PnLReport: React.FC<PnLReportProps> = ({
 
                 pnlMap[key].debtPayments += p.amount;
                 pnlMap[key].debtPaymentItems.push({ name: `חוב: ${debt.name}`, amount: p.amount, date: p.date, subtext: p.method });
+                
+                // NEW: Reverse calculate VAT from debt payment
+                if (!debt.isVatExempt) {
+                    const netAmount = p.amount / (1 + vatRate / 100);
+                    const vatAmount = p.amount - netAmount;
+                    if (vatAmount > 0.01) {
+                        pnlMap[key].vatInput += vatAmount;
+                        pnlMap[key].vatInputItems.push({ 
+                            name: `מע"מ תשומות (חוב): ${debt.name}`, 
+                            amount: vatAmount, 
+                            date: p.date, 
+                            subtext: `חולץ מתשלום ₪${p.amount.toLocaleString()}` 
+                        });
+                    }
+                }
             });
         });
 
@@ -298,6 +313,21 @@ const PnLReport: React.FC<PnLReportProps> = ({
 
                 pnlMap[key].receivableCollections += p.amount;
                 pnlMap[key].receivableCollectionItems.push({ name: `חייב: ${rec.name}`, amount: p.amount, date: p.date, subtext: p.method });
+
+                // NEW: Reverse calculate VAT from receivable collection
+                if (!rec.isVatExempt) {
+                    const netAmount = p.amount / (1 + vatRate / 100);
+                    const vatAmount = p.amount - netAmount;
+                    if (vatAmount > 0.01) {
+                        pnlMap[key].vatOutput += vatAmount;
+                        pnlMap[key].vatOutputItems.push({ 
+                            name: `מע"מ עסקאות (חייב): ${rec.name}`, 
+                            amount: vatAmount, 
+                            date: p.date, 
+                            subtext: `חולץ מגבייה ₪${p.amount.toLocaleString()}` 
+                        });
+                    }
+                }
             });
         });
 
@@ -309,7 +339,7 @@ const PnLReport: React.FC<PnLReportProps> = ({
             m.vatBalance = m.vatOutput - m.vatInput;
             m.vatCashFlowAdjustment = -m.vatBalance; // Positive balance means money owed to state (negative cash impact)
             
-            // New Net Cash Flow Logic: Includes VAT balance impact
+            // Net Cash Flow Logic: Includes VAT balance impact
             m.netCashFlow = m.netProfit + m.receivableCollections - m.debtPayments - m.loanPrincipal + m.vatCashFlowAdjustment;
             
             return m;
@@ -529,7 +559,7 @@ const PnLReport: React.FC<PnLReportProps> = ({
                             <PnLRow label="(-) תשלום חובות לספקים" field="debtPayments" itemsField="debtPaymentItems" isNegative={true} />
                             <PnLRow label="(-) פירעון קרן הלוואות" field="loanPrincipal" itemsField="loanPrincipalItems" isNegative={true} />
                             
-                            {/* New VAT Cash Flow row */}
+                            {/* VAT Cash Flow row */}
                             <PnLRow label="(-) יתרת מע''מ לתשלום / החזר" field="vatCashFlowAdjustment" isNegative={true} />
                             
                             <tr className="bg-amber-100 border-t-2 border-amber-300 font-black text-slate-900">

@@ -1,4 +1,3 @@
-
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { Order, Customer, Supplier, Employee, PaymentStatus, LineItem, LineItemUnit, Attachment, Contact, PaymentMethod, AdditionalService, TimelineEvent, AttachmentCategory, OrderType, OrderStatusConfiguration, CustomerPayment, FieldChange } from '../types';
 import { PAYMENT_STATUSES_ORDERED, PAYMENT_TERMS_OPTIONS, CUSTOMER_CATEGORIES } from '../constants';
@@ -119,7 +118,7 @@ const PaymentDocumentsViewer: React.FC<{
                         <span className="text-white text-sm font-medium truncate max-w-[50%]">{selectedFile.fileName}</span>
                         <a 
                             href={selectedFile.dataUrl} 
-                            download={selectedFile.fileName}
+                            download={selectedFile.fileName} 
                             className="flex items-center gap-2 bg-primary hover:bg-indigo-600 text-white px-4 py-1.5 rounded text-sm transition-colors"
                         >
                             <DownloadIcon className="w-4 h-4"/>
@@ -476,7 +475,7 @@ const OrderFileManager: React.FC<{
                 </button>
                 {Object.entries(CATEGORY_LABELS).map(([key, label]) => (
                     <button 
-                        type="button"
+                        type="button" 
                         key={key}
                         onClick={() => setActiveTab(key as AttachmentCategory)}
                         className={`px-4 py-2 text-sm font-medium rounded-t-lg transition-colors ${activeTab === key ? 'bg-slate-50 text-primary border-t border-x border-slate-200 relative -bottom-px' : 'text-slate-500 hover:bg-slate-50'}`}
@@ -2105,6 +2104,7 @@ const OrderForm: React.FC<{
                                                             {event.dueDate && (
                                                                 <div className="flex items-center gap-2">
                                                                     <span className="text-slate-600">יעד: <strong>{new Date(event.dueDate).toLocaleDateString('he-IL')}</strong></span>
+                                                                    {/* Fix: changed task.isCompleted to event.isCompleted */}
                                                                     {timeDiff && !event.isCompleted && <span className={`${timeDiff.color}`}>{timeDiff.text}</span>}
                                                                 </div>
                                                             )}
@@ -2187,6 +2187,8 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
     const [paymentStatusFilter, setPaymentStatusFilter] = useState<PaymentStatus[]>([]);
     const [monthFilter, setMonthFilter] = useState<string>('all');
     const [yearFilter, setYearFilter] = useState<string>('all');
+    const [startDateFilter, setStartDateFilter] = useState<string>(''); // NEW: Date Range Start
+    const [endDateFilter, setEndDateFilter] = useState<string>('');     // NEW: Date Range End
     const [dateFilterType, setDateFilterType] = useState<'ORDER_DATE' | 'DEAL_DATE'>('ORDER_DATE'); // New Date Type Filter
     const [isCollectionMode, setIsCollectionMode] = useState(false);
     const [showCompletedOrders, setShowCompletedOrders] = useState(false); 
@@ -2228,6 +2230,8 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
         setPaymentStatusFilter([]);
         setMonthFilter('all');
         setYearFilter('all');
+        setStartDateFilter('');
+        setEndDateFilter('');
         setDateFilterType('ORDER_DATE');
         setIsCollectionMode(false);
         setShowCompletedOrders(false);
@@ -2397,8 +2401,17 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
                     ? new Date(order.date) 
                     : (order.dealStartDate ? new Date(order.dealStartDate) : null);
                 
-                if (!relevantDate) return dateFilterType === 'ORDER_DATE'; // Hide if filtering by deal date and none exists
+                if (!relevantDate) return dateFilterType === 'ORDER_DATE';
                 
+                const dateStr = relevantDate.toISOString().split('T')[0];
+
+                // NEW: Date Range Filter Priority
+                if (startDateFilter || endDateFilter) {
+                    if (startDateFilter && dateStr < startDateFilter) return false;
+                    if (endDateFilter && dateStr > endDateFilter) return false;
+                    return true;
+                }
+
                 if (monthFilter !== 'all' && (relevantDate.getMonth() + 1) !== parseInt(monthFilter)) return false;
                 if (yearFilter !== 'all' && relevantDate.getFullYear() !== parseInt(yearFilter)) return false;
                 return true;
@@ -2434,7 +2447,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
              });
         }
         return result;
-    }, [orders, orderStatusFilter, paymentStatusFilter, customerFilter, employeeFilter, supplierFilter, monthFilter, yearFilter, searchTerm, isCollectionMode, showCompletedOrders, statusConfigs, dateFilterType]);
+    }, [orders, orderStatusFilter, paymentStatusFilter, customerFilter, employeeFilter, supplierFilter, monthFilter, yearFilter, startDateFilter, endDateFilter, searchTerm, isCollectionMode, showCompletedOrders, statusConfigs, dateFilterType]);
 
     const summaryTotals = useMemo(() => {
         return filteredOrders.reduce((acc, order) => {
@@ -2461,7 +2474,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
             <div className="flex justify-between items-start mb-6 gap-4">
                  <div className="flex-grow bg-white p-3 rounded-lg shadow-sm border border-slate-200 text-start">
                     <div className="flex flex-col gap-4">
-                        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3">
+                        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-11 gap-3">
                             <div className="lg:col-span-1">
                                 <label className="block text-[10px] font-black text-slate-400 uppercase mb-1">סוג תאריך</label>
                                 <select 
@@ -2474,15 +2487,33 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
                                 </select>
                             </div>
                             <div>
+                                <label className="block text-[10px] font-black text-slate-400 uppercase mb-1">מתאריך</label>
+                                <input 
+                                    type="date" 
+                                    value={startDateFilter} 
+                                    onChange={e => setStartDateFilter(e.target.value)} 
+                                    className="w-full text-xs p-2 border border-slate-300 rounded-md focus:ring-primary"
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-[10px] font-black text-slate-400 uppercase mb-1">עד תאריך</label>
+                                <input 
+                                    type="date" 
+                                    value={endDateFilter} 
+                                    onChange={e => setEndDateFilter(e.target.value)} 
+                                    className="w-full text-xs p-2 border border-slate-300 rounded-md focus:ring-primary"
+                                />
+                            </div>
+                            <div>
                                 <label className="block text-[10px] font-black text-slate-400 uppercase mb-1">חודש</label>
-                                <select value={monthFilter} onChange={e => setMonthFilter(e.target.value)} className="w-full text-xs p-2 border-slate-300 rounded-md focus:ring-primary">
+                                <select disabled={!!startDateFilter || !!endDateFilter} value={monthFilter} onChange={e => setMonthFilter(e.target.value)} className="w-full text-xs p-2 border-slate-300 rounded-md focus:ring-primary disabled:bg-slate-50">
                                     <option value="all">הכל</option>
                                     {availableMonths.map(m => <option key={m.value} value={m.value}>{m.name}</option>)}
                                 </select>
                             </div>
                             <div>
                                 <label className="block text-[10px] font-black text-slate-400 uppercase mb-1">שנה</label>
-                                <select value={yearFilter} onChange={e => setYearFilter(e.target.value)} className="w-full text-xs p-2 border-slate-300 rounded-md focus:ring-primary">
+                                <select disabled={!!startDateFilter || !!endDateFilter} value={yearFilter} onChange={e => setYearFilter(e.target.value)} className="w-full text-xs p-2 border-slate-300 rounded-md focus:ring-primary disabled:bg-slate-50">
                                     <option value="all">הכל</option>
                                     {availableYears.map(y => <option key={y} value={y}>{y}</option>)}
                                 </select>
@@ -2499,8 +2530,8 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
                             <div>
                                 <MultiSelectFilter label="סטטוס" options={orderStatusOptions} selectedValues={orderStatusFilter} onChange={setOrderStatusFilter} />
                             </div>
-                            <div>
-                                <label className="block text-[10px] font-black text-slate-400 uppercase mb-1">חיפוש</label>
+                            <div className="lg:col-span-2">
+                                <label className="block text-[10px] font-black text-slate-400 uppercase mb-1">חיפוש חופשי</label>
                                 <div className="relative">
                                     <input type="text" placeholder="חיפוש..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)} className="w-full text-xs p-2 border-slate-300 rounded-md focus:ring-primary" />
                                     {searchTerm && <button onClick={() => setSearchTerm('')} className="absolute inset-y-0 left-2 text-slate-400">×</button>}

@@ -1,8 +1,9 @@
 
 import React, { useState, useMemo, useEffect } from 'react';
-import { FixedExpense, VariableExpense, Loan, EquityInvestment, Debt, Receivable, ReceivablePayment, PaymentMethod, DebtPayment, Order, TransactionStatus, CustomerPayment, SupplierPayment, LineItemUnit, Attachment, PaymentStatusHistory, AmortizationEntry } from '../types';
+import { FixedExpense, VariableExpense, Loan, EquityInvestment, Debt, Receivable, ReceivablePayment, PaymentMethod, DebtPayment, Order, TransactionStatus, CustomerPayment, SupplierPayment, LineItemUnit, Attachment, PaymentStatusHistory, AmortizationEntry, Employee, AttendanceRecord, OrderStatusConfiguration } from '../types';
 import { PlusIcon, EditIcon, DeleteIcon, BankIcon, TrendingUpIcon, LogIcon, CashIcon, ClockIcon, LockIcon, DownloadIcon, ImportIcon } from './icons';
 import Modal from './Modal';
+import PnLReport from './PnLReport';
 
 // --- Financial Engine Helpers ---
 
@@ -82,6 +83,9 @@ interface FinancePageProps {
     vatRate: number;
     orders: Order[];
     setOrders: React.Dispatch<React.SetStateAction<Order[]>>;
+    employees: Employee[];
+    attendanceRecords: AttendanceRecord[];
+    statusConfigs: OrderStatusConfiguration[];
 }
 
 // Internal type for Table Display
@@ -141,7 +145,7 @@ interface AggregatedCheck {
 const TabButton: React.FC<{ label: string; active: boolean; onClick: () => void; icon?: React.ReactNode }> = ({ label, active, onClick, icon }) => (
     <button
         onClick={onClick}
-        className={`px-6 py-3 font-bold text-sm transition-colors border-b-4 flex items-center gap-2 ${
+        className={`px-6 py-3 font-bold text-sm transition-colors border-b-4 flex items-center gap-2 whitespace-nowrap ${
             active ? 'border-primary text-primary' : 'border-transparent text-slate-400 hover:text-slate-600'
         }`}
     >
@@ -973,32 +977,6 @@ const CheckCenter: React.FC<{
             });
         });
 
-        debts.forEach(debt => {
-            debt.payments?.forEach(p => {
-                if (p.method === PaymentMethod.CHECK) {
-                    rawItems.push({
-                        uniqueId: p.id,
-                        type: 'OUTGOING',
-                        date: new Date(p.date),
-                        repaymentDate: p.repaymentDate ? new Date(p.repaymentDate) : new Date(p.date),
-                        amount: p.amount,
-                        reference: p.reference || 'ללא מס',
-                        entityName: `חוב: ${debt.name}`,
-                        status: p.status || 'PENDING',
-                        statusHistory: p.statusHistory || [],
-                        sources: [{
-                            orderId: 'DEBT',
-                            orderNumber: 'DEBT',
-                            paymentId: p.id,
-                            sourceType: 'debt',
-                            debtId: debt.id,
-                            amount: p.amount
-                        }]
-                    });
-                }
-            });
-        });
-
         const incoming = rawItems.filter(i => i.type === 'INCOMING');
         const outgoing = rawItems.filter(i => i.type === 'OUTGOING');
         
@@ -1377,9 +1355,9 @@ const CheckSeriesGenerator: React.FC<{
 };
 
 const FinancePage: React.FC<FinancePageProps> = ({ 
-    fixedExpenses, setFixedExpenses, variableExpenses, setVariableExpenses, loans, setLoans, debts, setDebts, receivables, setReceivables, equity, setEquity, addActivity, vatRate, orders, setOrders
+    fixedExpenses, setFixedExpenses, variableExpenses, setVariableExpenses, loans, setLoans, debts, setDebts, receivables, setReceivables, equity, setEquity, addActivity, vatRate, orders, setOrders, employees, attendanceRecords, statusConfigs
 }) => {
-    const [activeTab, setActiveTab] = useState<'FIXED' | 'VARIABLE' | 'LOANS' | 'DEBTS' | 'RECEIVABLES' | 'EQUITY' | 'CHECKS'>('FIXED');
+    const [activeTab, setActiveTab] = useState<'FIXED' | 'VARIABLE' | 'LOANS' | 'DEBTS' | 'RECEIVABLES' | 'EQUITY' | 'CHECKS' | 'PNL'>('PNL');
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
     const [isAmortizationModalOpen, setIsAmortizationModalOpen] = useState(false);
@@ -1725,6 +1703,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
             if (a.isOverdue && !b.isOverdue) return -1;
             if (!a.isOverdue && b.isOverdue) return 1;
             if (a.isFullyPaid && !b.isFullyPaid) return 1;
+            if (!a.isFullyPaid && b.isFullyPaid) return 1;
             if (!a.isFullyPaid && b.isFullyPaid) return -1;
             return new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime();
         });
@@ -2269,7 +2248,8 @@ const FinancePage: React.FC<FinancePageProps> = ({
             </div>
 
             <div className="bg-white rounded-lg shadow-md border border-slate-200 overflow-hidden">
-                <div className="flex border-b border-slate-200 px-4 overflow-x-auto bg-slate-50/50">
+                <div className="flex border-b border-slate-200 px-4 overflow-x-auto bg-slate-50/50 scrollbar-hide">
+                    <TabButton label="דוח רווח והפסד (P&L)" active={activeTab === 'PNL'} onClick={() => setActiveTab('PNL')} icon={<TrendingUpIcon className="w-4 h-4"/>} />
                     <TabButton label="ניהול צ'קים" active={activeTab === 'CHECKS'} onClick={() => setActiveTab('CHECKS')} icon={<CashIcon className="w-4 h-4"/>} />
                     <TabButton label="קבועות" active={activeTab === 'FIXED'} onClick={() => setActiveTab('FIXED')} />
                     <TabButton label="משתנות" active={activeTab === 'VARIABLE'} onClick={() => setActiveTab('VARIABLE')} />
@@ -2280,6 +2260,8 @@ const FinancePage: React.FC<FinancePageProps> = ({
                 </div>
 
                 <div className="p-6 min-h-[400px]">
+                    {activeTab === 'PNL' && <PnLReport orders={orders} fixedExpenses={fixedExpenses} variableExpenses={variableExpenses} loans={loans} employees={employees} attendanceRecords={attendanceRecords} statusConfigs={statusConfigs} vatRate={vatRate} debts={debts} receivables={receivables} />}
+
                     {activeTab === 'CHECKS' && <CheckCenter orders={orders} setOrders={setOrders} fixedExpenses={fixedExpenses} setFixedExpenses={setFixedExpenses} variableExpenses={variableExpenses} setVariableExpenses={setVariableExpenses} debts={debts} setDebts={setDebts} receivables={receivables} setReceivables={setReceivables} addActivity={addActivity} />}
 
                     {activeTab === 'FIXED' && (
@@ -2297,7 +2279,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
                             </div>
                         </div>
                     )}
-
+                    {/* Rest of the tabs remain the same... */}
                     {activeTab === 'VARIABLE' && (
                         <div className="text-start">
                             <div className="flex flex-col sm:flex-row justify-between items-end mb-6 gap-4">
@@ -2386,7 +2368,6 @@ const FinancePage: React.FC<FinancePageProps> = ({
                             </div>
                         </div>
                     )}
-
                     {activeTab === 'LOANS' && (
                         <div className="text-start">
                             <div className="flex justify-between items-center mb-6">
@@ -2495,7 +2476,6 @@ const FinancePage: React.FC<FinancePageProps> = ({
                             </div>
                         </div>
                     )}
-
                     {activeTab === 'DEBTS' && (
                         <div className="text-start">
                             <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6">
@@ -2561,7 +2541,6 @@ const FinancePage: React.FC<FinancePageProps> = ({
                             </div>
                         </div>
                     )}
-
                     {activeTab === 'RECEIVABLES' && (
                         <div className="text-start">
                             <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6">
@@ -2626,7 +2605,6 @@ const FinancePage: React.FC<FinancePageProps> = ({
                             </div>
                         </div>
                     )}
-
                     {activeTab === 'EQUITY' && (
                         <div className="text-start">
                              <div className="flex justify-between items-center mb-6">
@@ -2833,17 +2811,17 @@ const FinancePage: React.FC<FinancePageProps> = ({
                         {activeTab === 'DEBTS' && (
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                 <div className="md:col-span-2"><label className="block text-sm font-bold text-slate-700 mb-1">שם החוב / הספק</label><input type="text" value={debtForm.name || ''} onChange={e => setDebtForm({...debtForm, name: e.target.value})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:ring-primary focus:border-primary sm:text-sm p-2 bg-white" /></div>
-                                <div><label className="block text-sm font-bold text-slate-700 mb-1">תאריך יצירה</label><input type="date" value={debtForm.createdAt ? new Date(debtForm.createdAt).toISOString().split('T')[0] : ''} onChange={e => setDebtForm({...debtForm, createdAt: new Date(e.target.value)})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
-                                <div><label className="block text-sm font-bold text-slate-700 mb-1">תאריך יעד לתשלום</label><input type="date" value={debtForm.dueDate ? new Date(debtForm.dueDate).toISOString().split('T')[0] : ''} onChange={e => setDebtForm({...debtForm, dueDate: new Date(e.target.value)})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
+                                <div><label className="block text-sm font-bold text-slate-700 mb-1">תאריך יצירה</label><input type="date" value={debtForm.createdAt ? new Date(debtForm.createdAt).toISOString().split('T')[0] : ''} onChange={e => setDebtForm({...debtForm, createdAt: new Date(e.target.value)})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:ring-primary focus:border-primary sm:text-sm p-2 bg-white" /></div>
+                                <div><label className="block text-sm font-bold text-slate-700 mb-1">תאריך יעד לתשלום</label><input type="date" value={debtForm.dueDate ? new Date(debtForm.dueDate).toISOString().split('T')[0] : ''} onChange={e => setDebtForm({...debtForm, dueDate: new Date(e.target.value)})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:ring-primary focus:border-primary sm:text-sm p-2 bg-white" /></div>
                                 <div><label className="block text-sm font-bold text-slate-700 mb-1">סכום הקרן (נטו)</label><input type="number" value={debtForm.amount || ''} onChange={e => setDebtForm({...debtForm, amount: parseFloat(e.target.value)})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
                                 <div className="grid grid-cols-2 gap-2 mt-4"><label className="flex items-center gap-2 cursor-pointer bg-slate-50 p-2 rounded border border-slate-200"><input type="checkbox" checked={debtForm.includesVat ?? true} onChange={e => setDebtForm({...debtForm, includesVat: e.target.checked})} className="h-4 w-4 text-primary border-gray-300 rounded focus:ring-primary" disabled={debtForm.isVatExempt} /><span className={`text-sm font-bold ${debtForm.isVatExempt ? 'text-slate-400' : 'text-slate-700'}`}>הסכום שהוזן כולל מע"מ</span></label><label className="flex items-center gap-2 cursor-pointer bg-amber-50 p-2 rounded border border-amber-200"><input type="checkbox" checked={debtForm.isVatExempt} onChange={e => setDebtForm({...debtForm, isVatExempt: e.target.checked})} className="h-4 w-4 text-amber-600 border-amber-300 rounded focus:ring-amber-500" /><span className="text-sm font-bold text-amber-800">הוצאה פטורה ממע"מ</span></label></div>
-                                <div className="md:col-span-2"><label className="block text-sm font-bold text-slate-700 mb-1">תיאור / הערות</label><textarea value={debtForm.description || ''} onChange={e => setDebtForm({...debtForm, description: e.target.value})} rows={2} className="block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
+                                <div className="md:col-span-2"><label className="block text-sm font-bold text-slate-700 mb-1">תיאור / הערות</label><textarea value={debtForm.description || ''} onChange={e => setDebtForm({...debtForm, description: e.target.value})} rows={2} className="block w-full border-slate-300 rounded-md shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
                             </div>
                         )}
                         {activeTab === 'RECEIVABLES' && (
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                 <div className="md:col-span-2"><label className="block text-sm font-bold text-slate-700 mb-1">שם הגורם החייב</label><input type="text" value={receivableForm.name || ''} onChange={e => setReceivableForm({...receivableForm, name: e.target.value})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:ring-primary focus:border-primary sm:text-sm p-2 bg-white" /></div>
-                                <div><label className="block text-sm font-bold text-slate-700 mb-1">תאריך יצירה</label><input type="date" value={receivableForm.createdAt ? new Date(receivableForm.createdAt).toISOString().split('T')[0] : ''} onChange={e => setReceivableForm({...receivableForm, createdAt: new Date(e.target.value)})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
+                                <div><label className="block text-sm font-bold text-slate-700 mb-1">תאריך יצירה</label><input type="date" value={receivableForm.createdAt ? new Date(receivableForm.createdAt).toISOString().split('T')[0] : ''} onChange={e => setReceivableForm({...receivableForm, createdAt: new Date(e.target.value)})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:ring-primary focus:border-primary sm:text-sm p-2 bg-white" /></div>
                                 <div><label className="block text-sm font-bold text-slate-700 mb-1">תאריך יעד לגבייה</label><input type="date" value={receivableForm.dueDate ? new Date(receivableForm.dueDate).toISOString().split('T')[0] : ''} onChange={e => setReceivableForm({...receivableForm, dueDate: new Date(e.target.value)})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
                                 <div><label className="block text-sm font-bold text-slate-700 mb-1">סכום החוב (נטו)</label><input type="number" value={receivableForm.amount || ''} onChange={e => setReceivableForm({...receivableForm, amount: parseFloat(e.target.value)})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
                                 <div className="grid grid-cols-2 gap-2 mt-4"><label className="flex items-center gap-2 cursor-pointer bg-slate-50 p-2 rounded border border-slate-200"><input type="checkbox" checked={receivableForm.includesVat ?? true} onChange={e => setReceivableForm({...receivableForm, includesVat: e.target.checked})} className="h-4 w-4 text-primary border-gray-300 rounded focus:ring-primary" disabled={receivableForm.isVatExempt} /><span className={`text-sm font-bold ${receivableForm.isVatExempt ? 'text-slate-400' : 'text-slate-700'}`}>הסכום שהוזן כולל מע"מ</span></label><label className="flex items-center gap-2 cursor-pointer bg-amber-50 p-2 rounded border border-amber-200"><input type="checkbox" checked={receivableForm.isVatExempt} onChange={e => setReceivableForm({...receivableForm, isVatExempt: e.target.checked})} className="h-4 w-4 text-amber-600 border-amber-300 rounded focus:ring-amber-500" /><span className="text-sm font-bold text-amber-800">החזר פטור ממע"מ</span></label></div>

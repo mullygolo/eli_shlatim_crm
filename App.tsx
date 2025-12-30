@@ -207,6 +207,9 @@ const App: React.FC = () => {
                             vatRate={vatRate}
                             orders={orders}
                             setOrders={setOrders}
+                            employees={employees}
+                            attendanceRecords={attendanceRecords}
+                            statusConfigs={statusConfigs}
                         />;
             case 'Attendance':
                 return <AttendancePage 

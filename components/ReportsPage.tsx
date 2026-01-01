@@ -34,6 +34,7 @@ interface SupplierGroup {
     totalDue: number; // Gross Total
     totalPaid: number;
     items: PayableItem[];
+    isUnassigned?: boolean;
 }
 
 interface MonthlyGroup {
@@ -144,7 +145,8 @@ const SmartSupplierSelect: React.FC<{
     suppliers: Supplier[];
     selectedId: string;
     onChange: (id: string) => void;
-}> = ({ suppliers, selectedId, onChange }) => {
+    hasUnassigned?: boolean;
+}> = ({ suppliers, selectedId, onChange, hasUnassigned }) => {
     const [isOpen, setIsOpen] = useState(false);
     const [searchTerm, setSearchTerm] = useState('');
     const wrapperRef = useRef<HTMLDivElement>(null);
@@ -164,6 +166,8 @@ const SmartSupplierSelect: React.FC<{
     useEffect(() => {
         if (selectedId === 'all') {
             setSearchTerm('כל הספקים');
+        } else if (selectedId === 'unassigned') {
+            setSearchTerm('עלויות ללא ספק');
         } else {
             const s = suppliers.find(s => s.id === selectedId);
             setSearchTerm(s ? s.name : '');
@@ -217,6 +221,17 @@ const SmartSupplierSelect: React.FC<{
                     >
                         <span className="font-bold block truncate">כל הספקים</span>
                     </li>
+                    {hasUnassigned && (
+                        <li
+                            className={`text-rose-600 cursor-pointer select-none relative py-2 pl-3 pr-4 hover:bg-rose-50 border-b border-slate-100 ${selectedId === 'unassigned' ? 'bg-rose-50 font-bold' : ''}`}
+                            onClick={() => {
+                                onChange('unassigned');
+                                setIsOpen(false);
+                            }}
+                        >
+                            <span className="block truncate">⚠️ עלויות ללא ספק</span>
+                        </li>
+                    )}
                     {filteredSuppliers.length === 0 ? (
                         <li className="text-gray-500 select-none relative py-2 pl-3 pr-9">לא נמצאו תוצאות</li>
                     ) : (
@@ -625,13 +640,14 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
              const process = (costItem: LineItem | AdditionalService, type: 'lineItem' | 'additionalService', index: number) => {
                 if (!costItem.cost || costItem.cost <= 0) return;
                 
-                const supplierId = costItem.supplierId || order.supplierId;
-                if (!supplierId) return;
-                const supplier = supplierMap.get(supplierId);
-                if (!supplier) return;
+                // CRITICAL LOGIC FIX: Do not inherit order.supplierId if item supplier is empty.
+                // This prevents unassigned items from being swallowed into the main supplier report.
+                const supplierId = costItem.supplierId; 
+                
+                const supplier = supplierId ? supplierMap.get(supplierId) : null;
 
                 const calculationBaseDate = order.dealStartDate || order.date;
-                let effectivePaymentTerms = supplier.paymentTerms;
+                let effectivePaymentTerms = supplier ? supplier.paymentTerms : 'תשלום מיידי';
                 const dueDate = calculateDueDate(calculationBaseDate, effectivePaymentTerms, costItem.customDueDate);
                 
                 let totalItemCost = costItem.cost;
@@ -696,8 +712,8 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
 
                 items.push({
                     uniqueId: `${order.id}_${type}_${index}`,
-                    supplierId: supplier.id,
-                    supplierName: supplier.name,
+                    supplierId: supplierId || 'unassigned',
+                    supplierName: supplier ? supplier.name : '⚠️ פריטים ללא ספק משויך',
                     orderId: order.id,
                     orderNumber: order.orderNumber,
                     orderDescription: order.description,
@@ -877,7 +893,8 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
                     supplierName: item.supplierName,
                     totalDue: 0,
                     totalPaid: 0,
-                    items: []
+                    items: [],
+                    isUnassigned: item.supplierId === 'unassigned'
                 };
             }
             
@@ -1037,6 +1054,8 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
         .filter(i => i.remainingAmount > 0.1 && i.timeStatus === 'לתשלום החודש')
         .reduce((sum, item) => sum + item.remainingAmount, 0);
 
+    const unassignedCount = rawPayables.filter(i => i.supplierId === 'unassigned' && i.remainingAmount > 0.1).length;
+
     const selectedItemsTotal = getSelectedItems().reduce((sum, i) => sum + i.remainingAmount, 0);
 
     const handleExport = () => {
@@ -1082,6 +1101,26 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
                 <StatCard title="לתשלום החודש" value={`₪${thisMonthDue.toLocaleString()}`} color="text-orange-600" />
             </div>
 
+            {unassignedCount > 0 && (
+                <div className="bg-rose-50 border border-rose-200 p-4 rounded-lg flex items-center justify-between animate-pulse">
+                    <div className="flex items-center gap-3">
+                        <div className="bg-rose-100 p-2 rounded-full text-rose-600">
+                            <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
+                        </div>
+                        <div>
+                            <h4 className="font-black text-rose-800">שים לב: נמצאו עלויות ללא ספק משויך</h4>
+                            <p className="text-xs text-rose-600 font-bold">ישנם {unassignedCount} פריטים בהזמנות פעילות שלא הוגדר עבורם ספק לתשלום.</p>
+                        </div>
+                    </div>
+                    <button 
+                        onClick={() => setSupplierFilterId('unassigned')}
+                        className="bg-rose-600 text-white px-4 py-1.5 rounded-lg text-sm font-black hover:bg-rose-700 transition-all shadow-sm"
+                    >
+                        הצג עלויות
+                    </button>
+                </div>
+            )}
+
             {/* Filter Bar */}
             <div className="bg-white p-4 rounded-lg shadow-sm border border-slate-200 flex flex-col md:flex-row gap-4 items-end md:items-center justify-between">
                 <div className="flex flex-wrap gap-4 w-full md:w-auto">
@@ -1097,6 +1136,7 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
                         suppliers={suppliers} 
                         selectedId={supplierFilterId} 
                         onChange={(id) => setSupplierFilterId(id)}
+                        hasUnassigned={unassignedCount > 0}
                     />
 
                     {/* Date Range */}
@@ -1340,31 +1380,34 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
                                 {expandedMonths.has(group.monthYearKey) && (
                                     <div className="p-4 pt-0">
                                         {/* Nested Supplier Groups */}
-                                        {/* FIX: Cast Object.entries result to resolve 'unknown' type errors for sGroup */}
                                         {(Object.entries(group.suppliers) as [string, SupplierGroup][]).map(([sId, sGroup]) => {
                                             const sKey = `${group.monthYearKey}_${sId}`;
                                             const isSExpanded = expandedSuppliers.has(sKey);
+                                            const isUnassigned = sId === 'unassigned';
                                             return (
-                                                <div key={sId} className="mt-2 border rounded border-slate-100 overflow-hidden">
+                                                <div key={sId} className={`mt-2 border rounded border-slate-100 overflow-hidden ${isUnassigned ? 'border-rose-200 ring-1 ring-rose-50' : ''}`}>
                                                     <div 
                                                         onClick={() => toggleSupplier(sKey)}
-                                                        className="flex items-center justify-between p-3 bg-white hover:bg-slate-50 cursor-pointer"
+                                                        className={`flex items-center justify-between p-3 bg-white hover:bg-slate-50 cursor-pointer ${isUnassigned ? 'bg-rose-50/30' : ''}`}
                                                     >
                                                         <div className="flex items-center gap-2">
                                                             <div className={`transform transition-transform ${isSExpanded ? 'rotate-180' : ''}`}>
                                                                 <svg className="h-4 w-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
                                                             </div>
-                                                            <span className="font-bold text-slate-700">{sGroup.supplierName}</span>
-                                                            <span className="text-[10px] bg-slate-100 px-1.5 py-0.5 rounded">{sGroup.items.length}</span>
+                                                            <span className={`font-bold ${isUnassigned ? 'text-rose-700 flex items-center gap-1' : 'text-slate-700'}`}>
+                                                                {isUnassigned && <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>}
+                                                                {sGroup.supplierName}
+                                                            </span>
+                                                            <span className={`text-[10px] px-1.5 py-0.5 rounded ${isUnassigned ? 'bg-rose-200 text-rose-800' : 'bg-slate-100'}`}>{sGroup.items.length}</span>
                                                         </div>
-                                                        <div className="text-sm font-bold text-red-600">
+                                                        <div className={`text-sm font-bold ${isUnassigned ? 'text-rose-800' : 'text-red-600'}`}>
                                                             ₪{(sGroup.totalDue - sGroup.totalPaid).toLocaleString()}
                                                         </div>
                                                     </div>
                                                     {isSExpanded && (
-                                                        <div className="overflow-x-auto bg-slate-50/50">
+                                                        <div className={`overflow-x-auto ${isUnassigned ? 'bg-rose-50/20' : 'bg-slate-50/50'}`}>
                                                             <table className="min-w-full text-xs text-right">
-                                                                <thead className="bg-slate-100 text-slate-500 font-bold uppercase">
+                                                                <thead className={`${isUnassigned ? 'bg-rose-100/50 text-rose-600' : 'bg-slate-100 text-slate-500'} font-bold uppercase`}>
                                                                     <tr>
                                                                         {canManagePayments && <th className="px-4 py-2 w-8"></th>}
                                                                         <th className="px-4 py-2">הזמנה</th>

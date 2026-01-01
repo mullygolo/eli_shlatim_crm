@@ -1,4 +1,3 @@
-
 import React, { useMemo, useState } from 'react';
 import { Order, FixedExpense, VariableExpense, Loan, Employee, AttendanceRecord, OrderStatusConfiguration, Debt, Receivable, TransactionStatus } from '../types';
 import { calculateOrderTotals, getEmployeeSalaryAtDate } from '../utils/calculations';
@@ -87,6 +86,58 @@ const PnLReport: React.FC<PnLReportProps> = ({
         for (let i = currentY - 3; i <= currentY + 1; i++) years.push(i);
         return years;
     }, []);
+
+    // Updated Balance Overview with Incl/Excl VAT
+    const balanceOverview = useMemo(() => {
+        let customerDebtIncl = 0;
+        let customerDebtExcl = 0;
+        let supplierDebtIncl = 0;
+        let supplierDebtExcl = 0;
+
+        orders.forEach(order => {
+            const config = statusConfigs.find(c => c.label === order.orderStatus);
+            if (!config?.isActiveDeal || config.isLost) return;
+
+            const { totalAmount, totalPaid } = calculateOrderTotals(order);
+            const orderVat = order.vatRate ?? vatRate;
+            const vatMult = 1 + (orderVat / 100);
+            
+            // 1. Customer Outstanding
+            const grossIncome = totalAmount * vatMult;
+            const remainingIncl = Math.max(0, grossIncome - totalPaid);
+            if (remainingIncl > 0.1) {
+                customerDebtIncl += remainingIncl;
+                customerDebtExcl += (remainingIncl / vatMult);
+            }
+
+            // 2. Supplier Outstanding (COGS that hasn't been paid to suppliers yet)
+            const invalidStatuses: TransactionStatus[] = ['BOUNCED', 'CANCELED', 'RETURNED'];
+            
+            order.lineItems.forEach(li => {
+                const costGross = (li.cost * li.quantity) * vatMult;
+                const paidToSupplier = (li.supplierPayments || []).reduce((s, p) => 
+                    (p.status && invalidStatuses.includes(p.status)) ? s : s + p.amount, 0);
+                const remainingInclSup = Math.max(0, costGross - paidToSupplier);
+                if (remainingInclSup > 0.1) {
+                    supplierDebtIncl += remainingInclSup;
+                    supplierDebtExcl += (remainingInclSup / vatMult);
+                }
+            });
+
+            order.additionalServices.forEach(as => {
+                const costGross = as.cost * vatMult;
+                const paidToSupplier = (as.supplierPayments || []).reduce((s, p) => 
+                    (p.status && invalidStatuses.includes(p.status)) ? s : s + p.amount, 0);
+                const remainingInclSup = Math.max(0, costGross - paidToSupplier);
+                if (remainingInclSup > 0.1) {
+                    supplierDebtIncl += remainingInclSup;
+                    supplierDebtExcl += (remainingInclSup / vatMult);
+                }
+            });
+        });
+
+        return { customerDebtIncl, customerDebtExcl, supplierDebtIncl, supplierDebtExcl };
+    }, [orders, statusConfigs, vatRate]);
 
     const monthlyData = useMemo(() => {
         const pnlMap: Record<string, MonthlyPnL> = {};
@@ -483,6 +534,68 @@ const PnLReport: React.FC<PnLReportProps> = ({
                 </Modal>
             )}
 
+            {/* Balance Overview Widget */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                <div className="bg-gradient-to-br from-indigo-50 to-indigo-100 p-5 rounded-2xl border border-indigo-200 shadow-sm transition-all hover:shadow-md group">
+                    <div className="flex justify-between items-start mb-2">
+                        <h4 className="text-[11px] font-black text-indigo-500 uppercase tracking-widest">יתרת גבייה מלקוחות</h4>
+                        <div className="p-2 bg-indigo-200/50 rounded-lg text-indigo-600 group-hover:scale-110 transition-transform">
+                            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 9V7a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2m2 4h10a2 2 0 002-2v-6a2 2 0 00-2-2H9a2 2 0 00-2 2v6a2 2 0 002 2zm7-5a2 2 0 11-4 0 2 2 0 014 0z" /></svg>
+                        </div>
+                    </div>
+                    <div className="flex flex-col">
+                        <div className="flex items-baseline gap-2">
+                            <span className="text-3xl font-black text-indigo-900">₪{Math.round(balanceOverview.customerDebtIncl).toLocaleString()}</span>
+                            <span className="text-[10px] font-bold text-indigo-500">כולל מע"מ</span>
+                        </div>
+                        <div className="text-sm font-bold text-indigo-600 mt-1">
+                            ₪{Math.round(balanceOverview.customerDebtExcl).toLocaleString()} <span className="text-[9px] opacity-70">ללא מע"מ</span>
+                        </div>
+                    </div>
+                    <p className="text-[10px] text-indigo-400 mt-3 font-bold border-t border-indigo-200/50 pt-2">* מעסקאות פעילות בלבד</p>
+                </div>
+
+                <div className="bg-gradient-to-br from-rose-50 to-rose-100 p-5 rounded-2xl border border-rose-200 shadow-sm transition-all hover:shadow-md group">
+                    <div className="flex justify-between items-start mb-2">
+                        <h4 className="text-[11px] font-black text-rose-500 uppercase tracking-widest">חוב פתוח לספקים</h4>
+                        <div className="p-2 bg-rose-200/50 rounded-lg text-rose-600 group-hover:scale-110 transition-transform">
+                            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                        </div>
+                    </div>
+                    <div className="flex flex-col">
+                        <div className="flex items-baseline gap-2">
+                            <span className="text-3xl font-black text-rose-900">₪{Math.round(balanceOverview.supplierDebtIncl).toLocaleString()}</span>
+                            <span className="text-[10px] font-bold text-rose-500">כולל מע"מ</span>
+                        </div>
+                        <div className="text-sm font-bold text-rose-600 mt-1">
+                            ₪{Math.round(balanceOverview.supplierDebtExcl).toLocaleString()} <span className="text-[9px] opacity-70">ללא מע"מ</span>
+                        </div>
+                    </div>
+                    <p className="text-[10px] text-rose-400 mt-3 font-bold border-t border-rose-200/50 pt-2">* רכש ומתקינים בעסקאות פעילות</p>
+                </div>
+
+                <div className="bg-gradient-to-br from-emerald-50 to-emerald-100 p-5 rounded-2xl border border-emerald-200 shadow-sm transition-all hover:shadow-md group">
+                    <div className="flex justify-between items-start mb-2">
+                        <h4 className="text-[11px] font-black text-emerald-500 uppercase tracking-widest">תזרים עתידי פוטנציאלי</h4>
+                        <div className="p-2 bg-emerald-200/50 rounded-lg text-emerald-600 group-hover:scale-110 transition-transform">
+                            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" /></svg>
+                        </div>
+                    </div>
+                    <div className="flex flex-col">
+                        <div className="flex items-baseline gap-2">
+                            <span className={`text-3xl font-black ${balanceOverview.customerDebtIncl - balanceOverview.supplierDebtIncl < 0 ? 'text-rose-700' : 'text-emerald-900'}`}>
+                                ₪{Math.round(balanceOverview.customerDebtIncl - balanceOverview.supplierDebtIncl).toLocaleString()}
+                            </span>
+                            <span className="text-[10px] font-bold text-emerald-500">כולל מע"מ</span>
+                        </div>
+                        <div className="text-sm font-bold text-emerald-600 mt-1">
+                            ₪{Math.round(balanceOverview.customerDebtExcl - balanceOverview.supplierDebtExcl).toLocaleString()} <span className="text-[9px] opacity-70">ללא מע"מ</span>
+                        </div>
+                    </div>
+                    <p className="text-[10px] text-emerald-500 mt-3 font-bold border-t border-emerald-200/50 pt-2">* יתרה חופשית לאחר תשלום לספקים</p>
+                </div>
+            </div>
+
             <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
                 {/* Filter Bar */}
                 <div className="flex flex-col md:flex-row justify-between items-center mb-8 gap-6 border-b pb-6 border-slate-100">
@@ -532,8 +645,8 @@ const PnLReport: React.FC<PnLReportProps> = ({
                         <tbody className="divide-y divide-slate-100">
                             {/* PROFIT & LOSS SECTION */}
                             <tr className="text-slate-400 text-[10px] font-black uppercase tracking-widest bg-slate-50/50"><td className="px-4 py-1 sticky right-0 z-20 bg-slate-50/50" colSpan={monthlyData.length + 2}>פעילות עסקית שוטפת</td></tr>
-                            <PnLRow label="הכנסות מעסקאות (נטו)" field="income" itemsField="incomeItems" customColor="text-emerald-600" />
-                            <PnLRow label="עלות המכר (COGS)" field="cogs" itemsField="cogsItems" isNegative={true} />
+                            <PnLRow label="הכנסות מעסקאות (ללא מע''מ)" field="income" itemsField="incomeItems" customColor="text-emerald-600" />
+                            <PnLRow label="עלות המכר (ללא מע''מ)" field="cogs" itemsField="cogsItems" isNegative={true} />
                             <PnLRow label="רווח גולמי" field="grossProfit" isSummary={true} />
                             
                             <tr><td colSpan={monthlyData.length + 2} className="h-4"></td></tr>

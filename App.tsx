@@ -150,7 +150,9 @@ const App: React.FC = () => {
                             orders={orders} 
                             setOrders={setOrders}
                             addActivity={addActivity} 
-                            onNavigateToOrder={handleNavigateToOrder} 
+                            onNavigateToOrder={handleNavigateToOrder}
+                            statusConfigs={statusConfigs}
+                            vatRate={vatRate}
                         />;
             case 'Orders':
                 return <OrdersPage 
@@ -169,7 +171,15 @@ const App: React.FC = () => {
                             vatRate={vatRate}
                         />;
             case 'Suppliers':
-                return <SuppliersPage suppliers={suppliers} setSuppliers={setSuppliers} addActivity={addActivity} orders={orders} />;
+                return <SuppliersPage 
+                    suppliers={suppliers} 
+                    setSuppliers={setSuppliers} 
+                    addActivity={addActivity} 
+                    orders={orders} 
+                    setOrders={setOrders} 
+                    transactions={transactions}
+                    setTransactions={setTransactions}
+                />;
             case 'Employees':
                 return <EmployeesPage 
                     employees={employees} 

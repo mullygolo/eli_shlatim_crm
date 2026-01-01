@@ -1,10 +1,11 @@
-
-import React, { useState, useMemo, useEffect } from 'react';
-import { Customer, Contact, Order, PaymentMethod } from '../types';
-import { PlusIcon, EditIcon, DeleteIcon, ImportIcon, WhatsAppIcon, EmailIcon, PhoneIcon } from './icons';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
+import { Customer, Contact, Order, PaymentMethod, CustomerPayment, TimelineEvent, OrderStatusConfiguration, PaymentStatus } from '../types';
+import { PlusIcon, EditIcon, DeleteIcon, ImportIcon, WhatsAppIcon, EmailIcon, PhoneIcon, CashIcon } from './icons';
 import Modal from './Modal';
 import { CUSTOMER_CATEGORIES, PAYMENT_TERMS_OPTIONS } from '../constants';
+import { calculateOrderTotals } from '../utils/calculations';
 
+// Added missing interface definition for CustomersPageProps
 interface CustomersPageProps {
     customers: Customer[];
     setCustomers: React.Dispatch<React.SetStateAction<Customer[]>>;
@@ -12,12 +13,421 @@ interface CustomersPageProps {
     setOrders: React.Dispatch<React.SetStateAction<Order[]>>;
     addActivity: (description: string) => void;
     onNavigateToOrder: (orderId: string) => void;
+    statusConfigs: OrderStatusConfiguration[];
+    vatRate: number;
 }
+
+// Helper to check for duplicates
+const findDuplicateCustomer = (customers: Customer[], name: string, hp?: string, email?: string, phone?: string) => {
+    return customers.find(c => {
+        if (name && c.name.toLowerCase() === name.toLowerCase()) return true;
+        if (hp && c.businessId === hp) return true;
+        if (email || phone) {
+            return c.contacts.some(contact => 
+                (email && contact.email.toLowerCase() === email.toLowerCase()) ||
+                (phone && contact.phone.replace(/\D/g, '') === phone.replace(/\D/g, ''))
+            );
+        }
+        return false;
+    });
+};
+
+const CollectionCenterModal: React.FC<{
+    customer: Customer;
+    orders: Order[];
+    setOrders: React.Dispatch<React.SetStateAction<Order[]>>;
+    onClose: () => void;
+    addActivity: (description: string) => void;
+    statusConfigs: OrderStatusConfiguration[];
+    vatRate: number;
+}> = ({ customer, orders, setOrders, onClose, addActivity, statusConfigs, vatRate }) => {
+    // 1. Get all orders for this customer and calculate their actual balance
+    const allCustomerOrders = useMemo(() => {
+        return orders
+            .filter(o => {
+                // Filter: Only ACTIVE deals count towards debt
+                const config = statusConfigs.find(c => c.label === o.orderStatus);
+                return o.customerId === customer.id && config?.isActiveDeal;
+            })
+            .map(o => {
+                const { totalAmount, totalPaid } = calculateOrderTotals(o);
+                const currentOrderVat = o.vatRate ?? vatRate;
+                const gross = totalAmount * (1 + currentOrderVat / 100);
+                const remaining = Math.max(0, gross - totalPaid);
+                return { 
+                    ...o,
+                    gross,
+                    paid: totalPaid,
+                    remaining: Number(remaining.toFixed(2))
+                };
+            })
+            .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    }, [orders, customer.id, statusConfigs, vatRate]);
+
+    // 2. Filter only orders that REALLY have a debt ( > 1 NIS to avoid rounding issues)
+    const orderData = useMemo(() => {
+        return allCustomerOrders.filter(o => o.remaining > 1);
+    }, [allCustomerOrders]);
+
+    const totalCustomerDebt = orderData.reduce((sum, o) => sum + o.remaining, 0);
+
+    // Form State
+    const [totalAmount, setTotalAmount] = useState<number>(0);
+    const [date, setDate] = useState<string>(new Date().toISOString().split('T')[0]);
+    const [method, setMethod] = useState<PaymentMethod>(PaymentMethod.BANK_TRANSFER);
+    const [reference, setReference] = useState('');
+    const [repaymentDate, setRepaymentDate] = useState<string>('');
+    const [notes, setNotes] = useState('');
+    
+    // Distribution State (amount to allocate per order)
+    const [allocations, setAllocations] = useState<Record<string, number>>({});
+
+    // Sync totalAmount based on manual changes in the table
+    const allocatedTotal = useMemo(() => {
+        return Object.values(allocations).reduce((sum, a) => sum + a, 0);
+    }, [allocations]);
+
+    // Distribution Logic: FIFO (Oldest First)
+    const handleAutoDistribute = () => {
+        let remainingToSpend = totalAmount;
+        const newAllocations: Record<string, number> = {};
+
+        orderData.forEach(order => {
+            if (remainingToSpend <= 0.01) {
+                newAllocations[order.id] = 0;
+            } else {
+                const canPay = Math.min(order.remaining, remainingToSpend);
+                newAllocations[order.id] = Number(canPay.toFixed(2));
+                remainingToSpend -= canPay;
+            }
+        });
+        setAllocations(newAllocations);
+    };
+
+    const handleManualAllocationChange = (orderId: string, value: string) => {
+        const val = parseFloat(value) || 0;
+        setAllocations(prev => {
+            const next = { ...prev, [orderId]: val };
+            // Update the top total to match the sum of manual entries
+            const newTotal = Object.values(next).reduce((sum, a) => sum + a, 0);
+            setTotalAmount(Number(newTotal.toFixed(2)));
+            return next;
+        });
+    };
+
+    const fillFullBalance = (orderId: string, remaining: number) => {
+        handleManualAllocationChange(orderId, remaining.toString());
+    };
+
+    const fillAllBalances = () => {
+        const newAllocations: Record<string, number> = {};
+        orderData.forEach(o => {
+            newAllocations[o.id] = o.remaining;
+        });
+        setAllocations(newAllocations);
+        setTotalAmount(Number(totalCustomerDebt.toFixed(2)));
+    };
+
+    const handleSaveBatchPayment = () => {
+        if (allocatedTotal <= 0) {
+            alert("לא הוזנו סכומים להקצאה");
+            return;
+        }
+
+        const batchId = `batch_${Date.now()}`;
+        const newOrders = [...orders];
+
+        Object.entries(allocations).forEach(([orderId, amount]) => {
+            if (amount <= 0.01) return;
+
+            const orderIdx = newOrders.findIndex(o => o.id === orderId);
+            if (orderIdx === -1) return;
+
+            const order = { ...newOrders[orderIdx] };
+            
+            const newPayment: CustomerPayment = {
+                id: `pay_${Date.now()}_${orderId}`,
+                amount,
+                date: new Date(date),
+                method,
+                reference,
+                repaymentDate: method === PaymentMethod.CHECK ? new Date(repaymentDate) : undefined,
+                batchId,
+                notes: `תשלום מרוכז לקוח. ${notes}`.trim(),
+                status: method === PaymentMethod.CHECK ? 'PENDING' : 'CLEARED'
+            };
+
+            const logEvent: TimelineEvent = {
+                id: `tl_batch_${Date.now()}_${orderId}`,
+                timestamp: new Date(),
+                user: 'מערכת',
+                type: 'LOG',
+                content: `התקבל תשלום מרוכז בסך ₪${amount.toLocaleString()} (${method}). אסמכתא: ${reference || 'ללא'}`
+            };
+
+            order.payments = [...(order.payments || []), newPayment];
+            order.timeline = [logEvent, ...order.timeline];
+            
+            newOrders[orderIdx] = order;
+        });
+
+        setOrders(newOrders);
+        addActivity(`בוצע תשלום מרוכז עבור לקוח: ${customer.name} בסך ₪${allocatedTotal.toLocaleString()}`);
+        onClose();
+    };
+
+    return (
+        <Modal title={`מרכז גבייה - ${customer.name}`} onClose={onClose} size="5xl">
+            <div className="flex flex-col md:flex-row gap-8 text-start">
+                
+                {/* Left Side: Order List & Allocation */}
+                <div className="flex-1 space-y-6">
+                    <div>
+                        <div className="flex justify-between items-center mb-3">
+                            <h4 className="font-black text-slate-800 flex items-center gap-2">
+                                <svg className="w-5 h-5 text-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" /></svg>
+                                הזמנות פתוחות לתשלום ({orderData.length})
+                            </h4>
+                            {orderData.length > 0 && (
+                                <button 
+                                    onClick={fillAllBalances}
+                                    className="text-[10px] bg-indigo-50 text-indigo-700 px-2 py-1 rounded font-black hover:bg-indigo-100 transition-all border border-indigo-200"
+                                >
+                                    ✅ סמן הכל לתשלום מלא
+                                </button>
+                            )}
+                        </div>
+                        <div className="border rounded-xl overflow-hidden shadow-sm">
+                            <table className="min-w-full text-xs text-right">
+                                <thead className="bg-slate-50 text-slate-500 font-bold border-b">
+                                    <tr>
+                                        <th className="px-4 py-3">הזמנה</th>
+                                        <th className="px-4 py-3">סה"כ ברוטו</th>
+                                        <th className="px-4 py-3">יתרה פתוחה</th>
+                                        <th className="px-4 py-3 bg-indigo-50 text-indigo-700 w-32">סכום לתשלום</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100">
+                                    {orderData.map(order => (
+                                        <tr key={order.id} className="hover:bg-slate-50 group">
+                                            <td className="px-4 py-3">
+                                                <span className="font-bold text-slate-700 block">{order.orderNumber}</span>
+                                                <span className="text-[10px] text-slate-400 line-clamp-1">{order.description}</span>
+                                            </td>
+                                            <td className="px-4 py-3">₪{order.gross.toLocaleString()}</td>
+                                            <td className="px-4 py-3 font-bold text-red-600">
+                                                <button 
+                                                    onClick={() => fillFullBalance(order.id, order.remaining)}
+                                                    className="hover:underline hover:text-red-700 flex items-center gap-1"
+                                                    title="לחץ למילוי יתרה מלאה"
+                                                >
+                                                    ₪{order.remaining.toLocaleString()}
+                                                    <span className="opacity-0 group-hover:opacity-100 text-[8px] bg-red-100 px-1 rounded transition-opacity">⚡ פתח</span>
+                                                </button>
+                                            </td>
+                                            <td className="px-4 py-3 bg-indigo-50/30">
+                                                <div className="relative">
+                                                    <input 
+                                                        type="number" 
+                                                        value={allocations[order.id] || ''} 
+                                                        onChange={e => handleManualAllocationChange(order.id, e.target.value)}
+                                                        placeholder="0.00"
+                                                        className="w-full text-sm font-bold p-1.5 border border-indigo-200 rounded focus:ring-primary text-indigo-700 text-center"
+                                                    />
+                                                    {allocations[order.id] && allocations[order.id] > 0 && (
+                                                        <button 
+                                                            onClick={() => handleManualAllocationChange(order.id, '0')}
+                                                            className="absolute -left-2 top-1/2 -translate-y-1/2 text-slate-300 hover:text-red-500"
+                                                        >
+                                                            ×
+                                                        </button>
+                                                    )}
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    ))}
+                                    {orderData.length === 0 && (
+                                        <tr><td colSpan={4} className="p-12 text-center text-slate-400 font-medium">
+                                            <div className="flex flex-col items-center gap-2">
+                                                <div className="w-12 h-12 bg-slate-100 rounded-full flex items-center justify-center text-slate-300">
+                                                    <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
+                                                </div>
+                                                אין חובות פתוחים ללקוח זה.
+                                            </div>
+                                        </td></tr>
+                                    )}
+                                </tbody>
+                                <tfoot className="bg-slate-100 font-black border-t">
+                                    <tr>
+                                        <td colSpan={2} className="px-4 py-3">סה"כ חוב פתוח:</td>
+                                        <td className="px-4 py-3 text-red-700">₪{totalCustomerDebt.toLocaleString()}</td>
+                                        <td className="px-4 py-3 bg-indigo-100 text-indigo-800 text-center">₪{allocatedTotal.toLocaleString()}</td>
+                                    </tr>
+                                </tfoot>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                {/* Right Side: Payment Form */}
+                <div className="w-full md:w-80 space-y-4">
+                    <div className="bg-slate-50 p-5 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+                        <h4 className="font-black text-slate-800 border-b pb-3 flex items-center gap-2">
+                            <CashIcon className="w-5 h-5 text-emerald-600"/>
+                            פרטי תקבול
+                        </h4>
+                        
+                        <div>
+                            <label className="block text-xs font-black text-slate-500 uppercase tracking-widest mb-1">סכום שהתקבל (₪)</label>
+                            <div className="relative">
+                                <input 
+                                    type="number" 
+                                    value={totalAmount || ''} 
+                                    onChange={e => setTotalAmount(parseFloat(e.target.value) || 0)} 
+                                    className="w-full text-xl font-black p-3 rounded-xl border-slate-300 focus:ring-primary focus:border-primary text-emerald-700 shadow-inner"
+                                    placeholder="0.00"
+                                />
+                                {totalAmount > 0 && (
+                                    <button 
+                                        onClick={handleAutoDistribute}
+                                        className="mt-2 w-full py-2 bg-indigo-600 text-white text-xs font-black rounded-lg shadow-md hover:bg-indigo-700 transition-all flex items-center justify-center gap-2"
+                                        title="פזר את הסכום שהזנת מלמעלה בין ההזמנות"
+                                    >
+                                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" /></svg>
+                                        פיזור אוטומטי (FIFO)
+                                    </button>
+                                )}
+                            </div>
+                        </div>
+
+                        <div>
+                            <label className="block text-xs font-black text-slate-500 uppercase mb-1">אמצעי תשלום</label>
+                            <select value={method} onChange={e => setMethod(e.target.value as PaymentMethod)} className="w-full text-sm font-bold border-slate-300 rounded-lg p-2 bg-white">
+                                {Object.values(PaymentMethod).map(m => <option key={m} value={m}>{m}</option>)}
+                            </select>
+                        </div>
+
+                        {method === PaymentMethod.CHECK && (
+                            <div className="space-y-3 p-3 bg-yellow-50 border border-yellow-200 rounded-xl animate-fadeIn">
+                                <div>
+                                    <label className="block text-[10px] font-black text-yellow-700 uppercase">מספר צ'ק</label>
+                                    <input type="text" value={reference} onChange={e => setReference(e.target.value)} className="w-full text-sm border-yellow-300 rounded p-2 focus:ring-yellow-500" placeholder="חובה" />
+                                </div>
+                                <div>
+                                    <label className="block text-[10px] font-black text-yellow-700 uppercase">תאריך פירעון</label>
+                                    <input type="date" value={repaymentDate} onChange={e => setRepaymentDate(e.target.value)} className="w-full text-sm border-yellow-300 rounded p-2 focus:ring-yellow-500" required />
+                                </div>
+                            </div>
+                        )}
+
+                        <div className="grid grid-cols-2 gap-3">
+                            <div className="col-span-2">
+                                <label className="block text-[10px] font-black text-slate-400 uppercase">תאריך קבלה</label>
+                                <input type="date" value={date} onChange={e => setDate(e.target.value)} className="w-full text-sm border-slate-300 rounded p-2" />
+                            </div>
+                            <div className="col-span-2">
+                                <label className="block text-[10px] font-black text-slate-400 uppercase">אסמכתא / הערות</label>
+                                <input type="text" value={method === PaymentMethod.CHECK ? notes : reference} onChange={e => method === PaymentMethod.CHECK ? setNotes(e.target.value) : setReference(e.target.value)} className="w-full text-sm border-slate-300 rounded p-2" />
+                            </div>
+                        </div>
+
+                        <button 
+                            onClick={handleSaveBatchPayment}
+                            disabled={allocatedTotal <= 0}
+                            className="w-full py-4 bg-emerald-600 text-white rounded-xl font-black text-lg shadow-xl hover:bg-emerald-700 transition-all disabled:opacity-50 disabled:cursor-not-allowed mt-4"
+                        >
+                            בצע גבייה מרוכזת
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </Modal>
+    );
+};
+
+const ManualMergeModal: React.FC<{
+    targetCustomer: Customer;
+    allCustomers: Customer[];
+    onConfirm: (victimId: string) => void;
+    onClose: () => void;
+}> = ({ targetCustomer, allCustomers, onConfirm, onClose }) => {
+    const [searchTerm, setSearchTerm] = useState('');
+    const [selectedVictim, setSelectedVictim] = useState<Customer | null>(null);
+
+    const candidates = useMemo(() => {
+        if (!searchTerm) return [];
+        const lower = searchTerm.toLowerCase();
+        return allCustomers.filter(c => 
+            c.id !== targetCustomer.id && (
+                c.name.toLowerCase().includes(lower) || 
+                c.businessId?.includes(lower) ||
+                c.contacts.some(cont => cont.name.toLowerCase().includes(lower) || cont.phone.includes(lower))
+            )
+        ).slice(0, 10);
+    }, [searchTerm, allCustomers, targetCustomer.id]);
+
+    return (
+        <Modal title="מיזוג לקוחות ידני" onClose={onClose} size="lg">
+            <div className="text-start space-y-4">
+                <div className="bg-indigo-50 border border-indigo-200 p-4 rounded-lg">
+                    <h4 className="font-bold text-indigo-900">הלקוח הראשי: {targetCustomer.name}</h4>
+                    <p className="text-sm text-indigo-700">זהו הלקוח שיישמר ("הוותיק"). המידע מהלקוח שתבחר למטה ימוזג לתוכו, ולאחר מכן הלקוח המשני יימחק.</p>
+                </div>
+
+                <div>
+                    <label className="block text-sm font-bold text-slate-700 mb-1">בחר לקוח למיזוג (ייבלע ויימחק)</label>
+                    <input 
+                        type="text" 
+                        value={searchTerm}
+                        onChange={e => { setSearchTerm(e.target.value); setSelectedVictim(null); }}
+                        placeholder="חפש לפי שם, ח.פ או טלפון..."
+                        className="w-full p-2 border border-slate-300 rounded focus:ring-primary focus:border-primary"
+                    />
+                    
+                    {searchTerm && candidates.length > 0 && !selectedVictim && (
+                        <div className="mt-2 border rounded max-h-40 overflow-y-auto bg-white shadow-sm">
+                            {candidates.map(c => (
+                                <div 
+                                    key={c.id} 
+                                    onClick={() => setSelectedVictim(c)}
+                                    className="p-2 hover:bg-slate-50 cursor-pointer border-b last:border-0"
+                                >
+                                    <div className="font-bold text-sm text-slate-800">{c.name}</div>
+                                    <div className="text-xs text-slate-500">ח.פ: {c.businessId || '-'} | אנשי קשר: {c.contacts.length}</div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+
+                {selectedVictim && (
+                    <div className="bg-red-50 border border-red-200 p-4 rounded-lg animate-fadeIn">
+                        <h4 className="font-bold text-red-900 mb-2">אישור מיזוג</h4>
+                        <p className="text-sm text-red-800">
+                            האם אתה בטוח שברצונך למזג את <strong>{selectedVictim.name}</strong> לתוך <strong>{targetCustomer.name}</strong>?
+                        </p>
+                        <ul className="list-disc list-inside text-xs text-red-700 mt-2 space-y-1">
+                            <li>כל אנשי הקשר של {selectedVictim.name} יועברו.</li>
+                            <li>כל ההזמנות של {selectedVictim.name} ישויכו מחדש.</li>
+                            <li><strong>{selectedVictim.name} יימחק לצמיתות.</strong></li>
+                        </ul>
+                        
+                        <div className="flex justify-end gap-3 mt-4">
+                            <button onClick={onClose} className="px-4 py-2 bg-white text-slate-700 border border-slate-300 rounded hover:bg-slate-50">ביטול</button>
+                            <button onClick={() => onConfirm(selectedVictim.id)} className="px-4 py-2 bg-red-600 text-white rounded font-bold hover:bg-red-700 shadow-sm">בצע מיזוג</button>
+                        </div>
+                    </div>
+                )}
+            </div>
+        </Modal>
+    );
+};
 
 // Enhanced form for adding a new customer with all details
 const NewCustomerForm: React.FC<{ onSave: (customer: Partial<Customer>, firstContact: Partial<Contact>) => void; onCancel: () => void; }> = ({ onSave, onCancel }) => {
     const [customerData, setCustomerData] = useState({ 
         name: '', 
+        businessId: '',
         category: '',
         website: '',
         address: '',
@@ -53,6 +463,10 @@ const NewCustomerForm: React.FC<{ onSave: (customer: Partial<Customer>, firstCon
                     <div className="md:col-span-2">
                         <label className="block text-sm font-medium text-slate-700">שם החברה <span className="text-red-500">*</span></label>
                         <input type="text" name="name" value={customerData.name} onChange={handleCustomerChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" required />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-slate-700">ח.פ / ת.ז (למניעת כפילויות)</label>
+                        <input type="text" name="businessId" value={customerData.businessId} onChange={handleCustomerChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" placeholder="לדוג': 512345678" />
                     </div>
                     <div>
                         <label className="block text-sm font-medium text-slate-700">קטגוריה</label>
@@ -136,9 +550,12 @@ interface CustomerDetailViewProps {
     onSave: (customer: Customer) => void;
     onCancel: () => void;
     onNavigateToOrder: (orderId: string) => void;
+    onMergeClick: () => void;
+    statusConfigs: OrderStatusConfiguration[];
+    vatRate: number;
 }
 
-const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, customerOrders, onSave, onCancel, onNavigateToOrder }) => {
+const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, customerOrders, onSave, onCancel, onNavigateToOrder, onMergeClick, statusConfigs, vatRate }) => {
     const [activeTab, setActiveTab] = useState<'details' | 'contacts' | 'orders'>('details');
     const [editableCustomer, setEditableCustomer] = useState<Customer>(customer);
     const [editingContact, setEditingContact] = useState<Contact | null>(null);
@@ -192,7 +609,7 @@ const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, custo
                 <nav className="-mb-px flex space-x-6 space-x-reverse px-1">
                     <button onClick={() => setActiveTab('details')} className={`whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm ${activeTab === 'details' ? 'border-primary text-primary' : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'}`}>פרטים</button>
                     <button onClick={() => setActiveTab('contacts')} className={`whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm ${activeTab === 'contacts' ? 'border-primary text-primary' : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'}`}>אנשי קשר</button>
-                    <button onClick={() => setActiveTab('orders')} className={`whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm ${activeTab === 'orders' ? 'border-primary text-primary' : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'}`}>היסטוריית הזמנות</button>
+                    <button onClick={() => setActiveTab('orders')} className={`whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm ${activeTab === 'orders' ? 'border-primary text-primary' : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'}`}>היסטוריית הזמנות ({customerOrders.length})</button>
                 </nav>
             </div>
             <div className="py-6">
@@ -201,6 +618,10 @@ const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, custo
                         <div>
                             <label className="block text-sm font-medium text-slate-700 mb-1">שם חברה</label>
                             <input name="name" value={editableCustomer.name} onChange={handleCustomerChange} className="p-2 border rounded w-full"/>
+                        </div>
+                        <div>
+                            <label className="block text-sm font-medium text-slate-700 mb-1">ח.פ / ת.ז</label>
+                            <input name="businessId" value={editableCustomer.businessId || ''} onChange={handleCustomerChange} className="p-2 border rounded w-full"/>
                         </div>
                         <div>
                             <label className="block text-sm font-medium text-slate-700 mb-1">אתר אינטרנט</label>
@@ -377,19 +798,95 @@ const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, custo
                     </div>
                 )}
                 {activeTab === 'orders' && (
-                    customerOrders.length > 0 ? (
-                        <table className="min-w-full text-sm">
-                            <thead className="bg-slate-50"><tr><th className="p-2"># הזמנה</th><th>תיאור</th><th>תאריך</th><th>סכום</th><th>סטטוס</th></tr></thead>
-                            <tbody>{customerOrders.map(o => <tr key={o.id} className="border-b"><td className="p-2"><button onClick={() => onNavigateToOrder(o.id)} className="text-primary hover:underline font-semibold">{o.orderNumber}</button></td><td>{o.description}</td><td>{o.date.toLocaleDateString('he-IL')}</td><td>{o.lineItems.reduce((s, li) => s + li.unitPrice * li.quantity, 0).toLocaleString()}</td><td>{o.orderStatus}</td></tr>)}</tbody>
-                        </table>
-                    ) : (
-                        <p className="text-slate-500 text-center py-4">לא נמצאו הזמנות עבור לקוח זה.</p>
-                    )
+                    <div className="border rounded-xl overflow-hidden shadow-sm">
+                        {customerOrders.length > 0 ? (
+                            <table className="min-w-full text-xs text-right">
+                                <thead className="bg-slate-50 text-slate-500 font-bold border-b">
+                                    <tr>
+                                        <th className="px-4 py-3"># הזמנה</th>
+                                        <th className="px-4 py-3">תיאור</th>
+                                        <th className="px-4 py-3">תאריך פתיחה</th>
+                                        <th className="px-4 py-3">תאריך אישור</th>
+                                        <th className="px-4 py-3">סה"כ ברוטו</th>
+                                        <th className="px-4 py-3">יתרה פתוחה</th>
+                                        <th className="px-4 py-3">סטטוס ביצוע</th>
+                                        <th className="px-4 py-3">איש קשר</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100 bg-white">
+                                    {customerOrders.sort((a,b) => new Date(b.date).getTime() - new Date(a.date).getTime()).map(o => {
+                                        const { totalAmount, totalPaid } = calculateOrderTotals(o);
+                                        const currentVat = o.vatRate ?? vatRate;
+                                        const gross = totalAmount * (1 + currentVat / 100);
+                                        const remaining = Math.max(0, gross - totalPaid);
+                                        const orderStatusConfig = statusConfigs.find(c => c.label === o.orderStatus);
+                                        const contact = editableCustomer.contacts.find(c => c.id === o.contactId);
+                                        const isActiveDeal = orderStatusConfig?.isActiveDeal;
+                                        
+                                        return (
+                                            <tr key={o.id} className="hover:bg-slate-50 transition-colors group">
+                                                <td className="px-4 py-3 font-mono font-bold text-primary">
+                                                    <button onClick={() => onNavigateToOrder(o.id)} className="hover:underline">
+                                                        {o.orderNumber}
+                                                    </button>
+                                                </td>
+                                                <td className="px-4 py-3 font-medium text-slate-700 max-w-xs truncate" title={o.description}>
+                                                    {o.description}
+                                                </td>
+                                                <td className="px-4 py-3 text-slate-500">
+                                                    {new Date(o.date).toLocaleDateString('he-IL')}
+                                                </td>
+                                                <td className="px-4 py-3 text-slate-500">
+                                                    {o.dealStartDate ? new Date(o.dealStartDate).toLocaleDateString('he-IL') : <span className="text-[10px] text-slate-300 italic">טרם אושר</span>}
+                                                </td>
+                                                <td className="px-4 py-3 font-bold text-slate-800">
+                                                    ₪{gross.toLocaleString()}
+                                                </td>
+                                                <td className="px-4 py-3">
+                                                    <div className="flex flex-col">
+                                                        <span className={`font-black ${isActiveDeal ? (remaining > 1 ? 'text-red-600' : 'text-green-600') : 'text-slate-400'}`}>
+                                                            ₪{remaining.toLocaleString()}
+                                                        </span>
+                                                        {isActiveDeal ? (
+                                                            remaining > 1 ? <span className="text-[9px] text-red-400 font-bold uppercase">לתשלום</span> : <span className="text-[9px] text-green-500 font-bold uppercase">שולם</span>
+                                                        ) : (
+                                                            remaining > 1 ? <span className="text-[9px] text-slate-400 font-bold uppercase">פוטנציאל</span> : null
+                                                        )}
+                                                    </div>
+                                                </td>
+                                                <td className="px-4 py-3">
+                                                    <span className={`px-2 py-1 rounded-full text-[10px] font-black uppercase tracking-tighter ${orderStatusConfig?.color || 'bg-slate-100 text-slate-600'}`}>
+                                                        {o.orderStatus}
+                                                    </span>
+                                                </td>
+                                                <td className="px-4 py-3">
+                                                    <div className="flex flex-col">
+                                                        <span className="font-bold text-slate-600">{contact?.name || '---'}</span>
+                                                        <span className="text-[9px] text-slate-400">{contact?.phone}</span>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        );
+                                    })}
+                                </tbody>
+                            </table>
+                        ) : (
+                            <div className="py-12 text-center text-slate-400 italic bg-white">לא נמצאו הזמנות עבור לקוח זה.</div>
+                        )}
+                    </div>
                 )}
             </div>
-             <div className="flex justify-end space-x-2 pt-4 space-x-reverse mt-4 border-t">
-                <button type="button" onClick={onCancel} className="px-4 py-2 bg-slate-200 text-slate-800 rounded-md hover:bg-slate-300">ביטול</button>
-                <button type="button" onClick={() => onSave(editableCustomer)} className="px-4 py-2 bg-primary text-white rounded-md hover:bg-indigo-700">שמור שינויים</button>
+             <div className="flex justify-between space-x-2 pt-4 space-x-reverse mt-4 border-t">
+                {activeTab === 'details' && (
+                    <button type="button" onClick={onMergeClick} className="px-4 py-2 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-md hover:bg-indigo-100 flex items-center gap-2">
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
+                        מיזוג לקוחות
+                    </button>
+                )}
+                <div className="flex space-x-2 space-x-reverse flex-1 justify-end">
+                    <button type="button" onClick={onCancel} className="px-4 py-2 bg-slate-200 text-slate-800 rounded-md hover:bg-slate-300">ביטול</button>
+                    <button type="button" onClick={() => onSave(editableCustomer)} className="px-4 py-2 bg-primary text-white rounded-md hover:bg-indigo-700">שמור שינויים</button>
+                </div>
             </div>
         </div>
     )
@@ -485,12 +982,18 @@ const CustomerImportModal: React.FC<{ onImport: (customers: Customer[]) => void;
 };
 
 
-const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, orders, setOrders, addActivity, onNavigateToOrder }) => {
+const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, orders, setOrders, addActivity, onNavigateToOrder, statusConfigs, vatRate }) => {
     const [isNewCustomerModalOpen, setIsNewCustomerModalOpen] = useState(false);
     const [isImportModalOpen, setIsImportModalOpen] = useState(false);
     const [isDetailModalOpen, setIsDetailModalOpen] = useState(false);
+    const [isCollectionCenterOpen, setIsCollectionCenterOpen] = useState(false);
     const [viewingCustomer, setViewingCustomer] = useState<Customer | null>(null);
     const [searchTerm, setSearchTerm] = useState('');
+    
+    // Duplicate Detection State
+    const [duplicateFound, setDuplicateFound] = useState<Customer | null>(null);
+    const [pendingNewCustomer, setPendingNewCustomer] = useState<{customer: Partial<Customer>, contact: Partial<Contact>} | null>(null);
+    const [isMergeModalOpen, setIsMergeModalOpen] = useState(false);
 
     const filteredCustomers = useMemo(() => {
         if (!searchTerm) {
@@ -499,7 +1002,8 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
         const lowercasedTerm = searchTerm.toLowerCase();
         return customers.filter(customer => {
             const nameMatch = customer.name.toLowerCase().includes(lowercasedTerm);
-            if (nameMatch) return true;
+            const hpMatch = customer.businessId?.toLowerCase().includes(lowercasedTerm);
+            if (nameMatch || hpMatch) return true;
 
             return customer.contacts.some(contact => 
                 contact.name.toLowerCase().includes(lowercasedTerm) ||
@@ -514,6 +1018,11 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
         setIsDetailModalOpen(true);
     };
 
+    const handleOpenCollectionCenter = (customer: Customer) => {
+        setViewingCustomer(customer);
+        setIsCollectionCenterOpen(true);
+    };
+
     const handleDeleteCustomer = (customerId: string) => {
         const customerName = customers.find(c => c.id === customerId)?.name;
         if(window.confirm(`האם אתה בטוח שברצונך למחוק את ${customerName}?`)) {
@@ -523,6 +1032,19 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
     };
 
     const handleSaveNewCustomer = (customerData: Partial<Customer>, contactData: Partial<Contact>) => {
+        // Search for existing duplicates before creating
+        const duplicate = findDuplicateCustomer(customers, customerData.name || '', customerData.businessId, contactData.email, contactData.phone);
+        
+        if (duplicate) {
+            setDuplicateFound(duplicate);
+            setPendingNewCustomer({ customer: customerData, contact: contactData });
+            return; // Don't save yet, show modal
+        }
+
+        performCreateCustomer(customerData, contactData);
+    };
+
+    const performCreateCustomer = (customerData: Partial<Customer>, contactData: Partial<Contact>) => {
         const newContact: Contact = {
             id: `cont_${Date.now()}`,
             name: contactData.name || '',
@@ -536,6 +1058,7 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
         const newCustomer: Customer = {
             id: `cust_${Date.now()}`,
             name: customerData.name || 'לקוח חדש',
+            businessId: customerData.businessId || '',
             website: customerData.website || '',
             address: customerData.address || '',
             category: customerData.category || '',
@@ -550,6 +1073,79 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
         setCustomers(prev => [...prev, newCustomer]);
         addActivity(`לקוח חדש נוסף: ${newCustomer.name}`);
         setIsNewCustomerModalOpen(false);
+        setPendingNewCustomer(null);
+        setDuplicateFound(null);
+    };
+
+    const handleMergeWithExisting = () => {
+        if (!duplicateFound || !pendingNewCustomer) return;
+
+        const oldCustomer = duplicateFound;
+        const newData = pendingNewCustomer;
+
+        // Merge Contacts: Add the new contact to the old list
+        const newContact: Contact = {
+            id: `cont_merged_${Date.now()}`,
+            name: newData.contact.name || '',
+            email: newData.contact.email || '',
+            phone: newData.contact.phone || '',
+            role: newData.contact.role || 'איש קשר נוסף',
+            isBillingContact: false,
+            isDefault: false
+        };
+
+        const updatedOldCustomer: Customer = {
+            ...oldCustomer,
+            contacts: [...oldCustomer.contacts, newContact],
+            notes: oldCustomer.notes + (newData.customer.notes ? `\n[מיזוג]: ${newData.customer.notes}` : '')
+        };
+
+        setCustomers(prev => prev.map(c => c.id === oldCustomer.id ? updatedOldCustomer : c));
+        addActivity(`לקוח מוזג לתוך כרטיס קיים: ${oldCustomer.name}`);
+        
+        setDuplicateFound(null);
+        setPendingNewCustomer(null);
+        setIsNewCustomerModalOpen(false);
+    };
+
+    // MANUAL MERGE HANDLER
+    const handleManualMerge = (victimId: string) => {
+        if (!viewingCustomer) return;
+        const veteranId = viewingCustomer.id;
+        const victim = customers.find(c => c.id === victimId);
+        
+        if (!victim) return;
+
+        // 1. Move Contacts
+        const transferredContacts = victim.contacts.map(c => ({
+            ...c,
+            isDefault: false, // Ensure no conflict with default contact of veteran
+            id: `cont_merged_${c.id}` // Regenerate ID just in case
+        }));
+
+        // 2. Update Orders
+        setOrders(prev => prev.map(o => {
+            if (o.customerId === victimId) {
+                return { ...o, customerId: veteranId };
+            }
+            return o;
+        }));
+
+        // 3. Update Veteran Customer
+        const updatedVeteran: Customer = {
+            ...viewingCustomer,
+            contacts: [...viewingCustomer.contacts, ...transferredContacts],
+            notes: viewingCustomer.notes + `\n[מיזוג ידני ${new Date().toLocaleDateString('he-IL')}]: מוזג מ-${victim.name} (ח.פ ${victim.businessId || '-'})`
+        };
+
+        setCustomers(prev => prev
+            .filter(c => c.id !== victimId) // Delete Victim
+            .map(c => c.id === veteranId ? updatedVeteran : c) // Update Veteran
+        );
+
+        addActivity(`בוצע מיזוג ידני: ${victim.name} מוזג לתוך ${viewingCustomer.name}`);
+        setViewingCustomer(updatedVeteran); // Update view
+        setIsMergeModalOpen(false);
     };
 
     const handleSaveCustomerUpdate = (updatedCustomer: Customer) => {
@@ -593,7 +1189,7 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
                 <div className="flex-grow">
                     <input
                         type="text"
-                        placeholder="חיפוש לפי שם לקוח, איש קשר, טלפון או אימייל..."
+                        placeholder="חיפוש לפי שם לקוח, ח.פ, איש קשר, טלפון או אימייל..."
                         value={searchTerm}
                         onChange={(e) => setSearchTerm(e.target.value)}
                         className="w-full px-4 py-2 border border-slate-300 rounded-lg shadow-sm focus:ring-primary focus:border-primary transition"
@@ -611,14 +1207,15 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
                     </button>
                 </div>
             </div>
-            <div className="bg-white shadow-md rounded-lg">
+            <div className="bg-white shadow-md rounded-lg overflow-x-auto">
                 <table className="min-w-full divide-y divide-slate-200 text-start">
                     <thead className="bg-slate-50">
                         <tr>
                             <th className="px-6 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">שם חברה</th>
+                            <th className="px-6 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">ח.פ / ת.ז</th>
                             <th className="px-6 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">איש קשר ראשי</th>
                             <th className="px-6 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">קטגוריה</th>
-                            <th className="px-6 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">תאריך הוספה</th>
+                            <th className="px-6 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider text-center">חוב לקוח</th>
                             <th className="relative px-6 py-3"><span className="sr-only">פעולות</span></th>
                         </tr>
                     </thead>
@@ -644,6 +1241,21 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
                                     gmailUrl = `https://mail.google.com/mail/?view=cm&fs=1&to=${primaryContact.email}`;
                                 }
                             }
+
+                            // Calculate specific debt for this customer
+                            // ONLY include active deals based on configuration
+                            const customerDebt = orders
+                                .filter(o => {
+                                    const config = statusConfigs.find(c => c.label === o.orderStatus);
+                                    return o.customerId === customer.id && config?.isActiveDeal;
+                                })
+                                .reduce((sum, o) => {
+                                    const { totalAmount, totalPaid } = calculateOrderTotals(o);
+                                    const currentOrderVat = o.vatRate ?? vatRate;
+                                    const gross = totalAmount * (1 + currentOrderVat / 100);
+                                    return sum + Math.max(0, gross - totalPaid);
+                                }, 0);
+
                             return(
                                 <tr key={customer.id} className="hover:bg-slate-50">
                                     <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
@@ -651,6 +1263,7 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
                                             {customer.name} {customer.isSpecial && <span title="לקוח מיוחד">⭐</span>}
                                         </button>
                                     </td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-500">{customer.businessId || '---'}</td>
                                     <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-500">
                                         <div className="flex items-center gap-3">
                                             <span>{primaryContact?.name || '---'}</span>
@@ -662,11 +1275,33 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
                                         </div>
                                     </td>
                                     <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-500">{customer.category || '---'}</td>
-                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-500">{customer.createdAt.toLocaleDateString('he-IL')}</td>
-                                    <td className="px-6 py-4 whitespace-nowrap text-left text-sm font-medium space-x-2 space-x-reverse">
-                                        <button onClick={() => handleDeleteCustomer(customer.id)} className="text-red-600 hover:text-red-900 p-1" aria-label={`מחק את ${customer.name}`}>
-                                            <DeleteIcon className="h-5 w-5"/>
-                                        </button>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm font-black text-center">
+                                        <div className="flex flex-col items-center">
+                                            <span className={customerDebt > 1 ? 'text-red-600' : 'text-green-600'}>
+                                                ₪{customerDebt.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                                            </span>
+                                            {customerDebt > 1 && (
+                                                <button 
+                                                    onClick={() => handleOpenCollectionCenter(customer)}
+                                                    className="text-[10px] text-primary hover:underline font-bold mt-0.5"
+                                                >
+                                                    לגבייה מרוכזת
+                                                </button>
+                                            )}
+                                        </div>
+                                    </td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-left text-sm font-medium">
+                                        <div className="flex gap-2 justify-end">
+                                            <button onClick={() => handleOpenCollectionCenter(customer)} className="p-2 bg-emerald-50 text-emerald-600 hover:bg-emerald-600 hover:text-white rounded-lg transition-all" title="מרכז גבייה">
+                                                <CashIcon className="h-5 w-5"/>
+                                            </button>
+                                            <button onClick={() => handleViewCustomer(customer)} className="p-2 bg-indigo-50 text-primary hover:bg-primary hover:text-white rounded-lg transition-all" title="ערוך">
+                                                <EditIcon className="h-5 w-5"/>
+                                            </button>
+                                            <button onClick={() => handleDeleteCustomer(customer.id)} className="p-2 bg-red-50 text-red-600 hover:bg-red-600 hover:text-white rounded-lg transition-all" aria-label={`מחק את ${customer.name}`}>
+                                                <DeleteIcon className="h-5 w-5"/>
+                                            </button>
+                                        </div>
                                     </td>
                                 </tr>
                             )
@@ -680,11 +1315,57 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
                     </div>
                 )}
             </div>
+            
+            {/* New Customer Modal */}
             {isNewCustomerModalOpen && (
-                <Modal title="הוספת לקוח חדש" onClose={() => setIsNewCustomerModalOpen(false)} size="2xl">
+                <Modal title="הוספת לקוח חדש" onClose={() => { setIsNewCustomerModalOpen(false); setDuplicateFound(null); }} size="2xl">
                     <NewCustomerForm onSave={handleSaveNewCustomer} onCancel={() => setIsNewCustomerModalOpen(false)} />
                 </Modal>
             )}
+
+            {/* Duplicate Found Confirmation Modal */}
+            {duplicateFound && (
+                <Modal title="נמצא לקוח קיים עם פרטים זהים" onClose={() => setDuplicateFound(null)} size="lg" zIndex={100}>
+                    <div className="text-start space-y-4">
+                        <div className="bg-amber-50 border border-amber-200 p-4 rounded-lg flex items-start gap-3">
+                            <div className="p-2 bg-amber-100 rounded-full text-amber-600 shrink-0">
+                                <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
+                            </div>
+                            <div>
+                                <h4 className="font-bold text-amber-800">שים לב, הלקוח כבר קיים במערכת!</h4>
+                                <p className="text-sm text-amber-700">נמצאה התאמה ללקוח: <strong>{duplicateFound.name}</strong></p>
+                            </div>
+                        </div>
+                        
+                        <p className="text-slate-600 text-sm">המערכת מזהה שמדובר באותו לקוח לפי שם, ח.פ, אימייל או טלפון. האם תרצה למזג את המידע החדש לתוך הלקוח הקיים?</p>
+                        
+                        <div className="bg-slate-50 p-3 rounded text-xs text-slate-500 border border-slate-200">
+                            <strong>המיזוג יבצע:</strong>
+                            <ul className="list-disc list-inside mt-1 space-y-1">
+                                <li>הוספת איש הקשר החדש לרשימת אנשי הקשר הקיימת.</li>
+                                <li>שמירה על כל ההיסטוריה וההזמנות של הלקוח המקורי.</li>
+                                <li>עדכון הערות הלקוח.</li>
+                            </ul>
+                        </div>
+
+                        <div className="flex justify-end gap-3 pt-4">
+                            <button 
+                                onClick={() => performCreateCustomer(pendingNewCustomer!.customer, pendingNewCustomer!.contact)} 
+                                className="px-4 py-2 bg-white border border-slate-300 text-slate-600 rounded-md text-sm hover:bg-slate-50"
+                            >
+                                צור לקוח חדש בכל זאת
+                            </button>
+                            <button 
+                                onClick={handleMergeWithExisting} 
+                                className="px-6 py-2 bg-primary text-white rounded-md text-sm font-bold shadow-md hover:bg-indigo-700"
+                            >
+                                בצע מיזוג (מומלץ)
+                            </button>
+                        </div>
+                    </div>
+                </Modal>
+            )}
+
              {isDetailModalOpen && viewingCustomer && (
                 <Modal title={`כרטיס לקוח: ${viewingCustomer.name}`} onClose={() => setIsDetailModalOpen(false)} size="5xl">
                     <CustomerDetailView 
@@ -693,9 +1374,34 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
                         onSave={handleSaveCustomerUpdate}
                         onCancel={() => setIsDetailModalOpen(false)}
                         onNavigateToOrder={onNavigateToOrder}
+                        onMergeClick={() => setIsMergeModalOpen(true)}
+                        statusConfigs={statusConfigs}
+                        vatRate={vatRate}
                     />
                 </Modal>
             )}
+
+            {isCollectionCenterOpen && viewingCustomer && (
+                <CollectionCenterModal 
+                    customer={viewingCustomer}
+                    orders={orders}
+                    setOrders={setOrders}
+                    onClose={() => setIsCollectionCenterOpen(false)}
+                    addActivity={addActivity}
+                    statusConfigs={statusConfigs}
+                    vatRate={vatRate}
+                />
+            )}
+
+            {isMergeModalOpen && viewingCustomer && (
+                <ManualMergeModal
+                    targetCustomer={viewingCustomer}
+                    allCustomers={customers}
+                    onClose={() => setIsMergeModalOpen(false)}
+                    onConfirm={handleManualMerge}
+                />
+            )}
+
              {isImportModalOpen && (
                 <Modal title="ייבוא לקוחות" onClose={() => setIsImportModalOpen(false)} size="2xl">
                     <CustomerImportModal onImport={handleImportCustomers} onCancel={() => setIsImportModalOpen(false)} />

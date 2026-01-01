@@ -41,6 +41,7 @@ export interface Contact {
 export interface Customer {
     id: string;
     name: string;
+    businessId?: string; // ח.פ / ת.ז
     website: string;
     address: string;
     category: string;
@@ -91,7 +92,7 @@ export interface CustomerPayment {
     id: string;
     amount: number;
     date: Date; // Receipt date
-    method: PaymentMethod;
+    method: PaymentMethod; // Added for outgoing checks
     reference?: string; // Check number, last 4 digits, etc.
     repaymentDate?: Date; // Critical for Checks (Maturity date)
     notes?: string;
@@ -101,6 +102,7 @@ export interface CustomerPayment {
     statusHistory?: PaymentStatusHistory[]; // Added
     drawerName?: string; // Name on check
     bankDetails?: string; // Bank/Branch/Account
+    batchId?: string; // NEW: Link to batch payment (Single transaction -> multiple orders)
 }
 
 export interface LineItem {

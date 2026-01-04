@@ -2015,7 +2015,7 @@ const OrderForm: React.FC<{
                                             <div className="mt-1 text-xs flex flex-col gap-1">
                                                 <div className="text-slate-500">
                                                     נוצר ע"י {task.user} ב-{task.timestamp.toLocaleString('he-IL')}
-                                                    {assigneeName && <span className="mx-1 text-slate-400">-></span>}
+                                                    {assigneeName && <span className="mx-1 text-slate-400">→</span>}
                                                     {assigneeName && <span>שוייך ל: <strong>{assigneeName}</strong></span>}
                                                 </div>
                                                 {task.dueDate && (

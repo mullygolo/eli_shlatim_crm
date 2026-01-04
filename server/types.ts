@@ -1,0 +1,490 @@
+
+export type Page = 'Dashboard' | 'Orders' | 'Customers' | 'Suppliers' | 'Employees' | 'Deals' | 'Transactions' | 'Timesheets' | 'Quotes' | 'Reports' | 'Settings' | 'Finance' | 'Attendance';
+
+export enum PaymentMethod {
+    BANK_TRANSFER = 'העברה בנקאית',
+    CREDIT_CARD = 'כרטיס אשראי',
+    CHECK = 'צ\'ק',
+    CASH = 'מזומן',
+    STANDING_ORDER = 'הוראת קבע',
+    BIT = 'Bit/PayBox',
+    OTHER = 'אחר'
+}
+
+// NEW: Lifecycle statuses for payments
+export type TransactionStatus = 
+    | 'PENDING'           // Received/Issued but not yet processed (On Hand)
+    | 'IN_BANK_CUSTODY'   // Deposited to bank (Gvia/Mishmeret) but not cleared yet
+    | 'CLEARED'           // Money actually moved
+    | 'BOUNCED'           // Returned (A.K.M / Insufficient Funds) - Reopens debt
+    | 'CANCELED'          // Voided manually - Reopens debt
+    | 'RETURNED'          // Physically returned to drawer - Reopens debt
+    | 'ENDORSED';         // Passed to third party (Supplier)
+
+export interface PaymentStatusHistory {
+    date: Date;
+    status: TransactionStatus;
+    changedBy: string;
+    reason?: string;
+}
+
+export interface Contact {
+    id: string;
+    name: string;
+    email: string;
+    phone: string;
+    role: string;
+    isBillingContact: boolean;
+    isDefault?: boolean;
+}
+
+export interface Customer {
+    id: string;
+    name: string;
+    businessId?: string; // ח.פ / ת.ז
+    website: string;
+    address: string;
+    category: string;
+    notes: string;
+    isSpecial: boolean;
+    contacts: Contact[];
+    createdAt: Date;
+    paymentMethod: PaymentMethod;
+    paymentTerms?: string;
+}
+
+/* Fix: Added missing Supplier interface export to resolve module errors */
+export interface Supplier {
+    id: string;
+    name: string;
+    paymentTerms: string;
+    contacts: Contact[];
+}
+
+export enum PaymentStatus {
+    PAID = 'שולם',
+    UNPAID = 'לא שולם',
+    PARTIALLY_PAID = 'שולם חלקית', // Optional for future
+}
+
+export enum LineItemUnit {
+    UNIT = 'יח\'',
+    M2 = 'מ"ר',
+    LM = 'מ"א', // linear meter
+    HOUR = 'שעות',
+}
+
+export interface SupplierPayment {
+    id: string;
+    amount: number;
+    date: Date;
+    method: PaymentMethod;
+    reference?: string;
+    notes?: string;
+    attachment?: Attachment;
+    status?: TransactionStatus; // Added
+    statusHistory?: PaymentStatusHistory[]; // Added
+    repaymentDate?: Date; // Added for outgoing checks
+}
+
+// New Interface for Customer Payments (Collection)
+export interface CustomerPayment {
+    id: string;
+    amount: number;
+    date: Date; // Receipt date
+    method: PaymentMethod; // Added for outgoing checks
+    reference?: string; // Check number, last 4 digits, etc.
+    repaymentDate?: Date; // Critical for Checks (Maturity date)
+    notes?: string;
+    attachment?: Attachment; // Legacy support
+    attachments?: Attachment[]; // New: Support multiple files
+    status?: TransactionStatus; // Added
+    statusHistory?: PaymentStatusHistory[]; // Added
+    drawerName?: string; // Name on check
+    bankDetails?: string; // Bank/Branch/Account
+    batchId?: string; // NEW: Link to batch payment (Single transaction -> multiple orders)
+}
+
+export interface LineItem {
+    id: string;
+    description: string;
+    quantity: number;
+    unitPrice: number;
+    cost: number;
+    unitType: LineItemUnit;
+    width?: number; // for M2
+    height?: number; // for M2
+    supplierId?: string; // Specific supplier for this item
+    supplierPayments?: SupplierPayment[]; // Payments made to supplier for this item
+    customDueDate?: Date; // Override due date for this item
+}
+
+export interface AdditionalService {
+    id: string;
+    description: string;
+    cost: number;
+    price: number;
+    supplierId?: string; // Service provider (Installer/Courier)
+    supplierPayments?: SupplierPayment[];
+    address?: string; // Shipping/Installation address
+    siteContactName?: string;
+    siteContactDetails?: string;
+    notes?: string;
+    customDueDate?: Date; // Override due date for this service
+    scheduledDate?: Date; // NEW: Date and time for delivery/installation
+}
+
+export interface Attachment {
+    id: string;
+    fileName: string;
+    dataUrl: string; // Base64 or URL
+    type: string; // MIME type
+    uploadedAt?: Date;
+    category?: AttachmentCategory;
+}
+
+export type AttachmentCategory = 'GRAPHICS' | 'SITE_BEFORE' | 'SITE_AFTER' | 'DOCUMENTS' | 'GENERAL';
+
+// Detailed Audit Logic
+export interface FieldChange {
+    field: string;
+    label: string;
+    oldValue?: any;
+    newValue?: any;
+    action: 'ADDED' | 'REMOVED' | 'UPDATED' | 'COMPLETED';
+    subItemLabel?: string; // e.g. "Line Item: Banner"
+}
+
+export interface TimelineEvent {
+    id: string;
+    timestamp: Date;
+    user: string;
+    type: 'STATUS_CHANGE' | 'NOTE' | 'TASK' | 'LOG';
+    content: string;
+    changes?: FieldChange[]; // Detailed breakdown for LOG events
+    isCompleted?: boolean; // For tasks
+    completedAt?: Date;
+    completedBy?: string;
+    assigneeId?: string;
+    dueDate?: string; // YYYY-MM-DD
+}
+
+export interface Activity {
+    id: string;
+    description: string;
+    timestamp: Date;
+}
+
+export interface StatusHistoryEntry {
+    status: string;
+    startDate: Date;
+    endDate?: Date;
+}
+
+export enum OrderType {
+    REGULAR = 'הזמנה רגילה',
+    SERVICE_CALL = 'קריאת שירות',
+}
+
+export interface Order {
+    id: string;
+    orderNumber: string;
+    description: string;
+    date: Date;
+    createdAt?: Date; // Immutable creation date
+    dealStartDate?: Date; // The date when the deal effectively started (e.g. status changed to "In Graphics")
+    customerId: string;
+    contactId?: string;
+    supplierId?: string; // Main supplier if applicable
+    employeeId: string; // Sales rep
+    orderStatus: string; // Now dynamic based on configuration
+    paymentStatus: PaymentStatus;
+    payments: CustomerPayment[]; // New field for collection
+    paymentTerms: string;
+    lineItems: LineItem[];
+    invoiceIssued: boolean;
+    receiptIssued: boolean;
+    additionalServices: AdditionalService[];
+    attachments: Attachment[];
+    timeline: TimelineEvent[];
+    statusHistory?: StatusHistoryEntry[];
+    type?: OrderType;
+    parentOrderId?: string; // For service calls linked to original orders
+    vatRate?: number; // Deal-specific VAT rate snapshot/override
+}
+
+export type EmployeeRole = 'ADMIN' | 'MANAGER' | 'EMPLOYEE';
+export type EmployeeStatus = 'ACTIVE' | 'INACTIVE';
+
+export interface EmploymentPeriod {
+    id: string;
+    startDate: Date;
+    endDate?: Date;
+    exitReason?: string;
+}
+
+export interface SalaryRecord {
+    id: string;
+    amount: number;
+    salaryType: 'HOURLY' | 'GLOBAL';
+    effectiveDate: Date;
+    note?: string;
+}
+
+export interface Employee {
+    id: string;
+    name: string;
+    role: string; // Display role title (e.g. "Sales VP")
+    roleType: EmployeeRole; // Permissions level
+    status: EmployeeStatus; // NEW
+    startDate: Date; // NEW: Original join date
+    email?: string;
+    phone?: string;
+    address?: string;
+    idNumber?: string;
+    
+    // Salary & Employment
+    jobScopePercentage: number; // 100% = 1.0, 50% = 0.5
+    salaryType: 'HOURLY' | 'GLOBAL'; // Current/Default type
+    hourlyWage: number; // Current/Default wage
+    monthlyBaseSalary?: number; // Current/Default monthly
+    employerCostPercentage: number; // e.g., 20% for pension/taxes added to cost
+    hasSalesBonus: boolean;
+    salesBonusPercentage: number; // % of deal value
+    bonusBasisEmployeeIds?: string[]; // IDs of employees whose sales count towards this bonus (Team bonus)
+
+    // Salary History (Versioning)
+    salaryHistory?: SalaryRecord[];
+
+    // History
+    employmentHistory: EmploymentPeriod[]; // NEW
+    timeline: TimelineEvent[]; // NEW
+}
+
+export interface OrderStatusConfiguration {
+    id: string;
+    label: string;
+    isActiveDeal: boolean; // Does this status count as an active deal/WIP?
+    isLead: boolean; // Is this considered a "New Lead" for metrics?
+    isQuote: boolean; // Is this considered a "Quote Sent" for metrics?
+    isCompleted: boolean; // Is this considered a successfully completed deal? (Hidden by default in Orders)
+    isLost: boolean; // Is this considered a LOST deal? (For stats)
+    color: string; // Tailwind classes
+    orderIndex: number; // For sorting
+    isSystem?: boolean; // Historical flag, now name is unlocked
+}
+
+// Finance Types
+export interface FixedExpense {
+    id: string;
+    name: string;
+    monthlyAmount: number;
+    category: string;
+    paymentDay: number;
+    isActive: boolean;
+    description?: string;
+    startDate: Date;
+    endDate?: Date;
+    paymentMethod: PaymentMethod;
+    paymentDetails?: string;
+    includesVat?: boolean;
+    isVatExempt?: boolean;
+    checks?: SupplierPayment[]; // Added to support check series
+}
+
+export interface VariableExpense {
+    id: string;
+    name: string;
+    amount: number;
+    date: Date;
+    category: string;
+    description?: string;
+    includesVat?: boolean;
+    isVatExempt?: boolean;
+    paymentMethod?: PaymentMethod; // Added
+    paymentDetails?: string; // Added
+    checks?: SupplierPayment[]; // Added to support check series
+}
+
+// NEW: Amortization Entry for Loans
+export interface AmortizationEntry {
+    id: string;
+    paymentNumber: number;
+    dueDate: Date;
+    principalAmount: number;
+    interestAmount: number;
+    totalMonthlyPayment: number;
+    remainingPrincipal: number;
+    isPaid: boolean;
+    fees?: number; // Collector fees or other
+}
+
+export interface Loan {
+    id: string;
+    lenderName: string;
+    principalAmount: number;
+    interestRate: number; // Annual %
+    monthlyPayment: number;
+    durationMonths: number;
+    paymentsMade: number;
+    startDate: Date;
+    description?: string;
+    amortizationFile?: Attachment;
+    schedule?: AmortizationEntry[]; // NEW
+}
+
+export interface DebtPayment {
+    id: string;
+    amount: number;
+    date: Date;
+    method: PaymentMethod;
+    reference?: string;
+    repaymentDate?: Date;
+    status?: TransactionStatus;
+    statusHistory?: PaymentStatusHistory[];
+    note?: string;
+}
+
+export interface Debt {
+    id: string;
+    name: string;
+    amount: number; // Entered amount
+    createdAt: Date; // Added
+    dueDate: Date;
+    description?: string;
+    payments?: DebtPayment[];
+    isPaid?: boolean;
+    includesVat?: boolean; // NEW
+    isVatExempt?: boolean; // NEW
+}
+
+export interface ReceivablePayment {
+    id: string;
+    amount: number;
+    date: Date;
+    method: PaymentMethod;
+    reference?: string;
+    repaymentDate?: Date;
+    status?: TransactionStatus;
+    statusHistory?: PaymentStatusHistory[];
+    note?: string;
+}
+
+export interface Receivable {
+    id: string;
+    name: string;
+    amount: number;
+    createdAt: Date;
+    dueDate: Date;
+    description?: string;
+    payments?: ReceivablePayment[];
+    isPaid?: boolean;
+    includesVat?: boolean;
+    isVatExempt?: boolean;
+}
+
+export interface EquityInvestment {
+    id: string;
+    investorName: string;
+    amount: number;
+    date: Date;
+    type: 'הון בעלים' | 'השקעה חיצונית';
+    transactionType: 'DEPOSIT' | 'WITHDRAWAL'; // DEPOSIT = הזרמה, WITHDRAWAL = משיכה/החזר
+    description?: string;
+}
+
+// CRM Extensions
+export enum DealStage {
+    LEAD = 'ליד',
+    PROPOSAL = 'הצעת מחיר',
+    NEGOTIATION = 'מו"מ',
+    WON = 'זכייה',
+    LOST = 'הפסד',
+}
+
+export interface Deal {
+    id: string;
+    name: string;
+    value: number;
+    customerId: string;
+    stage: DealStage;
+    createdAt: Date;
+    expectedCloseDate?: Date;
+}
+
+export enum TransactionType {
+    INCOME = 'הכנסה',
+    EXPENSE = 'הוצאה',
+}
+
+export interface Transaction {
+    id: string;
+    description: string;
+    amount: number;
+    type: TransactionType;
+    date: Date;
+    dealId?: string;
+    customerId?: string;
+    supplierId?: string;
+}
+
+export interface TimeEntry {
+    id: string;
+    employeeId: string;
+    date: Date;
+    hours: number;
+    description: string;
+}
+
+export type AttendanceStatus = 'PRESENT' | 'ABSENT' | 'PENDING_APPROVAL' | 'REJECTED' | 'VACATION' | 'SICK' | 'WFH';
+
+export interface AttendanceRecord {
+    id: string;
+    employeeId: string;
+    date: Date; // The specific day
+    clockIn?: Date;
+    clockOut?: Date;
+    totalHours: number;
+    status: AttendanceStatus;
+    note?: string;
+    certificate?: Attachment; // Added: Optional medical certificate
+    correctionRequest?: {
+        requestedClockIn: Date;
+        requestedClockOut: Date;
+        requestedStatus: AttendanceStatus;
+        reason: string;
+        certificate?: Attachment; // Added: Optional certificate during request
+    }
+}
+
+// NEW: Monthly Payroll Adjustments Override
+export interface PayrollOverride {
+    finalGross?: number;
+    finalEmployerCost?: number;
+}
+
+export type PayrollOverrideMap = Record<string, PayrollOverride>; // Key: empId_year_month
+
+export enum QuoteStatus {
+    DRAFT = 'טיוטה',
+    SENT = 'נשלח',
+    APPROVED = 'אושר',
+    REJECTED = 'נדחה',
+}
+
+export interface Quote {
+    id: string;
+    quoteNumber: string;
+    customerId: string;
+    date: Date;
+    status: QuoteStatus;
+    lineItems: LineItem[];
+}
+
+export interface ManualEvent {
+    id: string;
+    title: string;
+    description?: string;
+    date: Date;
+    time?: string;
+}

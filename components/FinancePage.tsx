@@ -4,6 +4,7 @@ import { FixedExpense, VariableExpense, Loan, EquityInvestment, Debt, Receivable
 import { PlusIcon, EditIcon, DeleteIcon, BankIcon, TrendingUpIcon, LogIcon, CashIcon, ClockIcon, LockIcon, DownloadIcon, ImportIcon } from './icons';
 import Modal from './Modal';
 import PnLReport from './PnLReport';
+import * as mongoService from '../services/mongoService';
 
 // --- Financial Engine Helpers ---
 
@@ -1789,28 +1790,59 @@ const FinancePage: React.FC<FinancePageProps> = ({
         setIsModalOpen(true);
     };
 
-    const handleDelete = (type: 'FIXED' | 'VARIABLE' | 'LOANS' | 'DEBTS' | 'RECEIVABLES' | 'EQUITY', id: string) => {
+    const handleDelete = async (type: 'FIXED' | 'VARIABLE' | 'LOANS' | 'DEBTS' | 'RECEIVABLES' | 'EQUITY', id: string) => {
         if (!window.confirm('האם אתה בטוח שברצונך למחוק פריט זה?')) return;
         
-        switch (type) {
-            case 'FIXED': setFixedExpenses(prev => prev.filter(e => e.id !== id)); break;
-            case 'VARIABLE': setVariableExpenses(prev => prev.filter(e => e.id !== id)); break;
-            case 'LOANS': setLoans(prev => prev.filter(e => e.id !== id)); break;
-            case 'DEBTS': setDebts(prev => prev.filter(e => e.id !== id)); break;
-            case 'RECEIVABLES': setReceivables(prev => prev.filter(r => r.id !== id)); break;
-            case 'EQUITY': setEquity(prev => prev.filter(e => e.id !== id)); break;
+        try {
+            switch (type) {
+                case 'FIXED':
+                    await mongoService.deleteFixedExpense(id);
+                    setFixedExpenses(prev => prev.filter(e => e.id !== id));
+                    break;
+                case 'VARIABLE':
+                    await mongoService.deleteVariableExpense(id);
+                    setVariableExpenses(prev => prev.filter(e => e.id !== id));
+                    break;
+                case 'LOANS':
+                    await mongoService.deleteLoan(id);
+                    setLoans(prev => prev.filter(e => e.id !== id));
+                    break;
+                case 'DEBTS':
+                    await mongoService.deleteDebt(id);
+                    setDebts(prev => prev.filter(e => e.id !== id));
+                    break;
+                case 'RECEIVABLES':
+                    await mongoService.deleteReceivable(id);
+                    setReceivables(prev => prev.filter(r => r.id !== id));
+                    break;
+                case 'EQUITY':
+                    await mongoService.deleteEquity(id);
+                    setEquity(prev => prev.filter(e => e.id !== id));
+                    break;
+            }
+        } catch (error) {
+            console.error('Error deleting from MongoDB:', error);
+            alert('שגיאה במחיקה ממונגו. אנא נסה שוב.');
         }
     };
 
-    const handleUpdateLoanSchedule = (loanId: string, newSchedule: AmortizationEntry[]) => {
-        setLoans(prev => prev.map(l => {
-            if (l.id !== loanId) return l;
-            return {
-                ...l,
+    const handleUpdateLoanSchedule = async (loanId: string, newSchedule: AmortizationEntry[]) => {
+        try {
+            const loan = loans.find(l => l.id === loanId);
+            if (!loan) return;
+            
+            const updatedLoan = {
+                ...loan,
                 schedule: newSchedule,
                 paymentsMade: newSchedule.filter(s => s.isPaid).length
             };
-        }));
+            
+            const saved = await mongoService.updateLoan(updatedLoan);
+            setLoans(prev => prev.map(l => l.id === loanId ? saved : l));
+        } catch (error) {
+            console.error('Error updating loan schedule in MongoDB:', error);
+            alert('שגיאה בעדכון לוח סילוקין במונגו. אנא נסה שוב.');
+        }
     };
 
     const toggleInvestorExpansion = (name: string) => {
@@ -1840,111 +1872,143 @@ const FinancePage: React.FC<FinancePageProps> = ({
         });
     };
 
-    const handleSaveDebtPayment = (debtId: string, payment: DebtPayment) => {
-        setDebts(prev => prev.map(d => {
-            if (d.id === debtId) {
-                const updatedPayments = [...(d.payments || []), payment];
-                const totalPaid = updatedPayments.reduce((sum, p) => {
-                    const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
-                    if (p.status && invalidStatuses.includes(p.status)) return sum;
-                    return sum + p.amount;
-                }, 0);
-                const amount = d.amount || 0;
-                let gross = amount;
-                if (!d.isVatExempt) {
-                    gross = d.includesVat ? amount : amount * (1 + vatRate / 100);
-                }
-                return { 
-                    ...d, 
-                    payments: updatedPayments,
-                    isPaid: totalPaid >= gross - 0.05
-                };
+    const handleSaveDebtPayment = async (debtId: string, payment: DebtPayment) => {
+        try {
+            const debt = debts.find(d => d.id === debtId);
+            if (!debt) return;
+            
+            const updatedPayments = [...(debt.payments || []), payment];
+            const totalPaid = updatedPayments.reduce((sum, p) => {
+                const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
+                if (p.status && invalidStatuses.includes(p.status)) return sum;
+                return sum + p.amount;
+            }, 0);
+            const amount = debt.amount || 0;
+            let gross = amount;
+            if (!debt.isVatExempt) {
+                gross = debt.includesVat ? amount : amount * (1 + vatRate / 100);
             }
-            return d;
-        }));
-        setIsPaymentModalOpen(false);
-        setSelectedDebtForPayment(null);
+            
+            const updatedDebt = {
+                ...debt,
+                payments: updatedPayments,
+                isPaid: totalPaid >= gross - 0.05
+            };
+            
+            const saved = await mongoService.updateDebt(updatedDebt);
+            setDebts(prev => prev.map(d => d.id === debtId ? saved : d));
+            setIsPaymentModalOpen(false);
+            setSelectedDebtForPayment(null);
+        } catch (error) {
+            console.error('Error saving debt payment to MongoDB:', error);
+            alert('שגיאה בשמירת תשלום חוב למונגו. אנא נסה שוב.');
+        }
     };
 
-    const handleSaveReceivableCollection = (receivableId: string, payment: ReceivablePayment) => {
-        setReceivables(prev => prev.map(r => {
-            if (r.id === receivableId) {
-                const updatedPayments = [...(r.payments || []), payment];
-                const totalCollected = updatedPayments.reduce((sum, p) => {
-                    const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
-                    if (p.status && invalidStatuses.includes(p.status)) return sum;
-                    return sum + p.amount;
-                }, 0);
-                const amount = r.amount || 0;
-                let gross = amount;
-                if (!r.isVatExempt) {
-                    gross = r.includesVat ? amount : amount * (1 + vatRate / 100);
-                }
-                return { 
-                    ...r, 
-                    payments: updatedPayments,
-                    isPaid: totalCollected >= gross - 0.05
-                };
+    const handleSaveReceivableCollection = async (receivableId: string, payment: ReceivablePayment) => {
+        try {
+            const receivable = receivables.find(r => r.id === receivableId);
+            if (!receivable) return;
+            
+            const updatedPayments = [...(receivable.payments || []), payment];
+            const totalCollected = updatedPayments.reduce((sum, p) => {
+                const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
+                if (p.status && invalidStatuses.includes(p.status)) return sum;
+                return sum + p.amount;
+            }, 0);
+            const amount = receivable.amount || 0;
+            let gross = amount;
+            if (!receivable.isVatExempt) {
+                gross = receivable.includesVat ? amount : amount * (1 + vatRate / 100);
             }
-            return r;
-        }));
-        setIsPaymentModalOpen(false);
-        setSelectedReceivableForCollection(null);
+            
+            const updatedReceivable = {
+                ...receivable,
+                payments: updatedPayments,
+                isPaid: totalCollected >= gross - 0.05
+            };
+            
+            const saved = await mongoService.updateReceivable(updatedReceivable);
+            setReceivables(prev => prev.map(r => r.id === receivableId ? saved : r));
+            setIsPaymentModalOpen(false);
+            setSelectedReceivableForCollection(null);
+        } catch (error) {
+            console.error('Error saving receivable collection to MongoDB:', error);
+            alert('שגיאה בשמירת גבייה למונגו. אנא נסה שוב.');
+        }
     };
 
-    const handleDeleteDebtPayment = (debtId: string, paymentId: string) => {
+    const handleDeleteDebtPayment = async (debtId: string, paymentId: string) => {
         if (!window.confirm('האם למחוק תשלום זה? היתרה תתעדכן בהתאם.')) return;
-        setDebts(prev => prev.map(d => {
-            if (d.id === debtId) {
-                const updatedPayments = (d.payments || []).filter(p => p.id !== paymentId);
-                const totalPaid = updatedPayments.reduce((sum, p) => {
-                    const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
-                    if (p.status && invalidStatuses.includes(p.status)) return sum;
-                    return sum + p.amount;
-                }, 0);
-                const amount = d.amount || 0;
-                let gross = amount;
-                if (!d.isVatExempt) {
-                    gross = d.includesVat ? amount : amount * (1 + vatRate / 100);
-                }
-                return { 
-                    ...d, 
-                    payments: updatedPayments,
-                    isPaid: totalPaid >= gross - 0.05 
-                };
+        
+        try {
+            const debt = debts.find(d => d.id === debtId);
+            if (!debt) return;
+            
+            const updatedPayments = (debt.payments || []).filter(p => p.id !== paymentId);
+            const totalPaid = updatedPayments.reduce((sum, p) => {
+                const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
+                if (p.status && invalidStatuses.includes(p.status)) return sum;
+                return sum + p.amount;
+            }, 0);
+            const amount = debt.amount || 0;
+            let gross = amount;
+            if (!debt.isVatExempt) {
+                gross = debt.includesVat ? amount : amount * (1 + vatRate / 100);
             }
-            return d;
-        }));
+            
+            const updatedDebt = {
+                ...debt,
+                payments: updatedPayments,
+                isPaid: totalPaid >= gross - 0.05
+            };
+            
+            const saved = await mongoService.updateDebt(updatedDebt);
+            setDebts(prev => prev.map(d => d.id === debtId ? saved : d));
+        } catch (error) {
+            console.error('Error deleting debt payment from MongoDB:', error);
+            alert('שגיאה במחיקת תשלום חוב ממונגו. אנא נסה שוב.');
+        }
     };
 
-    const handleDeleteReceivablePayment = (receivableId: string, paymentId: string) => {
+    const handleDeleteReceivablePayment = async (receivableId: string, paymentId: string) => {
         if (!window.confirm('האם למחוק גבייה זו? היתרה תתעדכן בהתאם.')) return;
-        setReceivables(prev => prev.map(r => {
-            if (r.id === receivableId) {
-                const updatedPayments = (r.payments || []).filter(p => p.id !== paymentId);
-                const totalCollected = updatedPayments.reduce((sum, p) => {
-                    const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
-                    if (p.status && invalidStatuses.includes(p.status)) return sum;
-                    return sum + p.amount;
-                }, 0);
-                const amount = r.amount || 0;
-                let gross = amount;
-                if (!r.isVatExempt) {
-                    gross = r.includesVat ? amount : amount * (1 + vatRate / 100);
-                }
-                return { 
-                    ...r, 
-                    payments: updatedPayments,
-                    isPaid: totalCollected >= gross - 0.05 
-                };
+        
+        try {
+            const receivable = receivables.find(r => r.id === receivableId);
+            if (!receivable) return;
+            
+            const updatedPayments = (receivable.payments || []).filter(p => p.id !== paymentId);
+            const totalCollected = updatedPayments.reduce((sum, p) => {
+                const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
+                if (p.status && invalidStatuses.includes(p.status)) return sum;
+                return sum + p.amount;
+            }, 0);
+            const amount = receivable.amount || 0;
+            let gross = amount;
+            if (!receivable.isVatExempt) {
+                gross = receivable.includesVat ? amount : amount * (1 + vatRate / 100);
             }
-            return r;
-        }));
+            
+            const updatedReceivable = {
+                ...receivable,
+                payments: updatedPayments,
+                isPaid: totalCollected >= gross - 0.05
+            };
+            
+            const saved = await mongoService.updateReceivable(updatedReceivable);
+            setReceivables(prev => prev.map(r => r.id === receivableId ? saved : r));
+        } catch (error) {
+            console.error('Error deleting receivable payment from MongoDB:', error);
+            alert('שגיאה במחיקת גבייה ממונגו. אנא נסה שוב.');
+        }
     };
 
-    const handleUpdateDebtPaymentStatus = (debtId: string, paymentId: string, newStatus: TransactionStatus, note?: string) => {
-        setDebts(prev => prev.map(debt => {
-            if (debt.id !== debtId) return debt;
+    const handleUpdateDebtPaymentStatus = async (debtId: string, paymentId: string, newStatus: TransactionStatus, note?: string) => {
+        try {
+            const debt = debts.find(d => d.id === debtId);
+            if (!debt) return;
+            
             const updatedPayments = (debt.payments || []).map(p => {
                 if (p.id !== paymentId) return p;
                 return { 
@@ -1962,15 +2026,22 @@ const FinancePage: React.FC<FinancePageProps> = ({
             let gross = amount;
             if (!debt.isVatExempt) gross = debt.includesVat ? amount : amount * (1 + vatRate / 100);
 
-            return { ...debt, payments: updatedPayments, isPaid: totalPaid >= gross - 0.05 };
-        }));
-        addActivity(`סטטוס תשלום חוב עודכן ל-${newStatus}`);
+            const updatedDebt = { ...debt, payments: updatedPayments, isPaid: totalPaid >= gross - 0.05 };
+            const saved = await mongoService.updateDebt(updatedDebt);
+            setDebts(prev => prev.map(d => d.id === debtId ? saved : d));
+            addActivity(`סטטוס תשלום חוב עודכן ל-${newStatus}`);
+        } catch (error) {
+            console.error('Error updating debt payment status in MongoDB:', error);
+            alert('שגיאה בעדכון סטטוס תשלום חוב במונגו. אנא נסה שוב.');
+        }
     };
 
-    const handleUpdateReceivablePaymentStatus = (receivableId: string, paymentId: string, newStatus: TransactionStatus, note?: string) => {
-        setReceivables(prev => prev.map(rec => {
-            if (rec.id !== receivableId) return rec;
-            const updatedPayments = (rec.payments || []).map(p => {
+    const handleUpdateReceivablePaymentStatus = async (receivableId: string, paymentId: string, newStatus: TransactionStatus, note?: string) => {
+        try {
+            const receivable = receivables.find(r => r.id === receivableId);
+            if (!receivable) return;
+            
+            const updatedPayments = (receivable.payments || []).map(p => {
                 if (p.id !== paymentId) return p;
                 return { 
                     ...p, 
@@ -1983,13 +2054,18 @@ const FinancePage: React.FC<FinancePageProps> = ({
                 if (p.status && invalidStatuses.includes(p.status)) return sum;
                 return sum + p.amount;
             }, 0);
-            const amount = rec.amount || 0;
+            const amount = receivable.amount || 0;
             let gross = amount;
-            if (!rec.isVatExempt) gross = rec.includesVat ? amount : amount * (1 + vatRate / 100);
+            if (!receivable.isVatExempt) gross = receivable.includesVat ? amount : amount * (1 + vatRate / 100);
 
-            return { ...rec, payments: updatedPayments, isPaid: totalCollected >= gross - 0.05 };
-        }));
-        addActivity(`סטטוס גבייה עודכן ל-${newStatus}`);
+            const updatedReceivable = { ...receivable, payments: updatedPayments, isPaid: totalCollected >= gross - 0.05 };
+            const saved = await mongoService.updateReceivable(updatedReceivable);
+            setReceivables(prev => prev.map(r => r.id === receivableId ? saved : r));
+            addActivity(`סטטוס גבייה עודכן ל-${newStatus}`);
+        } catch (error) {
+            console.error('Error updating receivable payment status in MongoDB:', error);
+            alert('שגיאה בעדכון סטטוס גבייה במונגו. אנא נסה שוב.');
+        }
     };
 
     const handleLoanFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -2041,72 +2117,112 @@ const FinancePage: React.FC<FinancePageProps> = ({
         setVariableForm(prev => ({ ...prev, checks: updatedChecks }));
     };
 
-    const handleSave = () => {
-        if (activeTab === 'FIXED') {
-            const newItem = { ...fixedForm, id: editingId || `fe_${Date.now()}` } as FixedExpense;
-            setFixedExpenses(prev => editingId ? prev.map(item => item.id === editingId ? newItem : item) : [...prev, newItem]);
-        } else if (activeTab === 'VARIABLE') {
-            const newItem = { 
-                ...variableForm, 
-                id: editingId || `ve_${Date.now()}`, 
-                date: new Date(variableForm.date || new Date()),
-                paymentMethod: variableForm.paymentMethod || PaymentMethod.BANK_TRANSFER,
-                paymentDetails: variableForm.paymentDetails || '',
-                checks: variableForm.checks || []
-            } as VariableExpense;
-            setVariableExpenses(prev => editingId ? prev.map(item => item.id === editingId ? newItem : item) : [...prev, newItem]);
-        } else if (activeTab === 'LOANS') {
-            const principal = loanForm.principalAmount || 0;
-            const rate = loanForm.interestRate || 0;
-            const duration = loanForm.durationMonths || 12;
-            const startDate = loanForm.startDate || new Date();
-            const paymentsMadeCount = loanForm.paymentsMade || 0;
-            
-            let schedule = loanForm.schedule || [];
-            const scheduleTotalPrincipal = schedule.reduce((sum, s) => sum + s.principalAmount, 0);
-            const needsSync = schedule.length === 0 || schedule.length !== duration || Math.abs(scheduleTotalPrincipal - principal) > 1.0;
+    const handleSave = async () => {
+        try {
+            if (activeTab === 'FIXED') {
+                const newItem = { ...fixedForm, id: editingId || `fe_${Date.now()}` } as FixedExpense;
+                if (editingId) {
+                    const saved = await mongoService.updateFixedExpense(newItem);
+                    setFixedExpenses(prev => prev.map(item => item.id === editingId ? saved : item));
+                } else {
+                    const saved = await mongoService.createFixedExpense(newItem);
+                    setFixedExpenses(prev => [...prev, saved]);
+                }
+            } else if (activeTab === 'VARIABLE') {
+                const newItem = { 
+                    ...variableForm, 
+                    id: editingId || `ve_${Date.now()}`, 
+                    date: new Date(variableForm.date || new Date()),
+                    paymentMethod: variableForm.paymentMethod || PaymentMethod.BANK_TRANSFER,
+                    paymentDetails: variableForm.paymentDetails || '',
+                    checks: variableForm.checks || []
+                } as VariableExpense;
+                if (editingId) {
+                    const saved = await mongoService.updateVariableExpense(newItem);
+                    setVariableExpenses(prev => prev.map(item => item.id === editingId ? saved : item));
+                } else {
+                    const saved = await mongoService.createVariableExpense(newItem);
+                    setVariableExpenses(prev => [...prev, saved]);
+                }
+            } else if (activeTab === 'LOANS') {
+                const principal = loanForm.principalAmount || 0;
+                const rate = loanForm.interestRate || 0;
+                const duration = loanForm.durationMonths || 12;
+                const startDate = loanForm.startDate || new Date();
+                const paymentsMadeCount = loanForm.paymentsMade || 0;
+                
+                let schedule = loanForm.schedule || [];
+                const scheduleTotalPrincipal = schedule.reduce((sum, s) => sum + s.principalAmount, 0);
+                const needsSync = schedule.length === 0 || schedule.length !== duration || Math.abs(scheduleTotalPrincipal - principal) > 1.0;
 
-            if (needsSync && principal > 0 && duration > 0) {
-                schedule = generateSpitzerSchedule(principal, rate, duration, startDate, paymentsMadeCount);
+                if (needsSync && principal > 0 && duration > 0) {
+                    schedule = generateSpitzerSchedule(principal, rate, duration, startDate, paymentsMadeCount);
+                }
+
+                const newItem = { 
+                    ...loanForm, 
+                    id: editingId || `ln_${Date.now()}`, 
+                    startDate: new Date(loanForm.startDate || new Date()),
+                    schedule: schedule,
+                    paymentsMade: schedule.filter(s => s.isPaid).length 
+                } as Loan;
+                if (editingId) {
+                    const saved = await mongoService.updateLoan(newItem);
+                    setLoans(prev => prev.map(l => l.id === editingId ? saved : l));
+                } else {
+                    const saved = await mongoService.createLoan(newItem);
+                    setLoans(prev => [...prev, saved]);
+                }
+            } else if (activeTab === 'DEBTS') {
+                const newItem = { 
+                    ...debtForm, 
+                    id: editingId || `db_${Date.now()}`, 
+                    createdAt: new Date(debtForm.createdAt || new Date()), 
+                    dueDate: new Date(debtForm.dueDate || new Date()), 
+                    payments: debtForm.payments || [], 
+                    includesVat: debtForm.includesVat ?? true, 
+                    isVatExempt: debtForm.isVatExempt ?? false 
+                } as Debt;
+                if (editingId) {
+                    const saved = await mongoService.updateDebt(newItem);
+                    setDebts(prev => prev.map(d => d.id === editingId ? saved : d));
+                } else {
+                    const saved = await mongoService.createDebt(newItem);
+                    setDebts(prev => [...prev, saved]);
+                }
+            } else if (activeTab === 'RECEIVABLES') {
+                const newItem = { 
+                    ...receivableForm, 
+                    id: editingId || `rec_${Date.now()}`, 
+                    createdAt: new Date(receivableForm.createdAt || new Date()), 
+                    dueDate: new Date(receivableForm.dueDate || new Date()), 
+                    payments: receivableForm.payments || [], 
+                    includesVat: receivableForm.includesVat ?? true, 
+                    isVatExempt: receivableForm.isVatExempt ?? false 
+                } as Receivable;
+                if (editingId) {
+                    const saved = await mongoService.updateReceivable(newItem);
+                    setReceivables(prev => prev.map(r => r.id === editingId ? saved : r));
+                } else {
+                    const saved = await mongoService.createReceivable(newItem);
+                    setReceivables(prev => [...prev, saved]);
+                }
+            } else if (activeTab === 'EQUITY') {
+                if (!equityForm.investorName || !equityForm.amount) { alert('חסרים שדות חובה'); return; }
+                const newItem = { ...equityForm, id: editingId || `eq_${Date.now()}`, date: new Date(equityForm.date || new Date()) } as EquityInvestment;
+                if (editingId) {
+                    const saved = await mongoService.updateEquity(newItem);
+                    setEquity(prev => prev.map(item => item.id === editingId ? saved : item));
+                } else {
+                    const saved = await mongoService.createEquity(newItem);
+                    setEquity(prev => [...prev, saved]);
+                }
             }
-
-            const newItem = { 
-                ...loanForm, 
-                id: editingId || `ln_${Date.now()}`, 
-                startDate: new Date(loanForm.startDate || new Date()),
-                schedule: schedule,
-                paymentsMade: schedule.filter(s => s.isPaid).length 
-            } as Loan;
-            setLoans(prev => editingId ? prev.map(l => l.id === editingId ? newItem : l) : [...prev, newItem]);
-        } else if (activeTab === 'DEBTS') {
-            const newItem = { 
-                ...debtForm, 
-                id: editingId || `db_${Date.now()}`, 
-                createdAt: new Date(debtForm.createdAt || new Date()), 
-                dueDate: new Date(debtForm.dueDate || new Date()), 
-                payments: debtForm.payments || [], 
-                includesVat: debtForm.includesVat ?? true, 
-                isVatExempt: debtForm.isVatExempt ?? false 
-            } as Debt;
-            setDebts(prev => editingId ? prev.map(d => d.id === editingId ? newItem : d) : [...prev, newItem]);
-        } else if (activeTab === 'RECEIVABLES') {
-            const newItem = { 
-                ...receivableForm, 
-                id: editingId || `rec_${Date.now()}`, 
-                createdAt: new Date(receivableForm.createdAt || new Date()), 
-                dueDate: new Date(receivableForm.dueDate || new Date()), 
-                payments: receivableForm.payments || [], 
-                includesVat: receivableForm.includesVat ?? true, 
-                isVatExempt: receivableForm.isVatExempt ?? false 
-            } as Receivable;
-            setReceivables(prev => editingId ? prev.map(r => r.id === editingId ? newItem : r) : [...prev, newItem]);
-        } else if (activeTab === 'EQUITY') {
-            if (!equityForm.investorName || !equityForm.amount) { alert('חסרים שדות חובה'); return; }
-            const newItem = { ...equityForm, id: editingId || `eq_${Date.now()}`, date: new Date(equityForm.date || new Date()) } as EquityInvestment;
-            if(editingId) setEquity(prev => prev.map(item => item.id === editingId ? newItem : item));
-            else setEquity(prev => [...prev, newItem]);
+            setIsModalOpen(false);
+        } catch (error) {
+            console.error('Error saving to MongoDB:', error);
+            alert('שגיאה בשמירה למונגו. אנא נסה שוב.');
         }
-        setIsModalOpen(false);
     };
 
     const FixedExpensesTable = ({ items, title, isHistorical = false }: { items: FixedExpense[], title: string, isHistorical?: boolean }) => (

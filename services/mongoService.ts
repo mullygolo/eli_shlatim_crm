@@ -9,11 +9,19 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || '/api';
 
 // Helper function to make API requests
 async function apiRequest<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
+    const token = localStorage.getItem('authToken');
+    
+    const headers: HeadersInit = {
+        'Content-Type': 'application/json',
+        ...options.headers,
+    };
+    
+    if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+    }
+
     const response = await fetch(`${API_BASE_URL}${endpoint}`, {
-        headers: {
-            'Content-Type': 'application/json',
-            ...options.headers,
-        },
+        headers,
         ...options,
     });
 
@@ -319,6 +327,34 @@ export async function updateAttendanceRecord(record: AttendanceRecord): Promise<
         method: 'PUT',
         body: JSON.stringify(record),
     });
+}
+
+export async function clockIn(employeeId: string, isWFH: boolean = false): Promise<AttendanceRecord> {
+    return apiRequest<AttendanceRecord>('/attendance/clock-in', {
+        method: 'POST',
+        body: JSON.stringify({ employeeId, isWFH }),
+    });
+}
+
+export async function clockOut(recordId: string): Promise<AttendanceRecord> {
+    // #region agent log
+    fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'services/mongoService.ts:clockOut',message:'Frontend clockOut called',data:{recordId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+    // #endregion
+    try {
+        const result = await apiRequest<AttendanceRecord>('/attendance/clock-out', {
+            method: 'POST',
+            body: JSON.stringify({ recordId }),
+        });
+        // #region agent log
+        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'services/mongoService.ts:clockOut',message:'Frontend clockOut success',data:{recordId,resultId:result?.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+        // #endregion
+        return result;
+    } catch (error: any) {
+        // #region agent log
+        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'services/mongoService.ts:clockOut:catch',message:'Frontend clockOut error',data:{recordId,errorMessage:error?.message,errorString:String(error)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+        // #endregion
+        throw error;
+    }
 }
 
 export async function deleteAttendanceRecord(recordId: string): Promise<void> {

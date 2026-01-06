@@ -1,8 +1,9 @@
-
 import React, { useState, useMemo } from 'react';
 import { Employee, AttendanceRecord, EmployeeRole, EmployeeStatus, EmploymentPeriod, TimelineEvent, FieldChange, AttendanceStatus, Attachment, SalaryRecord } from '../types';
 import { PlusIcon, EditIcon, DeleteIcon, IdIcon, ClockIcon, LogIcon, NoteIcon, LockIcon, DownloadIcon, CashIcon } from './icons';
 import Modal from './Modal';
+import ResetPasswordModal from './ResetPasswordModal';
+import { useAuth } from '../contexts/AuthContext';
 
 interface EmployeesPageProps {
     employees: Employee[];
@@ -18,7 +19,10 @@ const EmployeeForm: React.FC<{
     onSave: (employee: Employee) => void; 
     onCancel: () => void; 
 }> = ({ employee, allEmployees, onSave, onCancel }) => {
+    const { user } = useAuth();
+    const isAdminOrManager = user?.roleType === 'ADMIN' || user?.roleType === 'MANAGER';
     const [activeTab, setActiveTab] = useState<'PERSONAL' | 'JOB' | 'HISTORY'>('PERSONAL');
+    const [showResetPassword, setShowResetPassword] = useState(false);
     const [formData, setFormData] = useState<Partial<Employee>>({
         name: employee?.name || '',
         status: employee?.status || 'ACTIVE',
@@ -29,6 +33,8 @@ const EmployeeForm: React.FC<{
         phone: employee?.phone || '',
         address: employee?.address || '',
         idNumber: employee?.idNumber || '',
+        username: employee?.username || '',
+        passwordHash: undefined, // Will be set when password field changes
         jobScopePercentage: employee?.jobScopePercentage || 100,
         salaryType: employee?.salaryType || 'HOURLY',
         hourlyWage: employee?.hourlyWage || 35,
@@ -240,12 +246,33 @@ const EmployeeForm: React.FC<{
             }
         }
         
+        // Remove passwordHash if empty (don't update password)
+        if (!finalData.passwordHash || finalData.passwordHash === '') {
+            delete finalData.passwordHash;
+        }
+        
         onSave(finalData);
     };
 
     return (
-        <div className="flex flex-col h-full">
-            <div className="flex space-x-1 space-x-reverse border-b border-slate-200 mb-4 overflow-x-auto">
+        <>
+            {showResetPassword && employee && (
+                <ResetPasswordModal
+                    onClose={() => setShowResetPassword(false)}
+                    onSuccess={() => {
+                        setShowResetPassword(false);
+                        // Refresh employee data
+                        if (employee) {
+                            const updatedEmployee = { ...employee };
+                            onSave(updatedEmployee);
+                        }
+                    }}
+                    employeeId={employee.id}
+                    employeeName={employee.name}
+                />
+            )}
+            <div className="flex flex-col h-full">
+                <div className="flex space-x-1 space-x-reverse border-b border-slate-200 mb-4 overflow-x-auto">
                 <button type="button" onClick={() => setActiveTab('PERSONAL')} className={`px-4 py-2 text-sm font-medium border-b-2 whitespace-nowrap transition-colors ${activeTab === 'PERSONAL' ? 'border-primary text-primary' : 'border-transparent text-slate-500 hover:text-slate-700'}`}>פרטים אישיים</button>
                 <button type="button" onClick={() => setActiveTab('JOB')} className={`px-4 py-2 text-sm font-medium border-b-2 whitespace-nowrap transition-colors ${activeTab === 'JOB' ? 'border-primary text-primary' : 'border-transparent text-slate-500 hover:text-slate-700'}`}>העסקה ותנאים</button>
                 <button type="button" onClick={() => setActiveTab('HISTORY')} className={`px-4 py-2 text-sm font-medium border-b-2 whitespace-nowrap transition-colors ${activeTab === 'HISTORY' ? 'border-primary text-primary' : 'border-transparent text-slate-500 hover:text-slate-700'}`}>היסטוריה ותיעוד</button>
@@ -293,6 +320,61 @@ const EmployeeForm: React.FC<{
                         <div className="md:col-span-2">
                             <label className="block text-sm font-medium text-slate-700">כתובת</label>
                             <input type="text" name="address" value={formData.address} onChange={handleChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+                        </div>
+                        
+                        {/* Authentication Fields */}
+                        <div className="md:col-span-2 border-t border-slate-200 pt-4 mt-4">
+                            <h3 className="text-sm font-bold text-slate-700 mb-4">פרטי התחברות</h3>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-sm font-medium text-slate-700">
+                                        שם משתמש
+                                        {!formData.username && (
+                                            <span className="text-red-500 mr-1">*</span>
+                                        )}
+                                    </label>
+                                    <input 
+                                        type="text" 
+                                        name="username" 
+                                        value={formData.username} 
+                                        onChange={handleChange} 
+                                        className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" 
+                                        placeholder="הזן שם משתמש ייחודי"
+                                    />
+                                    {!formData.username && (
+                                        <p className="text-xs text-amber-600 mt-1 font-bold">⚠️ שם משתמש נדרש להתחברות למערכת</p>
+                                    )}
+                                </div>
+                                <div>
+                                    <div className="flex items-center justify-between mb-2">
+                                        <label className="block text-sm font-medium text-slate-700">
+                                            סיסמה {employee ? '(השאר ריק כדי לא לשנות)' : ''}
+                                        </label>
+                                        {employee && isAdminOrManager && (
+                                            <button
+                                                type="button"
+                                                onClick={() => setShowResetPassword(true)}
+                                                className="text-xs text-indigo-600 hover:text-indigo-800 font-bold flex items-center gap-1"
+                                            >
+                                                <LockIcon className="w-3 h-3" />
+                                                אפס סיסמה
+                                            </button>
+                                        )}
+                                    </div>
+                                    <input 
+                                        type="password" 
+                                        name="password" 
+                                        onChange={(e) => {
+                                            // Store password temporarily for hashing on backend
+                                            setFormData(prev => ({ ...prev, passwordHash: e.target.value }));
+                                        }}
+                                        className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" 
+                                        placeholder={employee ? "הזן סיסמה חדשה (אופציונלי)" : "הזן סיסמה"}
+                                        autoComplete="new-password"
+                                    />
+                                    <p className="text-xs text-slate-500 mt-1">מינימום 6 תווים</p>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 )}
@@ -505,6 +587,7 @@ const EmployeeForm: React.FC<{
                 </div>
             </form>
         </div>
+        </>
     );
 };
 

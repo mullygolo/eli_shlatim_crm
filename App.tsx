@@ -1,6 +1,8 @@
 
 import React, { useState, useCallback, useEffect } from 'react';
 import { Customer, Order, Activity, Supplier, Employee, Page, OrderStatusConfiguration, FixedExpense, VariableExpense, Loan, EquityInvestment, Debt, AttendanceRecord, ManualEvent, PayrollOverrideMap, Receivable } from './types';
+import { useAuth } from './contexts/AuthContext';
+import ProtectedRoute from './components/ProtectedRoute';
 import {
     getCustomers, createCustomer, updateCustomer, deleteCustomer,
     getOrders, createOrder, updateOrder, deleteOrder,
@@ -52,6 +54,7 @@ export const PAGE_TITLES: Record<Page, string> = {
 };
 
 const App: React.FC = () => {
+    const { user } = useAuth();
     const [currentPage, setCurrentPage] = useState<Page>('Dashboard');
     const [customers, setCustomers] = useState<Customer[]>([]);
     const [orders, setOrders] = useState<Order[]>([]);
@@ -81,6 +84,49 @@ const App: React.FC = () => {
     // Loading and Error States
     const [isLoading, setIsLoading] = useState<boolean>(true);
     const [error, setError] = useState<string | null>(null);
+    
+    // Auth context
+    const { logout, isAuthenticated } = useAuth();
+    
+    // Redirect EMPLOYEE away from restricted pages
+    useEffect(() => {
+        if (user?.roleType === 'EMPLOYEE') {
+            if (currentPage === 'Finance' || currentPage === 'Settings') {
+                setCurrentPage('Dashboard');
+            }
+        }
+    }, [currentPage, user]);
+    
+    // Auto-logout after inactivity (30 minutes)
+    useEffect(() => {
+        if (!isAuthenticated) return;
+        
+        const INACTIVITY_TIMEOUT = 30 * 60 * 1000; // 30 minutes
+        let inactivityTimer: NodeJS.Timeout;
+        
+        const resetTimer = () => {
+            clearTimeout(inactivityTimer);
+            inactivityTimer = setTimeout(() => {
+                alert('התנתקת אוטומטית עקב חוסר פעילות');
+                logout();
+            }, INACTIVITY_TIMEOUT);
+        };
+        
+        // Reset timer on user activity
+        const events = ['mousedown', 'mousemove', 'keypress', 'scroll', 'touchstart'];
+        events.forEach(event => {
+            document.addEventListener(event, resetTimer, true);
+        });
+        
+        resetTimer();
+        
+        return () => {
+            clearTimeout(inactivityTimer);
+            events.forEach(event => {
+                document.removeEventListener(event, resetTimer, true);
+            });
+        };
+    }, [isAuthenticated, logout]);
 
     // Load all data from MongoDB on mount
     useEffect(() => {
@@ -153,6 +199,20 @@ const App: React.FC = () => {
         };
 
         loadAllData();
+        
+        // Set up automatic refresh for attendance records every 30 seconds
+        const attendanceRefreshInterval = setInterval(async () => {
+            try {
+                const updatedRecords = await getAttendanceRecords();
+                setAttendanceRecords(updatedRecords);
+            } catch (err) {
+                console.error('Error refreshing attendance records:', err);
+            }
+        }, 30000); // Refresh every 30 seconds
+        
+        return () => {
+            clearInterval(attendanceRefreshInterval);
+        };
     }, []);
 
     const [openOrderId, setOpenOrderId] = useState<string | null>(null);
@@ -669,15 +729,17 @@ const App: React.FC = () => {
     }
 
     return (
-        <div className="flex h-screen bg-light-bg" dir="rtl">
-            <Sidebar currentPage={currentPage} setCurrentPage={setCurrentPage} />
-            <div className="flex-1 flex flex-col min-w-0">
-                <Header title={PAGE_TITLES[currentPage]} employees={employees} attendanceRecords={attendanceRecords} />
-                <main className="flex-1 overflow-x-auto overflow-y-auto bg-light-bg p-4 sm:p-6 lg:p-8">
-                    {renderPage()}
-                </main>
+        <ProtectedRoute>
+            <div className="flex h-screen bg-light-bg" dir="rtl">
+                <Sidebar currentPage={currentPage} setCurrentPage={setCurrentPage} />
+                <div className="flex-1 flex flex-col min-w-0">
+                    <Header title={PAGE_TITLES[currentPage]} employees={employees} attendanceRecords={attendanceRecords} />
+                    <main className="flex-1 overflow-x-auto overflow-y-auto bg-light-bg p-4 sm:p-6 lg:p-8">
+                        {renderPage()}
+                    </main>
+                </div>
             </div>
-        </div>
+        </ProtectedRoute>
     );
 };
 

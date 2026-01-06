@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { getEmployees, createEmployee, updateEmployee, deleteEmployee } from '../services/mongoService.js';
+import { verifyToken, requireRole } from '../middleware/auth.js';
 
 const router = Router();
 
@@ -12,7 +13,8 @@ router.get('/', async (req, res) => {
     }
 });
 
-router.post('/', async (req, res) => {
+// Protected routes - require authentication
+router.post('/', verifyToken, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
     try {
         const employee = await createEmployee(req.body);
         res.status(201).json(employee);
@@ -21,7 +23,7 @@ router.post('/', async (req, res) => {
     }
 });
 
-router.put('/:id', async (req, res) => {
+router.put('/:id', verifyToken, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
     try {
         const employee = await updateEmployee(req.body);
         res.json(employee);
@@ -30,7 +32,7 @@ router.put('/:id', async (req, res) => {
     }
 });
 
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', verifyToken, requireRole('ADMIN'), async (req, res) => {
     try {
         await deleteEmployee(req.params.id);
         res.status(204).send();

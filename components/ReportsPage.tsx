@@ -3,6 +3,7 @@ import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { Order, Supplier, SupplierPayment, PaymentMethod, Attachment, LineItem, AdditionalService, OrderStatusConfiguration, TransactionStatus, TimelineEvent } from '../types';
 import { PlusIcon, EditIcon, DeleteIcon, DownloadIcon } from './icons';
 import Modal from './Modal';
+import { useAuth } from '../contexts/AuthContext';
 
 // --- Helpers & Logic ---
 
@@ -589,6 +590,9 @@ interface ReportsPageProps {
 }
 
 const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigateToOrder, setOrders, statusConfigs, vatRate }) => {
+    const { user } = useAuth();
+    const isEmployee = user?.roleType === 'EMPLOYEE';
+    
     // --- State ---
     const [viewMode, setViewMode] = useState<'forecast' | 'purchase_history' | 'payment_log'>('forecast');
     
@@ -1038,49 +1042,58 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
             return;
         }
 
-        const newOrders = [...orders];
-        let ordersEffected = new Set<string>();
+        // Use functional update to ensure we're working with latest state
+        setOrders(prevOrders => {
+            const newOrders = [...prevOrders];
+            let ordersEffected = new Set<string>();
 
-        group.sourceLinks.forEach(link => {
-            const orderIndex = newOrders.findIndex(o => o.id === link.orderId);
-            if (orderIndex === -1) return;
+            group.sourceLinks.forEach(link => {
+                const orderIndex = newOrders.findIndex(o => o.id === link.orderId);
+                if (orderIndex === -1) return;
 
-            const order = { ...newOrders[orderIndex] };
-            ordersEffected.add(order.orderNumber);
+                const order = { ...newOrders[orderIndex] };
+                ordersEffected.add(order.orderNumber);
 
-            if (link.itemType === 'lineItem') {
-                const newItems = [...order.lineItems];
-                const item = { ...newItems[link.itemIndex] };
-                if (item.supplierPayments) {
-                    item.supplierPayments = item.supplierPayments.filter(p => p.id !== link.paymentId);
-                    newItems[link.itemIndex] = item;
-                    order.lineItems = newItems;
+                if (link.itemType === 'lineItem') {
+                    const newItems = [...order.lineItems];
+                    const item = { ...newItems[link.itemIndex] };
+                    if (item.supplierPayments) {
+                        item.supplierPayments = item.supplierPayments.filter(p => p.id !== link.paymentId);
+                        newItems[link.itemIndex] = item;
+                        order.lineItems = newItems;
+                    }
+                } else {
+                    const newServices = [...order.additionalServices];
+                    const service = { ...newServices[link.itemIndex] };
+                    if (service.supplierPayments) {
+                        service.supplierPayments = service.supplierPayments.filter(p => p.id !== link.paymentId);
+                        newServices[link.itemIndex] = service;
+                        order.additionalServices = newServices;
+                    }
                 }
-            } else {
-                const newServices = [...order.additionalServices];
-                const service = { ...newServices[link.itemIndex] };
-                if (service.supplierPayments) {
-                    service.supplierPayments = service.supplierPayments.filter(p => p.id !== link.paymentId);
-                    newServices[link.itemIndex] = service;
-                    order.additionalServices = newServices;
-                }
+                
+                // Add cancellation event to timeline
+                const cancelEvent: TimelineEvent = {
+                    id: `tl_cancel_${Date.now()}_${link.paymentId}`,
+                    timestamp: new Date(),
+                    user: 'מערכת',
+                    type: 'LOG',
+                    content: `בוטל רישום תשלום ספק עקב ביטול עסקה ביומן תשלומים (אסמכתא: ${group.reference})`
+                };
+                order.timeline = [cancelEvent, ...order.timeline];
+                
+                newOrders[orderIndex] = order;
+            });
+
+            if (ordersEffected.size > 0) {
+                // Show alert after state update completes
+                setTimeout(() => {
+                    alert(`העסקה בוטלה בהצלחה. הוסרו תשלומים מ-${ordersEffected.size} הזמנות.`);
+                }, 0);
             }
-            
-            // Add cancellation event to timeline
-            const cancelEvent: TimelineEvent = {
-                id: `tl_cancel_${Date.now()}_${link.paymentId}`,
-                timestamp: new Date(),
-                user: 'מערכת',
-                type: 'LOG',
-                content: `בוטל רישום תשלום ספק עקב ביטול עסקה ביומן תשלומים (אסמכתא: ${group.reference})`
-            };
-            order.timeline = [cancelEvent, ...order.timeline];
-            
-            newOrders[orderIndex] = order;
-        });
 
-        setOrders(newOrders);
-        alert(`העסקה בוטלה בהצלחה. הוסרו תשלומים מ-${ordersEffected.size} הזמנות.`);
+            return newOrders;
+        });
     };
 
     // Auto-expand current month + overdue
@@ -1312,13 +1325,15 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
                                                                     <EditIcon className="w-3 h-3"/>
                                                                     ערוך פרטים
                                                                 </button>
-                                                                <button 
-                                                                    onClick={() => handleCancelPaymentGroup(group)}
-                                                                    className="flex items-center gap-1 text-xs bg-red-50 border border-red-200 px-3 py-1.5 rounded hover:bg-red-100 text-red-700 font-bold transition-all shadow-sm"
-                                                                >
-                                                                    <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" /></svg>
-                                                                    ביטול עסקה (Rollback)
-                                                                </button>
+                                                                {!isEmployee && (
+                                                                    <button 
+                                                                        onClick={() => handleCancelPaymentGroup(group)}
+                                                                        className="flex items-center gap-1 text-xs bg-red-50 border border-red-200 px-3 py-1.5 rounded hover:bg-red-100 text-red-700 font-bold transition-all shadow-sm"
+                                                                    >
+                                                                        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" /></svg>
+                                                                        ביטול עסקה (Rollback)
+                                                                    </button>
+                                                                )}
                                                             </>
                                                         )}
                                                     </div>

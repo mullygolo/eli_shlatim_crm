@@ -3,6 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import fs from 'fs';
 import customersRouter from './routes/customers.js';
 import ordersRouter from './routes/orders.js';
 import suppliersRouter from './routes/suppliers.js';
@@ -13,6 +14,8 @@ import financeRouter from './routes/finance.js';
 import attendanceRouter from './routes/attendance.js';
 import manualEventsRouter from './routes/manualEvents.js';
 import settingsRouter from './routes/settings.js';
+import authRouter from './routes/auth.js';
+import { initializeDefaultAdmin } from './services/mongoService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -27,6 +30,7 @@ app.use(cors());
 app.use(express.json());
 
 // API Routes (חשוב - לפני static files)
+app.use('/api/auth', authRouter);
 app.use('/api/customers', customersRouter);
 app.use('/api/orders', ordersRouter);
 app.use('/api/suppliers', suppliersRouter);
@@ -44,8 +48,11 @@ app.get('/api/health', (req, res) => {
 });
 
 // Serve static files from the React app (after API routes)
-const distPath = path.join(__dirname, '../../dist');
-app.use(express.static(distPath));
+// In development, dist might not exist, so we check if it exists first
+const distPath = path.join(__dirname, '..', 'dist');
+if (fs.existsSync(distPath)) {
+    app.use(express.static(distPath));
+}
 
 // The "catchall" handler: for any request that doesn't match API routes,
 // send back React's index.html file (for SPA routing)
@@ -54,7 +61,13 @@ app.get('*', (req, res) => {
     if (req.path.startsWith('/api')) {
         return res.status(404).json({ error: 'API endpoint not found' });
     }
-    res.sendFile(path.join(distPath, 'index.html'));
+    // Only serve index.html if dist folder exists (production mode)
+    if (fs.existsSync(distPath)) {
+        res.sendFile(path.join(distPath, 'index.html'));
+    } else {
+        // In development, Vite dev server handles the frontend
+        res.status(404).json({ error: 'Frontend not built. Use Vite dev server in development.' });
+    }
 });
 
 // Error handling middleware
@@ -63,7 +76,18 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
     res.status(500).json({ error: 'Internal server error' });
 });
 
-app.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
-});
+// Initialize default admin user on server startup (before listening)
+(async () => {
+    try {
+        await initializeDefaultAdmin();
+        console.log('Default admin initialization completed');
+    } catch (error) {
+        console.error('Failed to initialize default admin:', error);
+    }
+    
+    // Start server after admin initialization
+    app.listen(PORT, () => {
+        console.log(`Server is running on port ${PORT}`);
+    });
+})();
 

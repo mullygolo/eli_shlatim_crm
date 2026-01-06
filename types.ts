@@ -243,6 +243,13 @@ export interface Employee {
     address?: string;
     idNumber?: string;
     
+    // Authentication
+    username?: string;              // Unique username for login
+    passwordHash?: string;          // Hashed password (never sent to frontend)
+    resetPasswordToken?: string;    // Token for password reset
+    resetPasswordExpires?: Date;   // Token expiry date
+    lastLogin?: Date;              // Track last login timestamp
+    
     // Salary & Employment
     jobScopePercentage: number; // 100% = 1.0, 50% = 0.5
     salaryType: 'HOURLY' | 'GLOBAL'; // Current/Default type
@@ -441,6 +448,8 @@ export type AttendanceStatus = 'PRESENT' | 'ABSENT' | 'PENDING_APPROVAL' | 'REJE
 export interface AttendanceRecord {
     id: string;
     employeeId: string;
+    employeeName?: string; // Added: Employee name for quick reference
+    employeeUsername?: string; // Added: Employee username for quick reference
     date: Date; // The specific day
     clockIn?: Date;
     clockOut?: Date;

@@ -1,9 +1,11 @@
 import { MongoClient, Db } from 'mongodb';
+import fs from 'fs';
 import {
     Customer, Order, Supplier, Employee, Activity, OrderStatusConfiguration,
     FixedExpense, VariableExpense, Loan, Debt, Receivable, EquityInvestment,
-    AttendanceRecord, ManualEvent
+    AttendanceRecord, ManualEvent, EmployeeStatus, EmployeeRole
 } from '../types';
+import { hashPassword } from '../utils/password.js';
 
 // MongoDB Connection Configuration
 const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://daniel_db_user:danny123@elishlatim.geyfv2c.mongodb.net/elishlatim?retryWrites=true&w=majority&appName=Compass';
@@ -14,7 +16,7 @@ let client: MongoClient | null = null;
 let db: Db | null = null;
 
 // Helper function to get database connection
-async function getDb(): Promise<Db> {
+export async function getDb(): Promise<Db> {
     if (db) return db;
     
     try {
@@ -44,7 +46,7 @@ function serializeDates(obj: any): any {
 }
 
 // Helper function to deserialize dates from MongoDB
-function deserializeDates(obj: any): any {
+export function deserializeDates(obj: any): any {
     if (obj === null || obj === undefined) return obj;
     if (Array.isArray(obj)) return obj.map(deserializeDates);
     if (typeof obj === 'object') {
@@ -92,7 +94,11 @@ export async function updateCustomer(customer: Customer): Promise<Customer> {
         const database = await getDb();
         const collection = database.collection<Customer>('customers');
         const serialized = serializeDates(customer);
-        await collection.replaceOne({ id: customer.id }, serialized);
+        
+        // Remove _id from serialized object to avoid MongoDB immutable field error
+        const { _id, ...serializedWithoutId } = serialized as any;
+        
+        await collection.replaceOne({ id: customer.id }, serializedWithoutId);
         return deserializeDates(serialized) as Customer;
     } catch (error) {
         console.error('Error updating customer:', error);
@@ -142,7 +148,11 @@ export async function updateOrder(order: Order): Promise<Order> {
         const database = await getDb();
         const collection = database.collection<Order>('orders');
         const serialized = serializeDates(order);
-        await collection.replaceOne({ id: order.id }, serialized);
+        
+        // Remove _id from serialized object to avoid MongoDB immutable field error
+        const { _id, ...serializedWithoutId } = serialized as any;
+        
+        await collection.replaceOne({ id: order.id }, serializedWithoutId);
         return deserializeDates(serialized) as Order;
     } catch (error) {
         console.error('Error updating order:', error);
@@ -192,7 +202,11 @@ export async function updateSupplier(supplier: Supplier): Promise<Supplier> {
         const database = await getDb();
         const collection = database.collection<Supplier>('suppliers');
         const serialized = serializeDates(supplier);
-        await collection.replaceOne({ id: supplier.id }, serialized);
+        
+        // Remove _id from serialized object to avoid MongoDB immutable field error
+        const { _id, ...serializedWithoutId } = serialized as any;
+        
+        await collection.replaceOne({ id: supplier.id }, serializedWithoutId);
         return deserializeDates(serialized) as Supplier;
     } catch (error) {
         console.error('Error updating supplier:', error);
@@ -217,9 +231,120 @@ export async function getEmployees(): Promise<Employee[]> {
         const database = await getDb();
         const collection = database.collection<Employee>('employees');
         const docs = await collection.find({}).toArray();
-        return docs.map(deserializeDates) as Employee[];
+        // Remove passwordHash and sensitive fields from response
+        return docs.map(doc => {
+            const deserialized = deserializeDates(doc) as Employee;
+            const { passwordHash, resetPasswordToken, resetPasswordExpires, ...sanitized } = deserialized;
+            return sanitized as Employee;
+        });
     } catch (error) {
         console.error('Error fetching employees:', error);
+        throw error;
+    }
+}
+
+// Initialize default admin user (called once on server startup)
+export async function initializeDefaultAdmin(): Promise<void> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<Employee>('employees');
+        
+        // Check if admin user already exists
+        const existingAdminDoc = await collection.findOne({ username: 'admin' });
+        
+        if (existingAdminDoc) {
+            const existingAdmin = deserializeDates(existingAdminDoc) as Employee;
+            // If admin exists but doesn't have passwordHash, update it
+            if (!existingAdmin.passwordHash || existingAdmin.passwordHash === '') {
+                console.log('Admin user exists but has no password. Setting default password...');
+                const passwordHash = await hashPassword('admin123');
+                const updatedAdmin = {
+                    ...existingAdmin,
+                    passwordHash: passwordHash,
+                    status: 'ACTIVE' as EmployeeStatus,
+                    roleType: 'ADMIN' as EmployeeRole
+                };
+                const serialized = serializeDates(updatedAdmin);
+                const { _id, ...updateDoc } = serialized;
+                await collection.replaceOne({ username: 'admin' }, updateDoc);
+                console.log('Default admin password set successfully');
+            } else {
+                console.log('Default admin user already exists with password');
+            }
+            return;
+        }
+        
+        // Create default admin user
+        const adminId = `emp_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        const passwordHash = await hashPassword('admin123');
+        
+        const defaultAdmin: Employee = {
+            id: adminId,
+            name: 'אלי שלטים',
+            role: 'מנהל מערכת',
+            roleType: 'ADMIN',
+            status: 'ACTIVE',
+            startDate: new Date(),
+            username: 'admin',
+            passwordHash: passwordHash,
+            jobScopePercentage: 1.0,
+            salaryType: 'GLOBAL',
+            hourlyWage: 0,
+            employerCostPercentage: 0,
+            hasSalesBonus: false,
+            salesBonusPercentage: 0,
+            employmentHistory: [],
+            timeline: []
+        };
+        
+        const serialized = serializeDates(defaultAdmin);
+        await collection.insertOne(serialized);
+        console.log('Default admin user created successfully');
+    } catch (error) {
+        console.error('Error initializing default admin:', error);
+        throw error;
+    }
+}
+
+// Get admin employee without username (for initial setup)
+export async function getAdminWithoutUsername(): Promise<Employee | null> {
+    // #region agent log
+    fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'server/services/mongoService.ts:234',message:'getAdminWithoutUsername called',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+    // #endregion
+    try {
+        const database = await getDb();
+        const collection = database.collection<Employee>('employees');
+        
+        // Get all admin employees
+        const adminEmployees = await collection.find({ roleType: 'ADMIN' }).toArray();
+        // #region agent log
+        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'server/services/mongoService.ts:240',message:'found admin employees',data:{adminCount:adminEmployees.length,adminIds:adminEmployees.map((e:any)=>e.id)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+        // #endregion
+        
+        // Find first admin without username
+        for (const doc of adminEmployees) {
+            const employee = deserializeDates(doc) as Employee;
+            // #region agent log
+            fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'server/services/mongoService.ts:245',message:'checking admin employee',data:{employeeId:employee.id,hasUsername:!!employee.username,username:employee.username||null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+            // #endregion
+            if (!employee.username || employee.username === '') {
+                // Return full employee data (including passwordHash for setup)
+                // #region agent log
+                fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'server/services/mongoService.ts:247',message:'found admin without username',data:{employeeId:employee.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+                // #endregion
+                return employee;
+            }
+        }
+        
+        // #region agent log
+        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'server/services/mongoService.ts:251',message:'no admin without username found',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+        // #endregion
+        return null;
+    } catch (error) {
+        // #region agent log
+        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'server/services/mongoService.ts:253',message:'getAdminWithoutUsername error',data:{errorMessage:error instanceof Error?error.message:String(error)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+        // #endregion
+        console.error('Error fetching admin without username:', error);
         throw error;
     }
 }
@@ -228,9 +353,20 @@ export async function createEmployee(employee: Employee): Promise<Employee> {
     try {
         const database = await getDb();
         const collection = database.collection<Employee>('employees');
-        const serialized = serializeDates(employee);
+        
+        // Hash password if provided
+        const employeeToSave = { ...employee };
+        if (employeeToSave.passwordHash && !employeeToSave.passwordHash.startsWith('$2')) {
+            // If password is not already hashed (doesn't start with bcrypt prefix), hash it
+            employeeToSave.passwordHash = await hashPassword(employeeToSave.passwordHash);
+        }
+        
+        const serialized = serializeDates(employeeToSave);
         await collection.insertOne(serialized);
-        return deserializeDates(serialized) as Employee;
+        
+        // Remove passwordHash from response
+        const { passwordHash, ...response } = deserializeDates(serialized) as Employee;
+        return response as Employee;
     } catch (error) {
         console.error('Error creating employee:', error);
         throw error;
@@ -238,13 +374,57 @@ export async function createEmployee(employee: Employee): Promise<Employee> {
 }
 
 export async function updateEmployee(employee: Employee): Promise<Employee> {
+    // #region agent log
+    fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'server/services/mongoService.ts:282',message:'updateEmployee called',data:{employeeId:employee.id,hasUsername:!!employee.username,hasPasswordHash:!!employee.passwordHash},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+    // #endregion
     try {
         const database = await getDb();
         const collection = database.collection<Employee>('employees');
-        const serialized = serializeDates(employee);
-        await collection.replaceOne({ id: employee.id }, serialized);
-        return deserializeDates(serialized) as Employee;
+        
+        // Get existing employee to check if password changed
+        const existing = await collection.findOne({ id: employee.id });
+        // #region agent log
+        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'server/services/mongoService.ts:288',message:'found existing employee',data:{found:!!existing,existingId:existing?.id||null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+        // #endregion
+        
+        const employeeToSave = { ...employee };
+        
+        // If passwordHash is provided and not already hashed, hash it
+        if (employeeToSave.passwordHash && employeeToSave.passwordHash !== '') {
+            // #region agent log
+            fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'server/services/mongoService.ts:293',message:'checking passwordHash',data:{hashLength:employeeToSave.passwordHash.length,isAlreadyHashed:employeeToSave.passwordHash.startsWith('$2')},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+            // #endregion
+            if (!employeeToSave.passwordHash.startsWith('$2')) {
+                // Password is plain text, hash it
+                employeeToSave.passwordHash = await hashPassword(employeeToSave.passwordHash);
+            }
+            // If passwordHash starts with $2, it's already hashed, keep it as is
+        } else if (existing && existing.passwordHash) {
+            // Keep existing password if not provided
+            employeeToSave.passwordHash = existing.passwordHash;
+        }
+        
+        const serialized = serializeDates(employeeToSave);
+        // Remove _id from serialized object to avoid MongoDB immutable field error
+        const { _id, ...serializedWithoutId } = serialized as any;
+        // #region agent log
+        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'server/services/mongoService.ts:305',message:'before replaceOne',data:{employeeId:employee.id,serializedKeys:Object.keys(serializedWithoutId),hasId:!!_id},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'B'})}).catch(()=>{});
+        // #endregion
+        await collection.replaceOne({ id: employee.id }, serializedWithoutId);
+        // #region agent log
+        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'server/services/mongoService.ts:305',message:'after replaceOne',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+        // #endregion
+        
+        // Remove passwordHash from response
+        const { passwordHash, resetPasswordToken, resetPasswordExpires, ...response } = deserializeDates(serialized) as Employee;
+        // #region agent log
+        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'server/services/mongoService.ts:308',message:'updateEmployee success',data:{responseId:response.id,responseKeys:Object.keys(response)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+        // #endregion
+        return response as Employee;
     } catch (error) {
+        // #region agent log
+        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'server/services/mongoService.ts:310',message:'updateEmployee error',data:{errorMessage:error instanceof Error?error.message:String(error),errorStack:error instanceof Error?error.stack:null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+        // #endregion
         console.error('Error updating employee:', error);
         throw error;
     }
@@ -347,7 +527,11 @@ export async function updateFixedExpense(expense: FixedExpense): Promise<FixedEx
         const database = await getDb();
         const collection = database.collection<FixedExpense>('fixedExpenses');
         const serialized = serializeDates(expense);
-        await collection.replaceOne({ id: expense.id }, serialized);
+        
+        // Remove _id from serialized object to avoid MongoDB immutable field error
+        const { _id, ...serializedWithoutId } = serialized as any;
+        
+        await collection.replaceOne({ id: expense.id }, serializedWithoutId);
         return deserializeDates(serialized) as FixedExpense;
     } catch (error) {
         console.error('Error updating fixed expense:', error);
@@ -397,7 +581,11 @@ export async function updateVariableExpense(expense: VariableExpense): Promise<V
         const database = await getDb();
         const collection = database.collection<VariableExpense>('variableExpenses');
         const serialized = serializeDates(expense);
-        await collection.replaceOne({ id: expense.id }, serialized);
+        
+        // Remove _id from serialized object to avoid MongoDB immutable field error
+        const { _id, ...serializedWithoutId } = serialized as any;
+        
+        await collection.replaceOne({ id: expense.id }, serializedWithoutId);
         return deserializeDates(serialized) as VariableExpense;
     } catch (error) {
         console.error('Error updating variable expense:', error);
@@ -447,7 +635,11 @@ export async function updateLoan(loan: Loan): Promise<Loan> {
         const database = await getDb();
         const collection = database.collection<Loan>('loans');
         const serialized = serializeDates(loan);
-        await collection.replaceOne({ id: loan.id }, serialized);
+        
+        // Remove _id from serialized object to avoid MongoDB immutable field error
+        const { _id, ...serializedWithoutId } = serialized as any;
+        
+        await collection.replaceOne({ id: loan.id }, serializedWithoutId);
         return deserializeDates(serialized) as Loan;
     } catch (error) {
         console.error('Error updating loan:', error);
@@ -497,7 +689,11 @@ export async function updateDebt(debt: Debt): Promise<Debt> {
         const database = await getDb();
         const collection = database.collection<Debt>('debts');
         const serialized = serializeDates(debt);
-        await collection.replaceOne({ id: debt.id }, serialized);
+        
+        // Remove _id from serialized object to avoid MongoDB immutable field error
+        const { _id, ...serializedWithoutId } = serialized as any;
+        
+        await collection.replaceOne({ id: debt.id }, serializedWithoutId);
         return deserializeDates(serialized) as Debt;
     } catch (error) {
         console.error('Error updating debt:', error);
@@ -547,7 +743,11 @@ export async function updateReceivable(receivable: Receivable): Promise<Receivab
         const database = await getDb();
         const collection = database.collection<Receivable>('receivables');
         const serialized = serializeDates(receivable);
-        await collection.replaceOne({ id: receivable.id }, serialized);
+        
+        // Remove _id from serialized object to avoid MongoDB immutable field error
+        const { _id, ...serializedWithoutId } = serialized as any;
+        
+        await collection.replaceOne({ id: receivable.id }, serializedWithoutId);
         return deserializeDates(serialized) as Receivable;
     } catch (error) {
         console.error('Error updating receivable:', error);
@@ -597,7 +797,11 @@ export async function updateEquity(equity: EquityInvestment): Promise<EquityInve
         const database = await getDb();
         const collection = database.collection<EquityInvestment>('equity');
         const serialized = serializeDates(equity);
-        await collection.replaceOne({ id: equity.id }, serialized);
+        
+        // Remove _id from serialized object to avoid MongoDB immutable field error
+        const { _id, ...serializedWithoutId } = serialized as any;
+        
+        await collection.replaceOne({ id: equity.id }, serializedWithoutId);
         return deserializeDates(serialized) as EquityInvestment;
     } catch (error) {
         console.error('Error updating equity:', error);
@@ -633,7 +837,28 @@ export async function createAttendanceRecord(record: AttendanceRecord): Promise<
     try {
         const database = await getDb();
         const collection = database.collection<AttendanceRecord>('attendanceRecords');
-        const serialized = serializeDates(record);
+        
+        // If employee details are missing, fetch them from employees collection
+        let employeeName = record.employeeName;
+        let employeeUsername = record.employeeUsername;
+        
+        if (!employeeName || !employeeUsername) {
+            const employeesCollection = database.collection<Employee>('employees');
+            const employeeDoc = await employeesCollection.findOne({ id: record.employeeId });
+            const employee = employeeDoc ? deserializeDates(employeeDoc) as Employee : null;
+            if (employee) {
+                employeeName = employee.name;
+                employeeUsername = employee.username;
+            }
+        }
+        
+        const recordWithEmployeeDetails: AttendanceRecord = {
+            ...record,
+            employeeName: employeeName || record.employeeName,
+            employeeUsername: employeeUsername || record.employeeUsername,
+        };
+        
+        const serialized = serializeDates(recordWithEmployeeDetails);
         await collection.insertOne(serialized);
         return deserializeDates(serialized) as AttendanceRecord;
     } catch (error) {
@@ -646,8 +871,33 @@ export async function updateAttendanceRecord(record: AttendanceRecord): Promise<
     try {
         const database = await getDb();
         const collection = database.collection<AttendanceRecord>('attendanceRecords');
-        const serialized = serializeDates(record);
-        await collection.replaceOne({ id: record.id }, serialized);
+        
+        // If employee details are missing, fetch them from employees collection
+        let employeeName = record.employeeName;
+        let employeeUsername = record.employeeUsername;
+        
+        if (!employeeName || !employeeUsername) {
+            const employeesCollection = database.collection<Employee>('employees');
+            const employeeDoc = await employeesCollection.findOne({ id: record.employeeId });
+            const employee = employeeDoc ? deserializeDates(employeeDoc) as Employee : null;
+            if (employee) {
+                employeeName = employee.name;
+                employeeUsername = employee.username;
+            }
+        }
+        
+        const recordWithEmployeeDetails: AttendanceRecord = {
+            ...record,
+            employeeName: employeeName || record.employeeName,
+            employeeUsername: employeeUsername || record.employeeUsername,
+        };
+        
+        const serialized = serializeDates(recordWithEmployeeDetails);
+        
+        // Remove _id from serialized object to avoid MongoDB immutable field error
+        const { _id, ...serializedWithoutId } = serialized as any;
+        
+        await collection.replaceOne({ id: record.id }, serializedWithoutId);
         return deserializeDates(serialized) as AttendanceRecord;
     } catch (error) {
         console.error('Error updating attendance record:', error);
@@ -662,6 +912,199 @@ export async function deleteAttendanceRecord(recordId: string): Promise<void> {
         await collection.deleteOne({ id: recordId });
     } catch (error) {
         console.error('Error deleting attendance record:', error);
+        throw error;
+    }
+}
+
+// Clock in/out functions with server-side time
+export async function clockInAttendance(employeeId: string, isWFH: boolean = false): Promise<AttendanceRecord> {
+    try {
+        // #region agent log
+        const logPath = 'c:\\Users\\danig\\eli_shlatim_crm\\.cursor\\debug.log';
+        const logEntry = JSON.stringify({location:'server/services/mongoService.ts:clockInAttendance',message:'Function entry',data:{employeeId,isWFH},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A,B,C'}) + '\n';
+        fs.appendFileSync(logPath, logEntry);
+        // #endregion
+        
+        const database = await getDb();
+        const collection = database.collection<AttendanceRecord>('attendanceRecords');
+        
+        // Check if employee already has an active clock-in (no clockOut)
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const tomorrow = new Date(today);
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        
+        const existingActive = await collection.findOne({
+            employeeId: employeeId,
+            clockIn: { $exists: true },
+            clockOut: { $exists: false },
+            date: { $gte: today, $lt: tomorrow }
+        });
+        
+        if (existingActive) {
+            throw new Error('Employee already has an active clock-in for today');
+        }
+        
+        // Fetch employee details to include in the record
+        const employeesCollection = database.collection<Employee>('employees');
+        const employeeDoc = await employeesCollection.findOne({ id: employeeId });
+        const employee = employeeDoc ? deserializeDates(employeeDoc) as Employee : null;
+        
+        // Create new record with server time and employee details
+        const now = new Date();
+        const newRecord: AttendanceRecord = {
+            id: `att_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+            employeeId: employeeId,
+            employeeName: employee?.name,
+            employeeUsername: employee?.username,
+            date: now,
+            clockIn: now,
+            totalHours: 0,
+            status: isWFH ? 'WFH' : 'PRESENT',
+        };
+        
+        const serialized = serializeDates(newRecord);
+        
+        // #region agent log
+        const logEntryBeforeInsert = JSON.stringify({location:'server/services/mongoService.ts:clockInAttendance',message:'Before insertOne',data:{employeeId,serializedId:serialized.id,serializedClockIn:serialized.clockIn,serializedClockInType:typeof serialized.clockIn},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'}) + '\n';
+        fs.appendFileSync(logPath, logEntryBeforeInsert);
+        // #endregion
+        
+        await collection.insertOne(serialized);
+        
+        const result = deserializeDates(serialized) as AttendanceRecord;
+        
+        // #region agent log
+        const logEntrySuccess = JSON.stringify({location:'server/services/mongoService.ts:clockInAttendance',message:'Function exit success',data:{employeeId,resultId:result.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A,B,C'}) + '\n';
+        fs.appendFileSync(logPath, logEntrySuccess);
+        // #endregion
+        
+        return result;
+    } catch (error) {
+        // #region agent log
+        const logPathError = 'c:\\Users\\danig\\eli_shlatim_crm\\.cursor\\debug.log';
+        const logEntry = JSON.stringify({location:'server/services/mongoService.ts:clockInAttendance:catch',message:'Error in clockInAttendance',data:{employeeId,errorMessage:error instanceof Error ? error.message : String(error)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A,B,C,D,E'}) + '\n';
+        fs.appendFileSync(logPathError, logEntry);
+        // #endregion
+        console.error('Error clocking in:', error);
+        throw error;
+    }
+}
+
+export async function clockOutAttendance(recordId: string): Promise<AttendanceRecord> {
+    try {
+        // #region agent log
+        const logPath = 'c:\\Users\\danig\\eli_shlatim_crm\\.cursor\\debug.log';
+        const logEntry = JSON.stringify({location:'server/services/mongoService.ts:clockOutAttendance',message:'Function entry',data:{recordId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A,B,C'}) + '\n';
+        fs.appendFileSync(logPath, logEntry);
+        // #endregion
+        
+        const database = await getDb();
+        const collection = database.collection<AttendanceRecord>('attendanceRecords');
+        
+        // Find the record
+        const existingDoc = await collection.findOne({ id: recordId });
+        
+        // #region agent log
+        const logEntry2 = JSON.stringify({location:'server/services/mongoService.ts:clockOutAttendance',message:'After findOne query',data:{recordId,found:!!existingDoc,existingId:existingDoc?.id,existingClockOut:existingDoc?.clockOut},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B,C,D'}) + '\n';
+        fs.appendFileSync(logPath, logEntry2);
+        // #endregion
+        
+        if (!existingDoc) {
+            throw new Error('Attendance record not found');
+        }
+        
+        // Deserialize the existing record to work with Date objects
+        const existingDeserialized = deserializeDates(existingDoc) as any;
+        
+        // Remove _id immediately to prevent it from being included in the update
+        const { _id: existingId, ...existing } = existingDeserialized;
+        
+        // #region agent log
+        const logEntryDeserialize = JSON.stringify({location:'server/services/mongoService.ts:clockOutAttendance',message:'After deserializeDates and _id removal',data:{recordId,existingClockIn:existing?.clockIn,existingClockInType:typeof existing?.clockIn,existingClockOut:existing?.clockOut,existingId:existing?.id,existingEmployeeId:existing?.employeeId,hadId:!!existingId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A,B'}) + '\n';
+        fs.appendFileSync(logPath, logEntryDeserialize);
+        // #endregion
+        
+        if (existing.clockOut) {
+            throw new Error('Employee already clocked out for this record');
+        }
+        
+        // If employee details are missing, fetch them from employees collection
+        let employeeName = existing.employeeName;
+        let employeeUsername = existing.employeeUsername;
+        
+        if (!employeeName || !employeeUsername) {
+            const employeesCollection = database.collection<Employee>('employees');
+            const employeeDoc = await employeesCollection.findOne({ id: existing.employeeId });
+            const employee = employeeDoc ? deserializeDates(employeeDoc) as Employee : null;
+            if (employee) {
+                employeeName = employee.name;
+                employeeUsername = employee.username;
+            }
+        }
+        
+        // Update with server time
+        const now = new Date();
+        const clockInDate = existing.clockIn ? (existing.clockIn instanceof Date ? existing.clockIn : new Date(existing.clockIn)) : now;
+        const durationMs = now.getTime() - clockInDate.getTime();
+        const totalHours = Math.max(0, durationMs / (1000 * 60 * 60));
+        
+        // #region agent log
+        const logEntryCalc = JSON.stringify({location:'server/services/mongoService.ts:clockOutAttendance',message:'After calculation',data:{recordId,now:now.toISOString(),clockInDate:clockInDate.toISOString(),durationMs,totalHours},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A,E'}) + '\n';
+        fs.appendFileSync(logPath, logEntryCalc);
+        // #endregion
+        
+        const updated = {
+            ...existing,
+            employeeName: employeeName || existing.employeeName,
+            employeeUsername: employeeUsername || existing.employeeUsername,
+            clockOut: now,
+            totalHours: totalHours
+        };
+        
+        const serialized = serializeDates(updated);
+        
+        // #region agent log
+        const logEntrySerialized = JSON.stringify({location:'server/services/mongoService.ts:clockOutAttendance',message:'After serializeDates',data:{recordId,serializedClockOut:serialized.clockOut,serializedClockOutType:typeof serialized.clockOut,serializedId:serialized.id,hasId:!!serialized._id,serializedKeys:Object.keys(serialized)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'}) + '\n';
+        fs.appendFileSync(logPath, logEntrySerialized);
+        // #endregion
+        
+        // Remove _id from serialized object to avoid MongoDB immutable field error
+        const { _id, ...serializedWithoutId } = serialized as any;
+        
+        // #region agent log
+        const logEntryBeforeReplace = JSON.stringify({location:'server/services/mongoService.ts:clockOutAttendance',message:'Before replaceOne - final check',data:{recordId,serializedWithoutIdKeys:Object.keys(serializedWithoutId),hasIdInWithoutId:!!serializedWithoutId._id,serializedWithoutIdClockOut:serializedWithoutId.clockOut},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B,E'}) + '\n';
+        fs.appendFileSync(logPath, logEntryBeforeReplace);
+        // #endregion
+        
+        // #region agent log
+        const logEntry3 = JSON.stringify({location:'server/services/mongoService.ts:clockOutAttendance',message:'Before replaceOne',data:{recordId,serializedId:serialized.id,hasId:!!serialized._id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B,C,E'}) + '\n';
+        fs.appendFileSync(logPath, logEntry3);
+        // #endregion
+        
+        const replaceResult = await collection.replaceOne({ id: recordId }, serializedWithoutId);
+        
+        // #region agent log
+        const logEntryAfterReplace = JSON.stringify({location:'server/services/mongoService.ts:clockOutAttendance',message:'After replaceOne',data:{recordId,matchedCount:replaceResult.matchedCount,modifiedCount:replaceResult.modifiedCount,acknowledged:replaceResult.acknowledged},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'}) + '\n';
+        fs.appendFileSync(logPath, logEntryAfterReplace);
+        // #endregion
+        
+        const result = deserializeDates(serialized) as AttendanceRecord;
+        
+        // #region agent log
+        const logEntry4 = JSON.stringify({location:'server/services/mongoService.ts:clockOutAttendance',message:'Function exit success',data:{resultId:result.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A,B,C'}) + '\n';
+        fs.appendFileSync(logPath, logEntry4);
+        // #endregion
+        
+        return result;
+    } catch (error) {
+        // #region agent log
+        const logPath = 'c:\\Users\\danig\\eli_shlatim_crm\\.cursor\\debug.log';
+        const logEntry = JSON.stringify({location:'server/services/mongoService.ts:clockOutAttendance:catch',message:'Error in clockOutAttendance',data:{recordId,errorMessage:error instanceof Error ? error.message : String(error)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A,B,C,D,E'}) + '\n';
+        fs.appendFileSync(logPath, logEntry);
+        // #endregion
+        
+        console.error('Error clocking out:', error);
         throw error;
     }
 }

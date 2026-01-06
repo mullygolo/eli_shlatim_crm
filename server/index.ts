@@ -48,10 +48,15 @@ app.get('/api/health', (req, res) => {
 });
 
 // Serve static files from the React app (after API routes)
+// In production (Render), __dirname is server/dist/, so we need to go up two levels to reach root/dist/
 // In development, dist might not exist, so we check if it exists first
-const distPath = path.join(__dirname, '..', 'dist');
-if (fs.existsSync(distPath)) {
-    app.use(express.static(distPath));
+const distPath = path.join(__dirname, '..', '..', 'dist');
+// Fallback: if the above doesn't exist, try one level up (for local development)
+const distPathFallback = path.join(__dirname, '..', 'dist');
+const actualDistPath = fs.existsSync(distPath) ? distPath : (fs.existsSync(distPathFallback) ? distPathFallback : null);
+
+if (actualDistPath) {
+    app.use(express.static(actualDistPath));
 }
 
 // The "catchall" handler: for any request that doesn't match API routes,
@@ -62,8 +67,8 @@ app.get('*', (req, res) => {
         return res.status(404).json({ error: 'API endpoint not found' });
     }
     // Only serve index.html if dist folder exists (production mode)
-    if (fs.existsSync(distPath)) {
-        res.sendFile(path.join(distPath, 'index.html'));
+    if (actualDistPath) {
+        res.sendFile(path.join(actualDistPath, 'index.html'));
     } else {
         // In development, Vite dev server handles the frontend
         res.status(404).json({ error: 'Frontend not built. Use Vite dev server in development.' });

@@ -417,11 +417,11 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
     };
 
     // Helper function to retry with exponential backoff
-    const retryWithBackoff = async <T>(
+    async function retryWithBackoff<T>(
         fn: () => Promise<T>,
         maxRetries: number = 3,
         baseDelay: number = 1000
-    ): Promise<T> => {
+    ): Promise<T> {
         let lastError: Error | null = null;
         for (let attempt = 0; attempt < maxRetries; attempt++) {
             try {
@@ -435,7 +435,7 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
             }
         }
         throw lastError || new Error('Max retries exceeded');
-    };
+    }
 
     // Process offline queue when online
     useEffect(() => {

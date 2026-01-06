@@ -5,6 +5,8 @@ import { ClockIcon, EditIcon, PlusIcon, ImportIcon, DownloadIcon } from './icons
 import Modal from './Modal';
 import { calculateOrderTotals, getEmployeeSalaryAtDate } from '../utils/calculations';
 import { getJewishHoliday } from '../utils/holidays';
+import { useAuth } from '../contexts/AuthContext';
+import * as mongoService from '../services/mongoService';
 
 interface AttendancePageProps {
     employees: Employee[];
@@ -319,7 +321,19 @@ const CorrectionRequestModal: React.FC<{
 };
 
 const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, setRecords, orders, statusConfigs, payrollOverrides, setPayrollOverrides }) => {
-    const [currentEmployeeId, setCurrentEmployeeId] = useState<string>(employees[0]?.id || '');
+    const { user } = useAuth();
+    const isUserManager = user?.roleType === 'ADMIN' || user?.roleType === 'MANAGER';
+    
+    // עובד רגיל יכול לראות רק את עצמו, מנהל יכול לבחור כל עובד
+    const [currentEmployeeId, setCurrentEmployeeId] = useState<string>(() => {
+        // אם המשתמש הוא עובד רגיל, הצג רק אותו
+        if (user?.roleType === 'EMPLOYEE' && user.id) {
+            return user.id;
+        }
+        // אם המשתמש הוא מנהל, אפשר לו לבחור כל עובד
+        return employees[0]?.id || '';
+    });
+    
     const [activeTab, setActiveTab] = useState<'MY_PORTAL' | 'ADMIN_DASHBOARD'>('MY_PORTAL');
     const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth() + 1);
     const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
@@ -329,6 +343,8 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
     const [currentTime, setCurrentTime] = useState(new Date());
     const [isWFH, setIsWFH] = useState(false);
     const [viewingCertificate, setViewingCertificate] = useState<Attachment | null>(null);
+    const [isClocking, setIsClocking] = useState(false);
+    const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
     // Dynamic Year List: Start from 2023 up to current year + 1
     const availableYears = useMemo(() => {
@@ -346,9 +362,28 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
         const timer = setInterval(() => setCurrentTime(new Date()), 1000);
         return () => clearInterval(timer);
     }, []);
+    
+    // עדכן currentEmployeeId אם המשתמש הוא עובד רגיל
+    useEffect(() => {
+        if (user?.roleType === 'EMPLOYEE' && user.id) {
+            const userEmployee = employees.find(e => e.id === user.id);
+            if (userEmployee && currentEmployeeId !== user.id) {
+                setCurrentEmployeeId(user.id);
+            }
+        }
+    }, [user, employees, currentEmployeeId]);
+
+    // Clear error message after 5 seconds
+    useEffect(() => {
+        if (errorMessage) {
+            const timer = setTimeout(() => setErrorMessage(null), 5000);
+            return () => clearTimeout(timer);
+        }
+    }, [errorMessage]);
 
     const currentEmployee = employees.find(e => e.id === currentEmployeeId);
-    const isManager = currentEmployee?.roleType === 'ADMIN' || currentEmployee?.roleType === 'MANAGER';
+    // isManager צריך להיות לפי המשתמש הנוכחי, לא לפי העובד שנבחר
+    const isManager = isUserManager;
 
     const todaysRecords = useMemo(() => {
         const todayStr = new Date().toDateString();
@@ -363,33 +398,241 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
     // LIVE Shift Duration Logic
     const liveDuration = useMemo(() => {
         if (!activeRecord?.clockIn) return "00:00:00";
+        // If already clocked out, don't show live duration
+        if (activeRecord.clockOut) return "00:00:00";
         const startMs = new Date(activeRecord.clockIn).getTime();
         const diffMs = currentTime.getTime() - startMs;
         return formatMsToHMS(diffMs);
     }, [activeRecord, currentTime]);
 
-    const handleClockAction = (action: 'IN' | 'OUT') => {
-        const now = new Date();
-        if (action === 'IN') {
-            if (activeRecord) return; // Already clocked in
-            const newRecord: AttendanceRecord = {
-                id: `att_${Date.now()}`,
-                employeeId: currentEmployeeId,
-                date: now,
-                clockIn: now,
-                totalHours: 0,
-                status: isWFH ? 'WFH' : 'PRESENT',
-            };
-            setRecords(prev => [...prev, newRecord]);
-        } else if (action === 'OUT') {
-            if (!activeRecord) return;
-            let updatedRecord = { ...activeRecord, clockOut: now };
-            
-            if (updatedRecord.clockIn) {
-                const durationMs = now.getTime() - new Date(updatedRecord.clockIn).getTime();
-                updatedRecord.totalHours = Math.max(0, (durationMs / (1000 * 60 * 60)));
+    // Helper function to save to offline queue
+    const saveToOfflineQueue = (action: 'IN' | 'OUT', data: any) => {
+        try {
+            const queue = JSON.parse(localStorage.getItem('attendanceQueue') || '[]');
+            queue.push({ action, data, timestamp: Date.now() });
+            localStorage.setItem('attendanceQueue', JSON.stringify(queue));
+        } catch (error) {
+            console.error('Error saving to offline queue:', error);
+        }
+    };
+
+    // Helper function to retry with exponential backoff
+    const retryWithBackoff = async <T>(
+        fn: () => Promise<T>,
+        maxRetries: number = 3,
+        baseDelay: number = 1000
+    ): Promise<T> => {
+        let lastError: Error | null = null;
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
+            try {
+                return await fn();
+            } catch (error: any) {
+                lastError = error;
+                if (attempt < maxRetries - 1) {
+                    const delay = baseDelay * Math.pow(2, attempt);
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                }
             }
-            setRecords(prev => prev.map(r => r.id === activeRecord.id ? updatedRecord : r));
+        }
+        throw lastError || new Error('Max retries exceeded');
+    };
+
+    // Process offline queue when online
+    useEffect(() => {
+        const processOfflineQueue = async () => {
+            try {
+                const queue = JSON.parse(localStorage.getItem('attendanceQueue') || '[]');
+                if (queue.length === 0) return;
+
+                const processed: number[] = [];
+                for (const item of queue) {
+                    try {
+                        if (item.action === 'IN') {
+                            await mongoService.clockIn(item.data.employeeId, item.data.isWFH);
+                        } else if (item.action === 'OUT') {
+                            await mongoService.clockOut(item.data.recordId);
+                        }
+                        processed.push(item.timestamp);
+                    } catch (error) {
+                        console.error('Error processing offline queue item:', error);
+                        // Keep failed items in queue for next attempt
+                    }
+                }
+
+                // Remove processed items
+                if (processed.length > 0) {
+                    const remaining = queue.filter((item: any) => !processed.includes(item.timestamp));
+                    localStorage.setItem('attendanceQueue', JSON.stringify(remaining));
+                    // Reload records to sync with server
+                    const updatedRecords = await mongoService.getAttendanceRecords();
+                    setRecords(updatedRecords);
+                }
+            } catch (error) {
+                console.error('Error processing offline queue:', error);
+            }
+        };
+
+        // Only process if online
+        if (navigator.onLine) {
+            // Try to process queue every 30 seconds when online
+            const interval = setInterval(processOfflineQueue, 30000);
+            processOfflineQueue(); // Try immediately
+
+            return () => clearInterval(interval);
+        }
+    }, [setRecords]);
+
+    const handleClockAction = async (action: 'IN' | 'OUT') => {
+        if (isClocking) return; // Prevent double-clicks
+        
+        setIsClocking(true);
+        setErrorMessage(null);
+
+        try {
+            if (action === 'IN') {
+                if (activeRecord) {
+                    setErrorMessage('כבר יש כניסה פעילה להיום');
+                    setIsClocking(false);
+                    return;
+                }
+
+                // Try to clock in with retry
+                const savedRecord = await retryWithBackoff(() => 
+                    mongoService.clockIn(currentEmployeeId, isWFH)
+                );
+
+                // Update local state with server response
+                setRecords(prev => {
+                    // Remove any existing record for today (shouldn't happen, but safety)
+                    const todayStr = new Date().toDateString();
+                    const filtered = prev.filter(r => {
+                        const recordDate = new Date(r.date).toDateString();
+                        return !(r.employeeId === currentEmployeeId && recordDate === todayStr && !r.clockOut);
+                    });
+                    return [...filtered, savedRecord];
+                });
+                
+                // Refresh all records from server to ensure consistency
+                setTimeout(async () => {
+                    try {
+                        const updatedRecords = await mongoService.getAttendanceRecords();
+                        setRecords(updatedRecords);
+                    } catch (err) {
+                        console.error('Error refreshing records after clock-in:', err);
+                    }
+                }, 500);
+            } else if (action === 'OUT') {
+                if (!activeRecord) {
+                    setErrorMessage('אין כניסה פעילה');
+                    setIsClocking(false);
+                    return;
+                }
+
+                // Double-check that the record doesn't already have clockOut (prevent double-click)
+                if (activeRecord.clockOut) {
+                    setErrorMessage('כבר יצאת מהמשמרת');
+                    setIsClocking(false);
+                    // Refresh records to get latest state
+                    try {
+                        const updatedRecords = await mongoService.getAttendanceRecords();
+                        setRecords(updatedRecords);
+                    } catch (err) {
+                        console.error('Error refreshing records:', err);
+                    }
+                    return;
+                }
+
+                // #region agent log
+                fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AttendancePage.tsx:handleClockAction:OUT',message:'Before clock out API call',data:{recordId:activeRecord.id,activeRecord:JSON.stringify(activeRecord)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A,B,C'})}).catch(()=>{});
+                // #endregion
+
+                // Try to clock out with retry
+                const savedRecord = await retryWithBackoff(() => 
+                    mongoService.clockOut(activeRecord.id)
+                );
+
+                // #region agent log
+                fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AttendancePage.tsx:handleClockAction:OUT',message:'After clock out API call success',data:{savedRecord:JSON.stringify(savedRecord)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A,B,C'})}).catch(()=>{});
+                // #endregion
+
+                // Update local state with server response immediately
+                setRecords(prev => {
+                    const updated = prev.map(r => r.id === activeRecord.id ? savedRecord : r);
+                    // #region agent log
+                    fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AttendancePage.tsx:handleClockAction:OUT',message:'After setRecords update',data:{recordId:activeRecord.id,updatedRecordClockOut:savedRecord?.clockOut,updatedRecordsCount:updated.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+                    // #endregion
+                    return updated;
+                });
+                
+                // Refresh all records from server to ensure consistency
+                setTimeout(async () => {
+                    try {
+                        const updatedRecords = await mongoService.getAttendanceRecords();
+                        setRecords(updatedRecords);
+                        // #region agent log
+                        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AttendancePage.tsx:handleClockAction:OUT',message:'After refresh from server',data:{refreshedRecordsCount:updatedRecords.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+                        // #endregion
+                    } catch (err) {
+                        console.error('Error refreshing records after clock-out:', err);
+                    }
+                }, 500);
+            }
+        } catch (error: any) {
+            console.error('Error clocking:', error);
+            
+            // #region agent log
+            fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AttendancePage.tsx:handleClockAction:catch',message:'Error caught in clock action',data:{action,errorMessage:error?.message,errorStack:error?.stack,errorString:String(error)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A,B,C,D,E'})}).catch(()=>{});
+            // #endregion
+            
+            // Check if it's a network error
+            const isNetworkError = !navigator.onLine || 
+                (error.message && error.message.includes('fetch')) ||
+                (error.message && error.message.includes('network'));
+
+            if (isNetworkError) {
+                // Save to offline queue
+                if (action === 'IN') {
+                    saveToOfflineQueue('IN', { employeeId: currentEmployeeId, isWFH });
+                    setErrorMessage('אין חיבור לאינטרנט. הפעולה נשמרה ותתבצע אוטומטית כשהחיבור יחזור.');
+                } else {
+                    saveToOfflineQueue('OUT', { recordId: activeRecord.id });
+                    setErrorMessage('אין חיבור לאינטרנט. הפעולה נשמרה ותתבצע אוטומטית כשהחיבור יחזור.');
+                }
+
+                // Optimistically update UI (will be synced when online)
+                if (action === 'IN') {
+                    const optimisticRecord: AttendanceRecord = {
+                        id: `att_${Date.now()}_offline`,
+                        employeeId: currentEmployeeId,
+                        date: new Date(),
+                        clockIn: new Date(),
+                        totalHours: 0,
+                        status: isWFH ? 'WFH' : 'PRESENT',
+                    };
+                    setRecords(prev => [...prev, optimisticRecord]);
+                } else {
+                    const now = new Date();
+                    const updatedRecord = { 
+                        ...activeRecord, 
+                        clockOut: now,
+                        totalHours: activeRecord.clockIn ? 
+                            Math.max(0, (now.getTime() - new Date(activeRecord.clockIn).getTime()) / (1000 * 60 * 60)) : 0
+                    };
+                    setRecords(prev => prev.map(r => r.id === activeRecord.id ? updatedRecord : r));
+                }
+            } else {
+                // Other errors (e.g., already clocked in)
+                const errorMsg = error.message || 'שגיאה בביצוע הפעולה. אנא נסה שוב.';
+                setErrorMessage(errorMsg);
+                
+                if (error.message && error.message.includes('already has an active clock-in')) {
+                    setErrorMessage('כבר יש כניסה פעילה להיום');
+                } else if (error.message && error.message.includes('already clocked out')) {
+                    setErrorMessage('כבר בוצעה יציאה לרשומה זו');
+                }
+            }
+        } finally {
+            setIsClocking(false);
         }
     };
 
@@ -842,27 +1085,50 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
                         <div className="flex flex-col items-center gap-6 z-10 relative">
                             <div className="p-3 border-2 border-primary/10 rounded-full shadow-inner bg-slate-50/50">
                                 {!isClockedIn ? (
-                                    <button onClick={() => handleClockAction('IN')} className="w-36 h-36 rounded-full flex flex-col items-center justify-center shadow-2xl transition-all hover:scale-105 active:scale-95 bg-gradient-to-br from-secondary to-green-600 text-white border-4 border-green-100 group relative overflow-hidden">
+                                    <button 
+                                        onClick={() => handleClockAction('IN')} 
+                                        disabled={isClocking}
+                                        className={`w-36 h-36 rounded-full flex flex-col items-center justify-center shadow-2xl transition-all hover:scale-105 active:scale-95 bg-gradient-to-br from-secondary to-green-600 text-white border-4 border-green-100 group relative overflow-hidden ${isClocking ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                    >
                                         <div className="absolute inset-0 bg-white opacity-0 group-hover:opacity-10 transition-opacity"></div>
-                                        <ClockIcon className="w-10 h-10 mb-1 drop-shadow-md" /><span className="font-black text-xl tracking-tight">כניסה</span>
+                                        <ClockIcon className="w-10 h-10 mb-1 drop-shadow-md" />
+                                        <span className="font-black text-xl tracking-tight">
+                                            {isClocking ? 'שומר...' : 'כניסה'}
+                                        </span>
                                         <div className="absolute top-0 left-0 w-full h-1/2 bg-white/20 blur-xl rounded-full"></div>
                                     </button>
                                 ) : (
-                                    <button onClick={() => handleClockAction('OUT')} className="w-36 h-36 rounded-full flex flex-col items-center justify-center shadow-2xl transition-all hover:scale-105 active:scale-95 bg-gradient-to-br from-rose-500 to-rose-700 text-white border-4 border-rose-100 group relative overflow-hidden">
+                                    <button 
+                                        onClick={() => handleClockAction('OUT')} 
+                                        disabled={isClocking}
+                                        className={`w-36 h-36 rounded-full flex flex-col items-center justify-center shadow-2xl transition-all hover:scale-105 active:scale-95 bg-gradient-to-br from-rose-500 to-rose-700 text-white border-4 border-rose-100 group relative overflow-hidden ${isClocking ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                    >
                                         <div className="absolute inset-0 bg-white opacity-0 group-hover:opacity-10 transition-opacity"></div>
-                                        <ClockIcon className="w-10 h-10 mb-1" /><span className="font-black text-xl tracking-tight">יציאה</span>
+                                        <ClockIcon className="w-10 h-10 mb-1" />
+                                        <span className="font-black text-xl tracking-tight">
+                                            {isClocking ? 'שומר...' : 'יציאה'}
+                                        </span>
                                         <div className="mt-1 text-[10px] font-bold bg-white/20 px-2 py-0.5 rounded-full animate-pulse">במשמרת</div>
                                     </button>
                                 )}
                             </div>
                             <div className="flex flex-col items-center gap-2">
                                 <div className="flex items-center gap-2">
-                                    <input type="checkbox" id="wfhToggle" checked={isWFH} onChange={e => setIsWFH(e.target.checked)} disabled={isClockedIn} className="w-5 h-5 text-primary border-slate-300 rounded focus:ring-primary transition-colors cursor-pointer" />
+                                    <input type="checkbox" id="wfhToggle" checked={isWFH} onChange={e => setIsWFH(e.target.checked)} disabled={isClockedIn || isClocking} className="w-5 h-5 text-primary border-slate-300 rounded focus:ring-primary transition-colors cursor-pointer" />
                                     <label htmlFor="wfhToggle" className="text-sm font-black text-slate-600 cursor-pointer select-none flex items-center gap-1">🏠 עבודה מהבית היום</label>
                                 </div>
                                 {isClockedIn && (
                                     <div className="text-sm font-black text-green-600 bg-green-50 px-3 py-1 rounded-lg border border-green-100 flex items-center gap-2 mt-1 shadow-sm">
                                         <span className="w-2 h-2 rounded-full bg-green-500 animate-ping"></span>זמן נוכחי: {liveDuration}
+                                    </div>
+                                )}
+                                {errorMessage && (
+                                    <div className={`text-xs font-bold px-3 py-2 rounded-lg border mt-1 max-w-xs text-center ${
+                                        errorMessage.includes('נשמרה') 
+                                            ? 'bg-blue-50 text-blue-700 border-blue-200' 
+                                            : 'bg-red-50 text-red-700 border-red-200'
+                                    }`}>
+                                        {errorMessage}
                                     </div>
                                 )}
                             </div>
@@ -974,12 +1240,14 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
                     <button onClick={() => setActiveTab('MY_PORTAL')} className={`flex-1 sm:flex-none px-8 py-2.5 rounded-lg font-black transition-all text-sm ${activeTab === 'MY_PORTAL' ? 'bg-white text-primary shadow-md' : 'text-slate-500 hover:text-slate-700'}`}>הנוכחות שלי</button>
                     {isManager && (<button onClick={() => setActiveTab('ADMIN_DASHBOARD')} className={`flex-1 sm:flex-none px-8 py-2.5 rounded-lg font-black transition-all text-sm ${activeTab === 'ADMIN_DASHBOARD' ? 'bg-white text-primary shadow-md' : 'text-slate-500 hover:text-slate-700'}`}>דוחות שכר (מנהל)</button>)}
                 </div>
-                <div className="flex items-center gap-3 bg-white p-2 rounded-xl border border-slate-200 shadow-sm transition-all hover:shadow-md">
-                    <span className="text-xs font-black text-slate-400 ps-2 uppercase tracking-widest border-l border-slate-100 ml-2">מציג כ:</span>
-                    <select value={currentEmployeeId} onChange={(e) => setCurrentEmployeeId(e.target.value)} className="text-sm border-none focus:ring-0 py-1 pe-10 font-black text-slate-700 bg-transparent cursor-pointer">
-                        {employees.map(e => <option key={e.id} value={e.id}>{e.name} ({e.roleType === 'ADMIN' ? 'מנהל' : 'עובד'})</option>)}
-                    </select>
-                </div>
+                {isUserManager && (
+                    <div className="flex items-center gap-3 bg-white p-2 rounded-xl border border-slate-200 shadow-sm transition-all hover:shadow-md">
+                        <span className="text-xs font-black text-slate-400 ps-2 uppercase tracking-widest border-l border-slate-100 ml-2">מציג כ:</span>
+                        <select value={currentEmployeeId} onChange={(e) => setCurrentEmployeeId(e.target.value)} className="text-sm border-none focus:ring-0 py-1 pe-10 font-black text-slate-700 bg-transparent cursor-pointer">
+                            {employees.map(e => <option key={e.id} value={e.id}>{e.name} ({e.roleType === 'ADMIN' ? 'מנהל' : e.roleType === 'MANAGER' ? 'מנהל' : 'עובד'})</option>)}
+                        </select>
+                    </div>
+                )}
             </div>
             {activeTab === 'MY_PORTAL' ? renderMyPortal() : renderAdminDashboard()}
             {correctionModalOpen && selectedDateForCorrection && (

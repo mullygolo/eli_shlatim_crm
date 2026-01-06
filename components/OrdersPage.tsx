@@ -5,12 +5,7 @@ import { PlusIcon, EditIcon, DeleteIcon, WhatsAppIcon, EmailIcon, PhoneIcon, Not
 import Modal from './Modal';
 import { calculateOrderTotals, calculateDueDate } from '../utils/calculations';
 import MultiSelectFilter from './MultiSelectFilter';
-
-// Define saveOrderToMongo inline
-const saveOrderToMongo = async (order: Order): Promise<void> => {
-    console.log('Mock saving order to DB:', order.id);
-    await new Promise(resolve => setTimeout(resolve, 500));
-};
+import * as mongoService from '../services/mongoService';
 
 interface OrdersPageProps {
     orders: Order[];
@@ -944,32 +939,40 @@ const OrderForm: React.FC<{
         }));
     };
     
-    const handleSaveNewSupplier = (supplierData: { name: string; contactPerson: string; email: string; phone: string }) => {
-        const newSupplier: Supplier = {
-            id: `supp_${Date.now()}`,
-            name: supplierData.name || 'ספק חדש',
-            paymentTerms: 'שוטף 30',
-            contacts: [{
-                id: `sc_${Date.now()}`,
-                name: supplierData.contactPerson || '',
-                email: supplierData.email || '',
-                phone: supplierData.phone || '',
-                role: 'איש קשר ראשי',
-                isBillingContact: false,
-                isDefault: true
-            }]
-        };
-        setSuppliers(prev => [...prev, newSupplier]);
-        
-        if (newServiceSupplierFor !== null) {
-            const newServices = [...formData.additionalServices];
-            newServices[newServiceSupplierFor].supplierId = newSupplier.id;
-            setFormData(prev => ({ ...prev, additionalServices: newServices }));
-        }
+    const handleSaveNewSupplier = async (supplierData: { name: string; contactPerson: string; email: string; phone: string }) => {
+        try {
+            const newSupplier: Supplier = {
+                id: `supp_${Date.now()}`,
+                name: supplierData.name || 'ספק חדש',
+                paymentTerms: 'שוטף 30',
+                contacts: [{
+                    id: `sc_${Date.now()}`,
+                    name: supplierData.contactPerson || '',
+                    email: supplierData.email || '',
+                    phone: supplierData.phone || '',
+                    role: 'איש קשר ראשי',
+                    isBillingContact: false,
+                    isDefault: true
+                }]
+            };
+            
+            // Save to MongoDB
+            const savedSupplier = await mongoService.createSupplier(newSupplier);
+            setSuppliers(prev => [...prev, savedSupplier]);
+            
+            if (newServiceSupplierFor !== null) {
+                const newServices = [...formData.additionalServices];
+                newServices[newServiceSupplierFor].supplierId = savedSupplier.id;
+                setFormData(prev => ({ ...prev, additionalServices: newServices }));
+            }
 
-        addActivity(`ספק חדש נוסף: ${newSupplier.name}`);
-        setIsNewSupplierModalOpen(false);
-        setNewServiceSupplierFor(null);
+            addActivity(`ספק חדש נוסף: ${savedSupplier.name}`);
+            setIsNewSupplierModalOpen(false);
+            setNewServiceSupplierFor(null);
+        } catch (error) {
+            console.error('Error creating supplier:', error);
+            alert('שגיאה בשמירת הספק. אנא נסה שוב.');
+        }
     };
 
     const handleAddTimelineEvent = () => {
@@ -1242,35 +1245,45 @@ const OrderForm: React.FC<{
                  alert("אנא הזן שם חברה");
                  return;
              }
-             const newContact: Contact = {
-                id: `cont_${Date.now()}`,
-                name: newCustomerData.contactName || 'איש קשר ראשי',
-                email: newCustomerData.email || '',
-                phone: newCustomerData.phone || '',
-                role: 'איש קשר ראשי',
-                isBillingContact: true,
-                isDefault: true,
-            };
+             try {
+                const newContact: Contact = {
+                    id: `cont_${Date.now()}`,
+                    name: newCustomerData.contactName || 'איש קשר ראשי',
+                    email: newCustomerData.email || '',
+                    phone: newCustomerData.phone || '',
+                    role: 'איש קשר ראשי',
+                    isBillingContact: true,
+                    isDefault: true,
+                };
 
-            const newCustomer: Customer = {
-                id: `cust_${Date.now()}`,
-                name: newCustomerData.name,
-                website: '',
-                address: newCustomerData.address || '',
-                category: newCustomerData.category || 'לקוח כללי',
-                notes: 'נוצר מתוך טופס הזמנה',
-                isSpecial: false,
-                contacts: [newContact],
-                createdAt: new Date(),
-                paymentMethod: newCustomerData.paymentMethod as PaymentMethod,
-                paymentTerms: newCustomerData.paymentTerms,
-            };
+                const newCustomer: Customer = {
+                    id: `cust_${Date.now()}`,
+                    name: newCustomerData.name,
+                    website: '',
+                    address: newCustomerData.address || '',
+                    category: newCustomerData.category || 'לקוח כללי',
+                    notes: 'נוצר מתוך טופס הזמנה',
+                    isSpecial: false,
+                    contacts: [newContact],
+                    createdAt: new Date(),
+                    paymentMethod: newCustomerData.paymentMethod as PaymentMethod,
+                    paymentTerms: newCustomerData.paymentTerms,
+                };
 
-            setCustomers(prev => [...prev, newCustomer]);
-            addActivity(`לקוח חדש נוצר מתוך הזמנה: ${newCustomer.name}`);
-            
-            currentCustomerId = newCustomer.id;
-            currentContactId = newContact.id;
+                // Save to MongoDB
+                const savedCustomer = await mongoService.createCustomer(newCustomer);
+                
+                // Update local state with the saved customer
+                setCustomers(prev => [...prev, savedCustomer]);
+                addActivity(`לקוח חדש נוצר מתוך הזמנה: ${savedCustomer.name}`);
+                
+                currentCustomerId = savedCustomer.id;
+                currentContactId = newContact.id;
+            } catch (error) {
+                console.error('Error creating customer:', error);
+                alert('שגיאה ביצירת הלקוח. אנא נסה שוב.');
+                return;
+            }
         } else {
              if (!currentCustomerId) {
                  alert("אנא בחר לקוח");
@@ -1342,10 +1355,6 @@ const OrderForm: React.FC<{
         };
 
         onSave(finalOrder);
-
-        if (!order) {
-             await saveOrderToMongo(finalOrder);
-        }
     };
     
     const currentStatusConfig = statusConfigs.find(c => c.label === formData.orderStatus);
@@ -2015,7 +2024,7 @@ const OrderForm: React.FC<{
                                             <div className="mt-1 text-xs flex flex-col gap-1">
                                                 <div className="text-slate-500">
                                                     נוצר ע"י {task.user} ב-{task.timestamp.toLocaleString('he-IL')}
-                                                    {assigneeName && <span className="mx-1 text-slate-400">-></span>}
+                                                    {assigneeName && <span className="mx-1 text-slate-400">→</span>}
                                                     {assigneeName && <span>שוייך ל: <strong>{assigneeName}</strong></span>}
                                                 </div>
                                                 {task.dueDate && (

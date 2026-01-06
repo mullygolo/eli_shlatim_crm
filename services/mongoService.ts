@@ -1,43 +1,401 @@
+import {
+    Customer, Order, Supplier, Employee, Activity, OrderStatusConfiguration,
+    FixedExpense, VariableExpense, Loan, Debt, Receivable, EquityInvestment,
+    AttendanceRecord, ManualEvent
+} from '../types';
 
-import { Order } from '../types';
+// API Base URL - use relative path in production
+const API_BASE_URL = import.meta.env.VITE_API_URL || '/api';
 
-/**
- * MongoDB Connection Configuration
- * ------------------------------
- * WARNING: DO NOT USE THIS CONNECTION STRING DIRECTLY IN THE BROWSER (CLIENT-SIDE).
- * Database credentials must be kept on a secure backend server (Node.js, Python, Go, etc.).
- * 
- * Target DB Connection:
- * URI: mongodb+srv://daniel_db_user:danny123@elishlatim.geyfv2c.mongodb.net/elishlatim?retryWrites=true&w=majority&appName=Compass
- * Collection: resevations
- */
-
-const MONGO_API_URL = ''; // If you have a backend API, put the URL here.
-
-export const saveOrderToMongo = async (order: Order): Promise<void> => {
-    console.group('MongoDB Save Operation (Simulation)');
-    console.log('Attempting to save order to collection: "resevations"');
-    console.log('Order ID:', order.id);
-    console.log('Order Data:', order);
+// Helper function to make API requests
+async function apiRequest<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
+    const token = localStorage.getItem('authToken');
     
-    try {
-        // In a real implementation with a backend, this would look like:
-        /*
-        const response = await fetch('/api/orders', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(order)
-        });
-        if (!response.ok) throw new Error('Failed to save to DB');
-        */
-
-        // Simulating network delay
-        await new Promise(resolve => setTimeout(resolve, 500));
-        console.log('✅ Order successfully "saved" (Logged to console)');
-        
-    } catch (error) {
-        console.error('❌ Error saving order to MongoDB:', error);
-    } finally {
-        console.groupEnd();
+    const headers: HeadersInit = {
+        'Content-Type': 'application/json',
+        ...options.headers,
+    };
+    
+    if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
     }
-};
+
+    const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+        headers,
+        ...options,
+    });
+
+    if (!response.ok) {
+        throw new Error(`API request failed: ${response.statusText}`);
+    }
+
+    if (response.status === 204) {
+        return undefined as T;
+    }
+
+    return response.json();
+}
+
+// ==================== CUSTOMERS ====================
+export async function getCustomers(): Promise<Customer[]> {
+    return apiRequest<Customer[]>('/customers');
+}
+
+export async function createCustomer(customer: Customer): Promise<Customer> {
+    return apiRequest<Customer>('/customers', {
+        method: 'POST',
+        body: JSON.stringify(customer),
+    });
+}
+
+export async function updateCustomer(customer: Customer): Promise<Customer> {
+    return apiRequest<Customer>(`/customers/${customer.id}`, {
+        method: 'PUT',
+        body: JSON.stringify(customer),
+    });
+}
+
+export async function deleteCustomer(customerId: string): Promise<void> {
+    return apiRequest<void>(`/customers/${customerId}`, {
+        method: 'DELETE',
+    });
+}
+
+// ==================== ORDERS ====================
+export async function getOrders(): Promise<Order[]> {
+    return apiRequest<Order[]>('/orders');
+}
+
+export async function createOrder(order: Order): Promise<Order> {
+    return apiRequest<Order>('/orders', {
+        method: 'POST',
+        body: JSON.stringify(order),
+    });
+}
+
+export async function updateOrder(order: Order): Promise<Order> {
+    return apiRequest<Order>(`/orders/${order.id}`, {
+        method: 'PUT',
+        body: JSON.stringify(order),
+    });
+}
+
+export async function deleteOrder(orderId: string): Promise<void> {
+    return apiRequest<void>(`/orders/${orderId}`, {
+        method: 'DELETE',
+    });
+}
+
+// ==================== SUPPLIERS ====================
+export async function getSuppliers(): Promise<Supplier[]> {
+    return apiRequest<Supplier[]>('/suppliers');
+}
+
+export async function createSupplier(supplier: Supplier): Promise<Supplier> {
+    return apiRequest<Supplier>('/suppliers', {
+        method: 'POST',
+        body: JSON.stringify(supplier),
+    });
+}
+
+export async function updateSupplier(supplier: Supplier): Promise<Supplier> {
+    return apiRequest<Supplier>(`/suppliers/${supplier.id}`, {
+        method: 'PUT',
+        body: JSON.stringify(supplier),
+    });
+}
+
+export async function deleteSupplier(supplierId: string): Promise<void> {
+    return apiRequest<void>(`/suppliers/${supplierId}`, {
+        method: 'DELETE',
+    });
+}
+
+// ==================== EMPLOYEES ====================
+export async function getEmployees(): Promise<Employee[]> {
+    return apiRequest<Employee[]>('/employees');
+}
+
+export async function createEmployee(employee: Employee): Promise<Employee> {
+    return apiRequest<Employee>('/employees', {
+        method: 'POST',
+        body: JSON.stringify(employee),
+    });
+}
+
+export async function updateEmployee(employee: Employee): Promise<Employee> {
+    return apiRequest<Employee>(`/employees/${employee.id}`, {
+        method: 'PUT',
+        body: JSON.stringify(employee),
+    });
+}
+
+export async function deleteEmployee(employeeId: string): Promise<void> {
+    return apiRequest<void>(`/employees/${employeeId}`, {
+        method: 'DELETE',
+    });
+}
+
+// ==================== ACTIVITIES ====================
+export async function getActivities(): Promise<Activity[]> {
+    return apiRequest<Activity[]>('/activities');
+}
+
+export async function createActivity(activity: Activity): Promise<Activity> {
+    return apiRequest<Activity>('/activities', {
+        method: 'POST',
+        body: JSON.stringify(activity),
+    });
+}
+
+// ==================== STATUS CONFIGS ====================
+export async function getStatusConfigs(): Promise<OrderStatusConfiguration[]> {
+    return apiRequest<OrderStatusConfiguration[]>('/status-configs');
+}
+
+export async function updateStatusConfigs(configs: OrderStatusConfiguration[]): Promise<OrderStatusConfiguration[]> {
+    return apiRequest<OrderStatusConfiguration[]>('/status-configs', {
+        method: 'PUT',
+        body: JSON.stringify(configs),
+    });
+}
+
+// ==================== FIXED EXPENSES ====================
+export async function getFixedExpenses(): Promise<FixedExpense[]> {
+    return apiRequest<FixedExpense[]>('/finance/fixed-expenses');
+}
+
+export async function createFixedExpense(expense: FixedExpense): Promise<FixedExpense> {
+    return apiRequest<FixedExpense>('/finance/fixed-expenses', {
+        method: 'POST',
+        body: JSON.stringify(expense),
+    });
+}
+
+export async function updateFixedExpense(expense: FixedExpense): Promise<FixedExpense> {
+    return apiRequest<FixedExpense>(`/finance/fixed-expenses/${expense.id}`, {
+        method: 'PUT',
+        body: JSON.stringify(expense),
+    });
+}
+
+export async function deleteFixedExpense(expenseId: string): Promise<void> {
+    return apiRequest<void>(`/finance/fixed-expenses/${expenseId}`, {
+        method: 'DELETE',
+    });
+}
+
+// ==================== VARIABLE EXPENSES ====================
+export async function getVariableExpenses(): Promise<VariableExpense[]> {
+    return apiRequest<VariableExpense[]>('/finance/variable-expenses');
+}
+
+export async function createVariableExpense(expense: VariableExpense): Promise<VariableExpense> {
+    return apiRequest<VariableExpense>('/finance/variable-expenses', {
+        method: 'POST',
+        body: JSON.stringify(expense),
+    });
+}
+
+export async function updateVariableExpense(expense: VariableExpense): Promise<VariableExpense> {
+    return apiRequest<VariableExpense>(`/finance/variable-expenses/${expense.id}`, {
+        method: 'PUT',
+        body: JSON.stringify(expense),
+    });
+}
+
+export async function deleteVariableExpense(expenseId: string): Promise<void> {
+    return apiRequest<void>(`/finance/variable-expenses/${expenseId}`, {
+        method: 'DELETE',
+    });
+}
+
+// ==================== LOANS ====================
+export async function getLoans(): Promise<Loan[]> {
+    return apiRequest<Loan[]>('/finance/loans');
+}
+
+export async function createLoan(loan: Loan): Promise<Loan> {
+    return apiRequest<Loan>('/finance/loans', {
+        method: 'POST',
+        body: JSON.stringify(loan),
+    });
+}
+
+export async function updateLoan(loan: Loan): Promise<Loan> {
+    return apiRequest<Loan>(`/finance/loans/${loan.id}`, {
+        method: 'PUT',
+        body: JSON.stringify(loan),
+    });
+}
+
+export async function deleteLoan(loanId: string): Promise<void> {
+    return apiRequest<void>(`/finance/loans/${loanId}`, {
+        method: 'DELETE',
+    });
+}
+
+// ==================== DEBTS ====================
+export async function getDebts(): Promise<Debt[]> {
+    return apiRequest<Debt[]>('/finance/debts');
+}
+
+export async function createDebt(debt: Debt): Promise<Debt> {
+    return apiRequest<Debt>('/finance/debts', {
+        method: 'POST',
+        body: JSON.stringify(debt),
+    });
+}
+
+export async function updateDebt(debt: Debt): Promise<Debt> {
+    return apiRequest<Debt>(`/finance/debts/${debt.id}`, {
+        method: 'PUT',
+        body: JSON.stringify(debt),
+    });
+}
+
+export async function deleteDebt(debtId: string): Promise<void> {
+    return apiRequest<void>(`/finance/debts/${debtId}`, {
+        method: 'DELETE',
+    });
+}
+
+// ==================== RECEIVABLES ====================
+export async function getReceivables(): Promise<Receivable[]> {
+    return apiRequest<Receivable[]>('/finance/receivables');
+}
+
+export async function createReceivable(receivable: Receivable): Promise<Receivable> {
+    return apiRequest<Receivable>('/finance/receivables', {
+        method: 'POST',
+        body: JSON.stringify(receivable),
+    });
+}
+
+export async function updateReceivable(receivable: Receivable): Promise<Receivable> {
+    return apiRequest<Receivable>(`/finance/receivables/${receivable.id}`, {
+        method: 'PUT',
+        body: JSON.stringify(receivable),
+    });
+}
+
+export async function deleteReceivable(receivableId: string): Promise<void> {
+    return apiRequest<void>(`/finance/receivables/${receivableId}`, {
+        method: 'DELETE',
+    });
+}
+
+// ==================== EQUITY ====================
+export async function getEquity(): Promise<EquityInvestment[]> {
+    return apiRequest<EquityInvestment[]>('/finance/equity');
+}
+
+export async function createEquity(equity: EquityInvestment): Promise<EquityInvestment> {
+    return apiRequest<EquityInvestment>('/finance/equity', {
+        method: 'POST',
+        body: JSON.stringify(equity),
+    });
+}
+
+export async function updateEquity(equity: EquityInvestment): Promise<EquityInvestment> {
+    return apiRequest<EquityInvestment>(`/finance/equity/${equity.id}`, {
+        method: 'PUT',
+        body: JSON.stringify(equity),
+    });
+}
+
+export async function deleteEquity(equityId: string): Promise<void> {
+    return apiRequest<void>(`/finance/equity/${equityId}`, {
+        method: 'DELETE',
+    });
+}
+
+// ==================== ATTENDANCE RECORDS ====================
+export async function getAttendanceRecords(): Promise<AttendanceRecord[]> {
+    return apiRequest<AttendanceRecord[]>('/attendance');
+}
+
+export async function createAttendanceRecord(record: AttendanceRecord): Promise<AttendanceRecord> {
+    return apiRequest<AttendanceRecord>('/attendance', {
+        method: 'POST',
+        body: JSON.stringify(record),
+    });
+}
+
+export async function updateAttendanceRecord(record: AttendanceRecord): Promise<AttendanceRecord> {
+    return apiRequest<AttendanceRecord>(`/attendance/${record.id}`, {
+        method: 'PUT',
+        body: JSON.stringify(record),
+    });
+}
+
+export async function clockIn(employeeId: string, isWFH: boolean = false): Promise<AttendanceRecord> {
+    return apiRequest<AttendanceRecord>('/attendance/clock-in', {
+        method: 'POST',
+        body: JSON.stringify({ employeeId, isWFH }),
+    });
+}
+
+export async function clockOut(recordId: string): Promise<AttendanceRecord> {
+    // #region agent log
+    fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'services/mongoService.ts:clockOut',message:'Frontend clockOut called',data:{recordId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+    // #endregion
+    try {
+        const result = await apiRequest<AttendanceRecord>('/attendance/clock-out', {
+            method: 'POST',
+            body: JSON.stringify({ recordId }),
+        });
+        // #region agent log
+        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'services/mongoService.ts:clockOut',message:'Frontend clockOut success',data:{recordId,resultId:result?.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+        // #endregion
+        return result;
+    } catch (error: any) {
+        // #region agent log
+        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'services/mongoService.ts:clockOut:catch',message:'Frontend clockOut error',data:{recordId,errorMessage:error?.message,errorString:String(error)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+        // #endregion
+        throw error;
+    }
+}
+
+export async function deleteAttendanceRecord(recordId: string): Promise<void> {
+    return apiRequest<void>(`/attendance/${recordId}`, {
+        method: 'DELETE',
+    });
+}
+
+// ==================== MANUAL EVENTS ====================
+export async function getManualEvents(): Promise<ManualEvent[]> {
+    return apiRequest<ManualEvent[]>('/manual-events');
+}
+
+export async function createManualEvent(event: ManualEvent): Promise<ManualEvent> {
+    return apiRequest<ManualEvent>('/manual-events', {
+        method: 'POST',
+        body: JSON.stringify(event),
+    });
+}
+
+export async function deleteManualEvent(eventId: string): Promise<void> {
+    return apiRequest<void>(`/manual-events/${eventId}`, {
+        method: 'DELETE',
+    });
+}
+
+// ==================== SETTINGS ====================
+export interface Settings {
+    vatRate: number;
+    monthlyGoal: number;
+    systemMessage: string;
+    payrollOverrides: Record<string, { finalGross?: number; finalEmployerCost?: number }>;
+}
+
+export async function getSettings(): Promise<Settings> {
+    return apiRequest<Settings>('/settings');
+}
+
+export async function updateSettings(settings: Settings): Promise<Settings> {
+    return apiRequest<Settings>('/settings', {
+        method: 'PUT',
+        body: JSON.stringify(settings),
+    });
+}

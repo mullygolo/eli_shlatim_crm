@@ -4,6 +4,7 @@ import { PlusIcon, EditIcon, DeleteIcon, ImportIcon, WhatsAppIcon, EmailIcon, Ph
 import Modal from './Modal';
 import { CUSTOMER_CATEGORIES, PAYMENT_TERMS_OPTIONS } from '../constants';
 import { calculateOrderTotals } from '../utils/calculations';
+import * as mongoService from '../services/mongoService';
 
 // Added missing interface definition for CustomersPageProps
 interface CustomersPageProps {
@@ -1044,37 +1045,46 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
         performCreateCustomer(customerData, contactData);
     };
 
-    const performCreateCustomer = (customerData: Partial<Customer>, contactData: Partial<Contact>) => {
-        const newContact: Contact = {
-            id: `cont_${Date.now()}`,
-            name: contactData.name || '',
-            email: contactData.email || '',
-            phone: contactData.phone || '',
-            role: contactData.role || 'איש קשר ראשי',
-            isBillingContact: true,
-            isDefault: true // Default to true for the first contact
-        };
+    const performCreateCustomer = async (customerData: Partial<Customer>, contactData: Partial<Contact>) => {
+        try {
+            const newContact: Contact = {
+                id: `cont_${Date.now()}`,
+                name: contactData.name || '',
+                email: contactData.email || '',
+                phone: contactData.phone || '',
+                role: contactData.role || 'איש קשר ראשי',
+                isBillingContact: true,
+                isDefault: true // Default to true for the first contact
+            };
 
-        const newCustomer: Customer = {
-            id: `cust_${Date.now()}`,
-            name: customerData.name || 'לקוח חדש',
-            businessId: customerData.businessId || '',
-            website: customerData.website || '',
-            address: customerData.address || '',
-            category: customerData.category || '',
-            notes: customerData.notes || '',
-            isSpecial: !!customerData.isSpecial,
-            contacts: [newContact],
-            createdAt: new Date(),
-            paymentMethod: customerData.paymentMethod || PaymentMethod.BANK_TRANSFER,
-            paymentTerms: customerData.paymentTerms || 'שוטף 30',
-        };
-        
-        setCustomers(prev => [...prev, newCustomer]);
-        addActivity(`לקוח חדש נוסף: ${newCustomer.name}`);
-        setIsNewCustomerModalOpen(false);
-        setPendingNewCustomer(null);
-        setDuplicateFound(null);
+            const newCustomer: Customer = {
+                id: `cust_${Date.now()}`,
+                name: customerData.name || 'לקוח חדש',
+                businessId: customerData.businessId || '',
+                website: customerData.website || '',
+                address: customerData.address || '',
+                category: customerData.category || '',
+                notes: customerData.notes || '',
+                isSpecial: !!customerData.isSpecial,
+                contacts: [newContact],
+                createdAt: new Date(),
+                paymentMethod: customerData.paymentMethod || PaymentMethod.BANK_TRANSFER,
+                paymentTerms: customerData.paymentTerms || 'שוטף 30',
+            };
+            
+            // Save to MongoDB
+            const savedCustomer = await mongoService.createCustomer(newCustomer);
+            
+            // Update local state with the saved customer (which may have MongoDB _id)
+            setCustomers(prev => [...prev, savedCustomer]);
+            addActivity(`לקוח חדש נוסף: ${savedCustomer.name}`);
+            setIsNewCustomerModalOpen(false);
+            setPendingNewCustomer(null);
+            setDuplicateFound(null);
+        } catch (error) {
+            console.error('Error creating customer:', error);
+            alert('שגיאה בשמירת הלקוח. אנא נסה שוב.');
+        }
     };
 
     const handleMergeWithExisting = () => {
@@ -1171,10 +1181,22 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
         setViewingCustomer(null);
     };
 
-    const handleImportCustomers = (newCustomers: Customer[]) => {
-        setCustomers(prev => [...prev, ...newCustomers]);
-        addActivity(`${newCustomers.length} לקוחות יובאו בהצלחה`);
-        setIsImportModalOpen(false);
+    const handleImportCustomers = async (newCustomers: Customer[]) => {
+        try {
+            // Save all customers to MongoDB
+            const savedCustomers = await Promise.all(
+                newCustomers.map(customer => mongoService.createCustomer(customer))
+            );
+            
+            // Update local state with saved customers
+            setCustomers(prev => [...prev, ...savedCustomers]);
+            addActivity(`${savedCustomers.length} לקוחות יובאו בהצלחה`);
+            setIsImportModalOpen(false);
+        } catch (error) {
+            console.error('Error importing customers:', error);
+            alert('שגיאה בייבוא הלקוחות. חלק מהלקוחות אולי לא נשמרו.');
+            setIsImportModalOpen(false);
+        }
     };
 
     const customerOrders = useMemo(() => {

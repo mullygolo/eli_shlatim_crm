@@ -205,25 +205,119 @@ const PnLReport: React.FC<PnLReportProps> = ({
                 date: displayDate 
             });
             
-            pnlMap[key].vatOutput += vatOutAmount;
-            if (vatOutAmount > 0) {
-                pnlMap[key].vatOutputItems.push({ 
-                    name: `מע"מ עסקאות: ${order.orderNumber}`, 
-                    amount: vatOutAmount, 
-                    date: displayDate, 
-                    subtext: `${currentVat}% מתוך ₪${totals.totalAmount.toLocaleString()}` 
+            // VAT is now calculated on cash flow basis (when payments are made), not on order date
+            // This will be processed in sections 1a and 1b below
+        });
+        
+        // 1a. Process Customer Payments (VAT Output - Cash Flow Basis)
+        orders.forEach(order => {
+            const config = statusConfigs.find(c => c.label === order.orderStatus);
+            if (!config?.isActiveDeal) return;
+            
+            const currentVat = order.vatRate ?? vatRate;
+            const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
+            
+            // Process customer payments
+            order.payments?.forEach(payment => {
+                if (payment.status && invalidStatuses.includes(payment.status)) return;
+                
+                const date = new Date(payment.date);
+                const key = getMonthKey(date);
+                if (!pnlMap[key]) return;
+                
+                // Calculate VAT from actual payment (cash flow basis)
+                const netAmount = payment.amount / (1 + currentVat / 100);
+                const vatAmount = payment.amount - netAmount;
+                
+                if (vatAmount > 0.01) {
+                    pnlMap[key].vatOutput += vatAmount;
+                    pnlMap[key].vatOutputItems.push({
+                        name: `מע"מ עסקאות (תשלום מלקוח): ${order.orderNumber}`,
+                        amount: vatAmount,
+                        date: payment.date,
+                        subtext: `חולץ מתשלום ₪${payment.amount.toLocaleString()}`
+                    });
+                }
+            });
+        });
+        
+        // 1b. Process Supplier Payments (VAT Input - Cash Flow Basis)
+        orders.forEach(order => {
+            const config = statusConfigs.find(c => c.label === order.orderStatus);
+            if (!config?.isActiveDeal) return;
+            
+            const currentVat = order.vatRate ?? vatRate;
+            const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
+            
+            // Process supplier payments from line items
+            order.lineItems.forEach(li => {
+                li.supplierPayments?.forEach(payment => {
+                    if (payment.status && invalidStatuses.includes(payment.status)) return;
+                    
+                    const date = new Date(payment.date);
+                    const key = getMonthKey(date);
+                    if (!pnlMap[key]) return;
+                    
+                    // Calculate VAT from actual payment (cash flow basis)
+                    const netAmount = payment.amount / (1 + currentVat / 100);
+                    const vatAmount = payment.amount - netAmount;
+                    
+                    // Add net amount to debtPayments (cash flow - without VAT)
+                    // VAT is handled separately in vatInput and vatCashFlowAdjustment
+                    pnlMap[key].debtPayments += netAmount;
+                    pnlMap[key].debtPaymentItems.push({
+                        name: `תשלום לספק: ${order.orderNumber}`,
+                        amount: netAmount,
+                        date: payment.date,
+                        subtext: `פריט: ${li.description}`
+                    });
+                    
+                    if (vatAmount > 0.01) {
+                        pnlMap[key].vatInput += vatAmount;
+                        pnlMap[key].vatInputItems.push({
+                            name: `מע"מ תשומות (תשלום לספק): ${order.orderNumber}`,
+                            amount: vatAmount,
+                            date: payment.date,
+                            subtext: `חולץ מתשלום ₪${payment.amount.toLocaleString()}`
+                        });
+                    }
                 });
-            }
-
-            pnlMap[key].vatInput += vatInAmount;
-            if (vatInAmount > 0) {
-                pnlMap[key].vatInputItems.push({ 
-                    name: `מע"מ תשומות ייצור: ${order.orderNumber}`, 
-                    amount: vatInAmount, 
-                    date: displayDate, 
-                    subtext: `${currentVat}% מתוך ₪${totals.totalCost.toLocaleString()}` 
+            });
+            
+            // Process supplier payments from additional services
+            order.additionalServices.forEach(as => {
+                as.supplierPayments?.forEach(payment => {
+                    if (payment.status && invalidStatuses.includes(payment.status)) return;
+                    
+                    const date = new Date(payment.date);
+                    const key = getMonthKey(date);
+                    if (!pnlMap[key]) return;
+                    
+                    // Calculate VAT from actual payment (cash flow basis)
+                    const netAmount = payment.amount / (1 + currentVat / 100);
+                    const vatAmount = payment.amount - netAmount;
+                    
+                    // Add net amount to debtPayments (cash flow - without VAT)
+                    // VAT is handled separately in vatInput and vatCashFlowAdjustment
+                    pnlMap[key].debtPayments += netAmount;
+                    pnlMap[key].debtPaymentItems.push({
+                        name: `תשלום לספק: ${order.orderNumber}`,
+                        amount: netAmount,
+                        date: payment.date,
+                        subtext: `שירות: ${as.description}`
+                    });
+                    
+                    if (vatAmount > 0.01) {
+                        pnlMap[key].vatInput += vatAmount;
+                        pnlMap[key].vatInputItems.push({
+                            name: `מע"מ תשומות (תשלום לספק): ${order.orderNumber}`,
+                            amount: vatAmount,
+                            date: payment.date,
+                            subtext: `חולץ מתשלום ₪${payment.amount.toLocaleString()}`
+                        });
+                    }
                 });
-            }
+            });
         });
 
         // 2. Process Fixed Expenses
@@ -307,19 +401,98 @@ const PnLReport: React.FC<PnLReportProps> = ({
 
         // 5. Loan Financing vs Principal
         loans.forEach(loan => {
-            if (!loan.schedule) return;
-            loan.schedule.forEach(entry => {
-                if (!entry.isPaid) return;
-                const date = new Date(entry.dueDate);
-                const key = getMonthKey(date);
-                if (!pnlMap[key]) return;
+            let loanProcessed = false;
+            
+            // Handle loans with schedule
+            if (loan.schedule && loan.schedule.length > 0) {
+                const today = new Date();
+                today.setHours(0, 0, 0, 0);
                 
-                pnlMap[key].financingExpenses += entry.interestAmount;
-                pnlMap[key].financingItems.push({ name: `ריבית: ${loan.lenderName}`, amount: entry.interestAmount, date: date });
+                loan.schedule.forEach(entry => {
+                    const date = new Date(entry.dueDate);
+                    const dateClean = new Date(date);
+                    dateClean.setHours(0, 0, 0, 0);
+                    const key = getMonthKey(date);
+                    
+                    // Show payments that are within the selected date range
+                    // Include both paid and unpaid entries if they're in the date range
+                    if (!pnlMap[key]) return;
+                    
+                    // Include if: paid OR past due date OR within selected date range
+                    const shouldInclude = entry.isPaid || dateClean <= today || true; // Always include if in date range
+                    if (!shouldInclude) return;
+                    
+                    loanProcessed = true;
+                    
+                    // Calculate financing expenses: interest + fees
+                    const interestAmount = entry.interestAmount || 0;
+                    const feesAmount = entry.fees || 0;
+                    const totalFinancingCost = interestAmount + feesAmount;
+                    
+                    pnlMap[key].financingExpenses += totalFinancingCost;
+                    
+                    // Add interest item if exists
+                    if (interestAmount > 0) {
+                        pnlMap[key].financingItems.push({ name: `ריבית: ${loan.lenderName}`, amount: interestAmount, date: date });
+                    }
+                    
+                    // Add fees item if exists
+                    if (feesAmount > 0) {
+                        pnlMap[key].financingItems.push({ name: `עמלה: ${loan.lenderName}`, amount: feesAmount, date: date });
+                    }
+                    
+                    pnlMap[key].loanPrincipal += entry.principalAmount || 0;
+                    pnlMap[key].loanPrincipalItems.push({ name: `קרן: ${loan.lenderName}`, amount: entry.principalAmount || 0, date: date });
+                });
+            }
+            
+            // If loan wasn't processed from schedule, try other methods
+            if (!loanProcessed && loan.startDate && loan.monthlyPayment) {
+                const startDate = new Date(loan.startDate);
+                const monthlyRate = (loan.interestRate && loan.interestRate > 0) ? (loan.interestRate / 100 / 12) : 0;
+                let remainingPrincipal = loan.principalAmount || 0;
                 
-                pnlMap[key].loanPrincipal += entry.principalAmount;
-                pnlMap[key].loanPrincipalItems.push({ name: `קרן: ${loan.lenderName}`, amount: entry.principalAmount, date: date });
-            });
+                // Determine how many payments to calculate
+                let numPayments = 0;
+                if (loan.paymentsMade && loan.paymentsMade > 0) {
+                    // Use paymentsMade if available
+                    numPayments = loan.paymentsMade;
+                } else if (loan.durationMonths && loan.durationMonths > 0) {
+                    // Use durationMonths if available
+                    numPayments = loan.durationMonths;
+                } else {
+                    // Calculate from startDate to end of selected period
+                    const endDate = new Date(endYear, endMonth - 1, 1);
+                    const monthsDiff = (endDate.getFullYear() - startDate.getFullYear()) * 12 + (endDate.getMonth() - startDate.getMonth()) + 1;
+                    numPayments = Math.max(0, monthsDiff);
+                }
+                
+                // Calculate payments
+                for (let i = 1; i <= numPayments; i++) {
+                    const dueDate = new Date(startDate);
+                    dueDate.setMonth(startDate.getMonth() + (i - 1));
+                    const key = getMonthKey(dueDate);
+                    if (!pnlMap[key]) continue;
+                    
+                    const interestAmount = monthlyRate > 0 ? (remainingPrincipal * monthlyRate) : 0;
+                    const principalAmount = loan.monthlyPayment - interestAmount;
+                    remainingPrincipal = Math.max(0, remainingPrincipal - principalAmount);
+                    
+                    pnlMap[key].financingExpenses += Math.round(interestAmount * 100) / 100;
+                    pnlMap[key].financingItems.push({ 
+                        name: `ריבית: ${loan.lenderName}`, 
+                        amount: Math.round(interestAmount * 100) / 100, 
+                        date: dueDate 
+                    });
+                    
+                    pnlMap[key].loanPrincipal += Math.round(principalAmount * 100) / 100;
+                    pnlMap[key].loanPrincipalItems.push({ 
+                        name: `קרן: ${loan.lenderName}`, 
+                        amount: Math.round(principalAmount * 100) / 100, 
+                        date: dueDate 
+                    });
+                }
+            }
         });
 
         // 6. Debt Payments
@@ -332,12 +505,11 @@ const PnLReport: React.FC<PnLReportProps> = ({
                 const key = getMonthKey(date);
                 if (!pnlMap[key]) return;
 
-                pnlMap[key].debtPayments += p.amount;
-                pnlMap[key].debtPaymentItems.push({ name: `חוב: ${debt.name}`, amount: p.amount, date: p.date, subtext: p.method });
-                
-                // NEW: Reverse calculate VAT from debt payment
+                // Calculate net amount (without VAT) for cash flow
+                // VAT is already handled separately in vatInput and vatCashFlowAdjustment
+                let netAmount = p.amount;
                 if (!debt.isVatExempt) {
-                    const netAmount = p.amount / (1 + vatRate / 100);
+                    netAmount = p.amount / (1 + vatRate / 100);
                     const vatAmount = p.amount - netAmount;
                     if (vatAmount > 0.01) {
                         pnlMap[key].vatInput += vatAmount;
@@ -349,6 +521,9 @@ const PnLReport: React.FC<PnLReportProps> = ({
                         });
                     }
                 }
+                
+                pnlMap[key].debtPayments += netAmount;
+                pnlMap[key].debtPaymentItems.push({ name: `חוב: ${debt.name}`, amount: netAmount, date: p.date, subtext: p.method });
             });
         });
 
@@ -362,12 +537,11 @@ const PnLReport: React.FC<PnLReportProps> = ({
                 const key = getMonthKey(date);
                 if (!pnlMap[key]) return;
 
-                pnlMap[key].receivableCollections += p.amount;
-                pnlMap[key].receivableCollectionItems.push({ name: `חייב: ${rec.name}`, amount: p.amount, date: p.date, subtext: p.method });
-
-                // NEW: Reverse calculate VAT from receivable collection
+                // Calculate net amount (without VAT) for cash flow
+                // VAT is already handled separately in vatOutput and vatCashFlowAdjustment
+                let netAmount = p.amount;
                 if (!rec.isVatExempt) {
-                    const netAmount = p.amount / (1 + vatRate / 100);
+                    netAmount = p.amount / (1 + vatRate / 100);
                     const vatAmount = p.amount - netAmount;
                     if (vatAmount > 0.01) {
                         pnlMap[key].vatOutput += vatAmount;
@@ -379,6 +553,9 @@ const PnLReport: React.FC<PnLReportProps> = ({
                         });
                     }
                 }
+                
+                pnlMap[key].receivableCollections += netAmount;
+                pnlMap[key].receivableCollectionItems.push({ name: `חייב: ${rec.name}`, amount: netAmount, date: p.date, subtext: p.method });
             });
         });
 
@@ -388,7 +565,11 @@ const PnLReport: React.FC<PnLReportProps> = ({
             m.operatingProfit = m.grossProfit - (m.payroll + m.fixedExpenses + m.variableExpenses);
             m.netProfit = m.operatingProfit - m.financingExpenses;
             m.vatBalance = m.vatOutput - m.vatInput;
-            m.vatCashFlowAdjustment = -m.vatBalance; // Positive balance means money owed to state (negative cash impact)
+            // VAT Cash Flow Adjustment:
+            // - vatInput is a credit (money we get back) - positive impact on cash flow
+            // - vatOutput is a debit (money we owe) - negative impact on cash flow
+            // So: vatInput adds to cash flow, vatOutput subtracts from cash flow
+            m.vatCashFlowAdjustment = m.vatInput - m.vatOutput;
             
             // Net Cash Flow Logic: Includes VAT balance impact
             m.netCashFlow = m.netProfit + m.receivableCollections - m.debtPayments - m.loanPrincipal + m.vatCashFlowAdjustment;
@@ -672,8 +853,28 @@ const PnLReport: React.FC<PnLReportProps> = ({
                             <PnLRow label="(-) תשלום חובות לספקים" field="debtPayments" itemsField="debtPaymentItems" isNegative={true} />
                             <PnLRow label="(-) פירעון קרן הלוואות" field="loanPrincipal" itemsField="loanPrincipalItems" isNegative={true} />
                             
-                            {/* VAT Cash Flow row */}
-                            <PnLRow label="(-) יתרת מע''מ לתשלום / החזר" field="vatCashFlowAdjustment" isNegative={true} />
+                            {/* VAT Cash Flow row - Custom row to show refund as positive */}
+                            <tr className="hover:bg-slate-50 transition-colors">
+                                <td className="px-4 py-3 text-right flex items-center gap-2 sticky right-0 z-20 text-slate-600 bg-white">
+                                    {periodTotals.vatCashFlowAdjustment >= 0 ? "(+) החזר מע''מ" : "(-) תשלום מע''מ"}
+                                </td>
+                                <td 
+                                    className={`px-4 py-3 text-center border-l border-slate-200 font-black bg-indigo-50/20 ${periodTotals.vatCashFlowAdjustment >= 0 ? 'text-green-600' : 'text-red-600'}`}
+                                >
+                                    {formatCurrency(Math.abs(periodTotals.vatCashFlowAdjustment))}
+                                </td>
+                                {monthlyData.map(m => {
+                                    const val = m.vatCashFlowAdjustment;
+                                    return (
+                                        <td 
+                                            key={m.monthKey} 
+                                            className={`px-4 py-3 text-center transition-all font-black ${val >= 0 ? 'text-green-600' : 'text-red-600'}`}
+                                        >
+                                            {formatCurrency(Math.abs(val))}
+                                        </td>
+                                    );
+                                })}
+                            </tr>
                             
                             <tr className="bg-amber-100 border-t-2 border-amber-300 font-black text-slate-900">
                                 <td className="px-4 py-4 text-right flex items-center gap-2 sticky right-0 z-20 bg-amber-100">

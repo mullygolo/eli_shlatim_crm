@@ -90,6 +90,11 @@ const EditProductModal: React.FC<EditProductModalProps> = ({ product, suppliers,
     };
 
     const removeCustomerTier = (index: number) => {
+        const tier = formData.customerPriceTiers?.[index];
+        const tierInfo = tier ? `מ-${tier.min}${tier.max ? ` עד ${tier.max}` : '+'} ${formData.baseUnit || 'יחידות'}` : 'טווח מחירים';
+        if (!window.confirm(`האם אתה בטוח שברצונך למחוק את ${tierInfo}?`)) {
+            return;
+        }
         const tiers = formData.customerPriceTiers ? [...formData.customerPriceTiers] : [];
         setFormData(prev => ({ ...prev, customerPriceTiers: tiers.filter((_, i) => i !== index) }));
     };
@@ -117,6 +122,11 @@ const EditProductModal: React.FC<EditProductModalProps> = ({ product, suppliers,
     };
 
     const removeVariant = (index: number) => {
+        const variant = variants[index];
+        const variantName = variant?.name || (variant?.width && variant?.height ? `${variant.width}x${variant.height} ס״מ` : 'תת-מוצר');
+        if (!window.confirm(`האם אתה בטוח שברצונך למחוק את התת-מוצר "${variantName}"?`)) {
+            return;
+        }
         const updated = variants.filter((_, i) => i !== index);
         setVariants(updated);
         setFormData(prev => ({ ...prev, variants: updated }));
@@ -139,6 +149,10 @@ const EditProductModal: React.FC<EditProductModalProps> = ({ product, suppliers,
         const pricings = formData.supplierPricings ? [...formData.supplierPricings] : [];
         if (pricings.length <= 1) {
             alert('חייב להיות לפחות ספק אחד');
+            return;
+        }
+        const supplierName = pricings[index]?.supplierName || 'ספק';
+        if (!window.confirm(`האם אתה בטוח שברצונך להסיר את ${supplierName} מהרשימה?`)) {
             return;
         }
         setFormData(prev => ({ ...prev, supplierPricings: pricings.filter((_, i) => i !== index) }));
@@ -180,6 +194,12 @@ const EditProductModal: React.FC<EditProductModalProps> = ({ product, suppliers,
 
     const removeSupplierTier = (supplierIndex: number, tierIndex: number) => {
         const pricings = formData.supplierPricings ? [...formData.supplierPricings] : [];
+        const supplierName = pricings[supplierIndex]?.supplierName || 'ספק';
+        const tier = pricings[supplierIndex]?.priceTiers?.[tierIndex];
+        const tierInfo = tier ? `מ-${tier.min}${tier.max ? ` עד ${tier.max}` : '+'} ${formData.baseUnit || 'יחידות'}` : 'טווח מחירים';
+        if (!window.confirm(`האם אתה בטוח שברצונך למחוק את ${tierInfo} של ${supplierName}?`)) {
+            return;
+        }
         const tiers = pricings[supplierIndex].priceTiers ? [...pricings[supplierIndex].priceTiers!] : [];
         pricings[supplierIndex] = {
             ...pricings[supplierIndex],
@@ -225,6 +245,11 @@ const EditProductModal: React.FC<EditProductModalProps> = ({ product, suppliers,
     };
     
     const handleRemoveImage = (imageId: string) => {
+        const image = formData.images?.find(img => img.id === imageId);
+        const imageName = image?.fileName || 'תמונה';
+        if (!window.confirm(`האם אתה בטוח שברצונך למחוק את ${imageName}?`)) {
+            return;
+        }
         setFormData(prev => ({
             ...prev,
             images: (prev.images || []).filter(img => img.id !== imageId)

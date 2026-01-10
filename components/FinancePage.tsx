@@ -2974,7 +2974,11 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                                 </div>
                                                 <div className="flex gap-2 shrink-0">
                                                     <button type="button" onClick={() => setViewingLoanDoc(loanForm.amortizationFile!)} className="text-[10px] bg-white border border-indigo-200 px-2 py-1 rounded font-bold text-indigo-600 hover:bg-indigo-100">צפה</button>
-                                                    <button type="button" onClick={() => setLoanForm({...loanForm, amortizationFile: undefined})} className="text-[10px] text-red-500 font-bold px-2 py-1 hover:bg-red-50 rounded">הסר</button>
+                                                    <button type="button" onClick={() => {
+                                                        if (window.confirm(`האם אתה בטוח שברצונך להסיר את הקובץ "${loanForm.amortizationFile?.fileName || 'קובץ'}"?`)) {
+                                                            setLoanForm({...loanForm, amortizationFile: undefined});
+                                                        }
+                                                    }} className="text-[10px] text-red-500 font-bold px-2 py-1 hover:bg-red-50 rounded">הסר</button>
                                                 </div>
                                             </div>
                                         )}

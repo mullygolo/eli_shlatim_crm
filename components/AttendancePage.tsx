@@ -290,7 +290,11 @@ const CorrectionRequestModal: React.FC<{
                             {certificate && (
                                 <div className="flex-1 flex items-center justify-between text-xs text-slate-600 bg-white/50 p-1.5 rounded border border-rose-100">
                                     <span className="truncate max-w-[150px]">{certificate.fileName}</span>
-                                    <button type="button" onClick={() => setCertificate(undefined)} className="text-rose-600 font-bold px-1 hover:underline">מחק</button>
+                                    <button type="button" onClick={() => {
+                                        if (window.confirm(`האם אתה בטוח שברצונך למחוק את התעודה "${certificate.fileName}"?`)) {
+                                            setCertificate(undefined);
+                                        }
+                                    }} className="text-rose-600 font-bold px-1 hover:underline">מחק</button>
                                 </div>
                             )}
                         </div>

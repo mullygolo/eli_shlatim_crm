@@ -15,7 +15,9 @@ import attendanceRouter from './routes/attendance.js';
 import manualEventsRouter from './routes/manualEvents.js';
 import settingsRouter from './routes/settings.js';
 import authRouter from './routes/auth.js';
-import { initializeDefaultAdmin } from './services/mongoService.js';
+import priceListRouter from './routes/priceList.js';
+import { initializeDefaultAdmin, autoCloseOldAttendanceRecords, initializeAttendanceIndexes } from './services/mongoService.js';
+import { getDateStringIsrael } from './utils/timezone.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -41,6 +43,7 @@ app.use('/api/finance', financeRouter);
 app.use('/api/attendance', attendanceRouter);
 app.use('/api/manual-events', manualEventsRouter);
 app.use('/api/settings', settingsRouter);
+app.use('/api/price-list', priceListRouter);
 
 // Health check
 app.get('/api/health', (req, res) => {
@@ -89,6 +92,38 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
     } catch (error) {
         console.error('Failed to initialize default admin:', error);
     }
+    
+    // Initialize attendance indexes to prevent duplicates
+    try {
+        await initializeAttendanceIndexes();
+        console.log('Attendance indexes initialization completed');
+    } catch (error) {
+        console.error('Failed to initialize attendance indexes:', error);
+    }
+    
+    // Set up periodic task to auto-close old attendance records
+    // This runs every hour and immediately on startup to ensure old records are closed
+    // even if the server was down at midnight
+    const scheduleAutoClose = () => {
+        const checkAndReset = async () => {
+            try {
+                const closedCount = await autoCloseOldAttendanceRecords();
+                if (closedCount > 0) {
+                    console.log(`Auto-closed ${closedCount} old attendance records`);
+                }
+            } catch (error) {
+                console.error('Error auto-closing attendance records:', error);
+            }
+        };
+        
+        // Check every hour to catch old records
+        setInterval(checkAndReset, 60 * 60 * 1000);
+        
+        // Also check immediately on startup to close any old records
+        checkAndReset();
+    };
+    
+    scheduleAutoClose();
     
     // Start server after admin initialization
     app.listen(PORT, () => {

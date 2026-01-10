@@ -3,9 +3,11 @@ import fs from 'fs';
 import {
     Customer, Order, Supplier, Employee, Activity, OrderStatusConfiguration,
     FixedExpense, VariableExpense, Loan, Debt, Receivable, EquityInvestment,
-    AttendanceRecord, ManualEvent, EmployeeStatus, EmployeeRole
+    AttendanceRecord, ManualEvent, EmployeeStatus, EmployeeRole,
+    PriceListProduct, SalesHistoryEntry, AdHocProduct
 } from '../types';
 import { hashPassword } from '../utils/password.js';
+import { getTodayRangeIsrael, getDateStringIsrael } from '../utils/timezone.js';
 
 // MongoDB Connection Configuration
 const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://daniel_db_user:danny123@elishlatim.geyfv2c.mongodb.net/elishlatim?retryWrites=true&w=majority&appName=Compass';
@@ -825,6 +827,13 @@ export async function getAttendanceRecords(): Promise<AttendanceRecord[]> {
     try {
         const database = await getDb();
         const collection = database.collection<AttendanceRecord>('attendanceRecords');
+        
+        // Auto-close old records before fetching (runs in background, doesn't block)
+        // This ensures old records are closed whenever records are fetched
+        autoCloseOldAttendanceRecords().catch(err => {
+            console.error('Error auto-closing records in background:', err);
+        });
+        
         const docs = await collection.find({}).sort({ date: -1 }).toArray();
         return docs.map(deserializeDates) as AttendanceRecord[];
     } catch (error) {
@@ -836,7 +845,7 @@ export async function getAttendanceRecords(): Promise<AttendanceRecord[]> {
 export async function createAttendanceRecord(record: AttendanceRecord): Promise<AttendanceRecord> {
     try {
         const database = await getDb();
-        const collection = database.collection<AttendanceRecord>('attendanceRecords');
+        const collection = database.collection<any>('attendanceRecords');
         
         // If employee details are missing, fetch them from employees collection
         let employeeName = record.employeeName;
@@ -852,10 +861,14 @@ export async function createAttendanceRecord(record: AttendanceRecord): Promise<
             }
         }
         
-        const recordWithEmployeeDetails: AttendanceRecord = {
+        // Ensure dateString exists for consistency with unique index
+        const dateString = getDateStringIsrael(record.date);
+        
+        const recordWithEmployeeDetails: any = {
             ...record,
             employeeName: employeeName || record.employeeName,
             employeeUsername: employeeUsername || record.employeeUsername,
+            dateString: dateString, // Add dateString for consistency
         };
         
         const serialized = serializeDates(recordWithEmployeeDetails);
@@ -870,7 +883,7 @@ export async function createAttendanceRecord(record: AttendanceRecord): Promise<
 export async function updateAttendanceRecord(record: AttendanceRecord): Promise<AttendanceRecord> {
     try {
         const database = await getDb();
-        const collection = database.collection<AttendanceRecord>('attendanceRecords');
+        const collection = database.collection<any>('attendanceRecords');
         
         // If employee details are missing, fetch them from employees collection
         let employeeName = record.employeeName;
@@ -886,10 +899,14 @@ export async function updateAttendanceRecord(record: AttendanceRecord): Promise<
             }
         }
         
-        const recordWithEmployeeDetails: AttendanceRecord = {
+        // Ensure dateString exists for consistency with unique index
+        const dateString = getDateStringIsrael(record.date);
+        
+        const recordWithEmployeeDetails: any = {
             ...record,
             employeeName: employeeName || record.employeeName,
             employeeUsername: employeeUsername || record.employeeUsername,
+            dateString: dateString, // Add dateString for consistency
         };
         
         const serialized = serializeDates(recordWithEmployeeDetails);
@@ -916,6 +933,38 @@ export async function deleteAttendanceRecord(recordId: string): Promise<void> {
     }
 }
 
+// Initialize unique index for attendance records to prevent duplicates
+// This should be called once on server startup
+export async function initializeAttendanceIndexes(): Promise<void> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<AttendanceRecord>('attendanceRecords');
+        
+        // Create unique compound index on (employeeId, dateString) for active records only
+        // This prevents duplicate active clock-ins for the same employee on the same day
+        // Note: We'll use a partial index that only applies to records without clockOut
+        try {
+            await collection.createIndex(
+                { employeeId: 1, dateString: 1 },
+                { 
+                    unique: true,
+                    partialFilterExpression: { clockOut: { $exists: false } },
+                    name: 'unique_active_attendance_per_day'
+                }
+            );
+            console.log('Attendance unique index created successfully');
+        } catch (error: any) {
+            // Index might already exist, which is fine
+            if (error.code !== 85 && error.codeName !== 'IndexOptionsConflict') {
+                console.warn('Could not create attendance index (might already exist):', error.message);
+            }
+        }
+    } catch (error) {
+        console.error('Error initializing attendance indexes:', error);
+        // Don't throw - this is not critical for operation
+    }
+}
+
 // Clock in/out functions with server-side time
 export async function clockInAttendance(employeeId: string, isWFH: boolean = false): Promise<AttendanceRecord> {
     try {
@@ -926,19 +975,18 @@ export async function clockInAttendance(employeeId: string, isWFH: boolean = fal
         // #endregion
         
         const database = await getDb();
-        const collection = database.collection<AttendanceRecord>('attendanceRecords');
+        const collection = database.collection<any>('attendanceRecords');
         
-        // Check if employee already has an active clock-in (no clockOut)
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        const tomorrow = new Date(today);
-        tomorrow.setDate(tomorrow.getDate() + 1);
+        // Check if employee already has an active clock-in (no clockOut) - using Israel timezone
+        const { start: todayStart, end: todayEnd } = getTodayRangeIsrael();
+        const todayDateString = getDateStringIsrael();
         
+        // First, check if there's already an active record
         const existingActive = await collection.findOne({
             employeeId: employeeId,
             clockIn: { $exists: true },
             clockOut: { $exists: false },
-            date: { $gte: today, $lt: tomorrow }
+            date: { $gte: todayStart, $lte: todayEnd }
         });
         
         if (existingActive) {
@@ -952,12 +1000,13 @@ export async function clockInAttendance(employeeId: string, isWFH: boolean = fal
         
         // Create new record with server time and employee details
         const now = new Date();
-        const newRecord: AttendanceRecord = {
+        const newRecord: any = {
             id: `att_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
             employeeId: employeeId,
             employeeName: employee?.name,
             employeeUsername: employee?.username,
             date: now,
+            dateString: todayDateString, // Add dateString for unique index
             clockIn: now,
             totalHours: 0,
             status: isWFH ? 'WFH' : 'PRESENT',
@@ -966,11 +1015,32 @@ export async function clockInAttendance(employeeId: string, isWFH: boolean = fal
         const serialized = serializeDates(newRecord);
         
         // #region agent log
-        const logEntryBeforeInsert = JSON.stringify({location:'server/services/mongoService.ts:clockInAttendance',message:'Before insertOne',data:{employeeId,serializedId:serialized.id,serializedClockIn:serialized.clockIn,serializedClockInType:typeof serialized.clockIn},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'}) + '\n';
+        const logEntryBeforeInsert = JSON.stringify({location:'server/services/mongoService.ts:clockInAttendance',message:'Before insertOne',data:{employeeId,serializedId:serialized.id,serializedClockIn:serialized.clockIn,serializedClockInType:typeof serialized.clockIn,dateString:serialized.dateString},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'}) + '\n';
         fs.appendFileSync(logPath, logEntryBeforeInsert);
         // #endregion
         
-        await collection.insertOne(serialized);
+        try {
+            await collection.insertOne(serialized);
+        } catch (insertError: any) {
+            // Check if it's a duplicate key error (from unique index)
+            if (insertError.code === 11000 || insertError.codeName === 'DuplicateKey') {
+                // Double-check if there's actually an active record now
+                const doubleCheck = await collection.findOne({
+                    employeeId: employeeId,
+                    clockIn: { $exists: true },
+                    clockOut: { $exists: false },
+                    date: { $gte: todayStart, $lte: todayEnd }
+                });
+                
+                if (doubleCheck) {
+                    throw new Error('Employee already has an active clock-in for today');
+                } else {
+                    // This shouldn't happen, but re-throw the original error
+                    throw new Error('Failed to create attendance record due to duplicate key constraint');
+                }
+            }
+            throw insertError;
+        }
         
         const result = deserializeDates(serialized) as AttendanceRecord;
         
@@ -1109,6 +1179,103 @@ export async function clockOutAttendance(recordId: string): Promise<AttendanceRe
     }
 }
 
+/**
+ * Auto-close attendance records that are still open from previous days (based on Israel timezone)
+ * This should be called periodically (e.g., at midnight Israel time) to reset the clock
+ */
+/**
+ * Auto-close attendance records that are still open from previous days (based on Israel timezone)
+ * This should be called periodically (e.g., at midnight Israel time) to reset the clock
+ */
+export async function autoCloseOldAttendanceRecords(): Promise<number> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<any>('attendanceRecords');
+        
+        // Get today's date range in Israel timezone
+        const { start: todayStart } = getTodayRangeIsrael();
+        const todayDateString = getDateStringIsrael();
+        
+        // Find all records from before today (in Israel timezone) that don't have clockOut
+        // Check both date field and dateString field for compatibility
+        const openRecords = await collection.find({
+            clockIn: { $exists: true },
+            clockOut: { $exists: false },
+            $or: [
+                { date: { $lt: todayStart } },
+                { dateString: { $lt: todayDateString } },
+                // Also catch records without dateString that are old
+                { dateString: { $exists: false }, date: { $lt: todayStart } }
+            ]
+        }).toArray();
+        
+        if (openRecords.length === 0) {
+            return 0;
+        }
+        
+        // Close them by setting clockOut to end of their date (23:59:59) in Israel timezone
+        let closedCount = 0;
+        for (const record of openRecords) {
+            const recordDate = deserializeDates(record);
+            // Use dateString if available, otherwise calculate from date
+            const recordDateStr = recordDate.dateString || getDateStringIsrael(recordDate.date);
+            const [rYear, rMonth, rDay] = recordDateStr.split('-').map(Number);
+            
+            // Get timezone offset for that date
+            const testDate = new Date(Date.UTC(rYear, rMonth - 1, rDay, 12, 0, 0, 0));
+            const israelTimeStr = new Intl.DateTimeFormat('en-US', {
+                timeZone: 'Asia/Jerusalem',
+                hour: '2-digit',
+                hour12: false
+            }).format(testDate);
+            const utcHour = testDate.getUTCHours();
+            const israelHour = parseInt(israelTimeStr);
+            const offsetHours = israelHour - utcHour;
+            
+            // Set clockOut to end of that day in Israel timezone
+            let endOfDay = new Date(Date.UTC(rYear, rMonth - 1, rDay, 23 - offsetHours, 59, 59, 999));
+            
+            // Verify it's 23:59 in Israel timezone
+            let finalIsraelHour = parseInt(new Intl.DateTimeFormat('en-US', {
+                timeZone: 'Asia/Jerusalem',
+                hour: '2-digit',
+                hour12: false
+            }).format(endOfDay));
+            
+            if (finalIsraelHour !== 23) {
+                const offset = 23 - finalIsraelHour;
+                endOfDay = new Date(endOfDay.getTime() + (offset * 60 * 60 * 1000));
+                endOfDay.setUTCMilliseconds(999);
+            }
+            
+            // Calculate total hours
+            const clockInTime = recordDate.clockIn instanceof Date ? recordDate.clockIn : new Date(recordDate.clockIn);
+            const durationMs = endOfDay.getTime() - clockInTime.getTime();
+            const totalHours = Math.max(0, durationMs / (1000 * 60 * 60));
+            
+            const updateData = {
+                clockOut: endOfDay,
+                totalHours: totalHours
+            };
+            const serializedUpdate = serializeDates(updateData);
+            
+            await collection.updateOne(
+                { id: record.id },
+                { $set: serializedUpdate }
+            );
+            closedCount++;
+        }
+        
+        if (closedCount > 0) {
+            console.log(`Auto-closed ${closedCount} old attendance records`);
+        }
+        return closedCount;
+    } catch (error) {
+        console.error('Error auto-closing old attendance records:', error);
+        throw error;
+    }
+}
+
 // ==================== MANUAL EVENTS ====================
 export async function getManualEvents(): Promise<ManualEvent[]> {
     try {
@@ -1183,6 +1350,201 @@ export async function updateSettings(settings: Settings): Promise<Settings> {
         return deserializeDates(serialized) as Settings;
     } catch (error) {
         console.error('Error updating settings:', error);
+        throw error;
+    }
+}
+
+// ==================== PRICE LIST ====================
+export async function getPriceListProducts(): Promise<PriceListProduct[]> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<PriceListProduct>('priceListProducts');
+        const docs = await collection.find({}).toArray();
+        return docs.map(deserializeDates) as PriceListProduct[];
+    } catch (error) {
+        console.error('Error fetching price list products:', error);
+        throw error;
+    }
+}
+
+export async function getPriceListProduct(id: string): Promise<PriceListProduct | null> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<PriceListProduct>('priceListProducts');
+        const doc = await collection.findOne({ id });
+        return doc ? deserializeDates(doc) as PriceListProduct : null;
+    } catch (error) {
+        console.error('Error fetching price list product:', error);
+        throw error;
+    }
+}
+
+export async function createPriceListProduct(product: PriceListProduct): Promise<PriceListProduct> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<PriceListProduct>('priceListProducts');
+        const serialized = serializeDates(product);
+        await collection.insertOne(serialized);
+        return deserializeDates(serialized) as PriceListProduct;
+    } catch (error) {
+        console.error('Error creating price list product:', error);
+        throw error;
+    }
+}
+
+export async function updatePriceListProduct(product: PriceListProduct): Promise<PriceListProduct> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<PriceListProduct>('priceListProducts');
+        const serialized = serializeDates(product);
+        
+        // Remove _id from serialized object to avoid MongoDB immutable field error
+        const { _id, ...serializedWithoutId } = serialized as any;
+        
+        await collection.replaceOne({ id: product.id }, serializedWithoutId);
+        return deserializeDates(serialized) as PriceListProduct;
+    } catch (error) {
+        console.error('Error updating price list product:', error);
+        throw error;
+    }
+}
+
+export async function deletePriceListProduct(id: string): Promise<void> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<PriceListProduct>('priceListProducts');
+        await collection.deleteOne({ id });
+    } catch (error) {
+        console.error('Error deleting price list product:', error);
+        throw error;
+    }
+}
+
+export async function searchPriceListProducts(query: string): Promise<PriceListProduct[]> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<PriceListProduct>('priceListProducts');
+        const docs = await collection.find({
+            $or: [
+                { name: { $regex: query, $options: 'i' } },
+                { category: { $regex: query, $options: 'i' } },
+                { description: { $regex: query, $options: 'i' } }
+            ]
+        }).toArray();
+        return docs.map(deserializeDates) as PriceListProduct[];
+    } catch (error) {
+        console.error('Error searching price list products:', error);
+        throw error;
+    }
+}
+
+// ==================== SALES HISTORY ====================
+export async function getSalesHistory(filters?: {
+    productId?: string;
+    supplierId?: string;
+    dateFrom?: Date;
+    dateTo?: Date;
+}): Promise<SalesHistoryEntry[]> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<SalesHistoryEntry>('salesHistory');
+        
+        const query: any = {};
+        if (filters?.productId) query.productId = filters.productId;
+        if (filters?.supplierId) query.supplierId = filters.supplierId;
+        if (filters?.dateFrom || filters?.dateTo) {
+            query.date = {};
+            if (filters.dateFrom) query.date.$gte = filters.dateFrom;
+            if (filters.dateTo) query.date.$lte = filters.dateTo;
+        }
+        
+        const docs = await collection.find(query).sort({ date: -1 }).toArray();
+        return docs.map(deserializeDates) as SalesHistoryEntry[];
+    } catch (error) {
+        console.error('Error fetching sales history:', error);
+        throw error;
+    }
+}
+
+export async function addSalesHistoryEntry(entry: SalesHistoryEntry): Promise<SalesHistoryEntry> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<SalesHistoryEntry>('salesHistory');
+        const serialized = serializeDates(entry);
+        await collection.insertOne(serialized);
+        return deserializeDates(serialized) as SalesHistoryEntry;
+    } catch (error) {
+        console.error('Error adding sales history entry:', error);
+        throw error;
+    }
+}
+
+export async function getProductSalesHistory(productId: string): Promise<SalesHistoryEntry[]> {
+    try {
+        return getSalesHistory({ productId });
+    } catch (error) {
+        console.error('Error fetching product sales history:', error);
+        throw error;
+    }
+}
+
+export async function getSupplierSalesHistory(supplierId: string): Promise<SalesHistoryEntry[]> {
+    try {
+        return getSalesHistory({ supplierId });
+    } catch (error) {
+        console.error('Error fetching supplier sales history:', error);
+        throw error;
+    }
+}
+
+// ==================== AD-HOC PRODUCTS ====================
+export async function getAdHocProducts(filters?: {
+    orderId?: string;
+    supplierId?: string;
+    dateFrom?: Date;
+    dateTo?: Date;
+}): Promise<AdHocProduct[]> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<AdHocProduct>('adHocProducts');
+        
+        const query: any = {};
+        if (filters?.orderId) query.orderId = filters.orderId;
+        if (filters?.supplierId) query.supplierId = filters.supplierId;
+        if (filters?.dateFrom || filters?.dateTo) {
+            query.date = {};
+            if (filters.dateFrom) query.date.$gte = filters.dateFrom;
+            if (filters.dateTo) query.date.$lte = filters.dateTo;
+        }
+        
+        const docs = await collection.find(query).sort({ date: -1 }).toArray();
+        return docs.map(deserializeDates) as AdHocProduct[];
+    } catch (error) {
+        console.error('Error fetching ad-hoc products:', error);
+        throw error;
+    }
+}
+
+export async function createAdHocProduct(product: AdHocProduct): Promise<AdHocProduct> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<AdHocProduct>('adHocProducts');
+        const serialized = serializeDates(product);
+        await collection.insertOne(serialized);
+        return deserializeDates(serialized) as AdHocProduct;
+    } catch (error) {
+        console.error('Error creating ad-hoc product:', error);
+        throw error;
+    }
+}
+
+export async function suggestProductMatch(adHocProduct: AdHocProduct): Promise<PriceListProduct[]> {
+    try {
+        // Search for similar products by name
+        const products = await searchPriceListProducts(adHocProduct.name);
+        return products;
+    } catch (error) {
+        console.error('Error suggesting product match:', error);
         throw error;
     }
 }

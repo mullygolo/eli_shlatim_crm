@@ -1,5 +1,5 @@
 
-export type Page = 'Dashboard' | 'Orders' | 'Customers' | 'Suppliers' | 'Employees' | 'Deals' | 'Transactions' | 'Timesheets' | 'Quotes' | 'Reports' | 'Settings' | 'Finance' | 'Attendance';
+export type Page = 'Dashboard' | 'Orders' | 'Customers' | 'Suppliers' | 'Employees' | 'Deals' | 'Transactions' | 'Timesheets' | 'Quotes' | 'Reports' | 'Settings' | 'Finance' | 'Attendance' | 'PriceList';
 
 export enum PaymentMethod {
     BANK_TRANSFER = 'העברה בנקאית',
@@ -117,6 +117,9 @@ export interface LineItem {
     supplierId?: string; // Specific supplier for this item
     supplierPayments?: SupplierPayment[]; // Payments made to supplier for this item
     customDueDate?: Date; // Override due date for this item
+    priceListProductId?: string; // Link to product in price list
+    selectedAddons?: string[]; // Selected addons from price list
+    priceListNotes?: string; // Notes from price list
 }
 
 export interface AdditionalService {
@@ -132,6 +135,9 @@ export interface AdditionalService {
     notes?: string;
     customDueDate?: Date; // Override due date for this service
     scheduledDate?: Date; // NEW: Date and time for delivery/installation
+    priceListProductId?: string; // Link to product in price list
+    selectedAddons?: string[]; // Selected addons from price list
+    priceListNotes?: string; // Notes from price list
 }
 
 export interface Attachment {
@@ -496,4 +502,113 @@ export interface ManualEvent {
     description?: string;
     date: Date;
     time?: string;
+}
+
+// Price List Types
+export type ProductType = 'standard' | 'shipping';
+
+export interface PriceTier {
+    min: number; // Generic 'min' (can be m² or other unit)
+    max?: number; // Generic 'max'
+    price: number; // Price to customer
+    cost?: number; // Cost from supplier
+}
+
+export interface SupplierPricing {
+    supplierId: string;
+    supplierName: string;
+    baseCost?: number; // מחיר בסיס למ"ר (אופציונלי)
+    priceTiers?: PriceTier[]; // טווחי מחירים לפי כמויות
+    costRange?: { min: number; max: number }; // טווח עלות פשוט (מ-X עד Y ללא קשר ליחידות מידה)
+}
+
+export interface ProductAddon {
+    id: string;
+    name: string; // e.g., "תפירה", "חיתוך צורני"
+    price: number; // Additional price
+    cost?: number; // Additional cost
+    isPercentage?: boolean; // Whether the addon is a percentage
+}
+
+export interface ProductVariant {
+    id: string;
+    name?: string; // Optional name for the variant (e.g., "קטן", "בינוני")
+    width?: number; // Width in cm
+    height?: number; // Height in cm
+    size?: string; // Alternative: free text size (e.g., "10/10 ס״מ")
+    customerPrice: number; // מחיר ללקוח
+    supplierCost?: number; // עלות מספק (optional)
+    isActive?: boolean;
+}
+
+export interface PriceListProduct {
+    id: string;
+    name: string;
+    category?: string;
+    description?: string;
+    images?: Attachment[];
+    isActive: boolean;
+    createdAt: Date;
+    updatedAt: Date;
+
+    productType: ProductType;
+    
+    // --- Pricing for 'standard' type ---
+    baseUnit?: LineItemUnit; // e.g., m², unit
+    customerBasePrice?: number; // מחיר בסיס למ"ר ללקוח (אופציונלי)
+    customerPriceTiers?: PriceTier[]; // טווחי מחירים ללקוח לפי כמויות
+
+    // מחירים מספקים (מערך של ספקים)
+    supplierPricings?: SupplierPricing[]; // מחירים לפי ספקים שונים
+
+    // --- Pricing for 'shipping' type ---
+    customerPriceRange?: { min: number; max: number };
+    supplierCostRange?: { min: number; max: number };
+
+    // --- Common fields ---
+    addons?: ProductAddon[];
+    notes?: string;
+    
+    // --- Product Variants (predefined sizes) ---
+    variants?: ProductVariant[]; // רשימת מידות מוגדרות מראש
+}
+
+export interface SalesHistoryEntry {
+    id: string;
+    productId: string;
+    productName: string;
+    orderId: string;
+    orderNumber: string;
+    supplierId: string;
+    supplierName: string;
+    quantity: number;
+    unitPrice: number; // Actual price per unit
+    totalPrice: number; // Total price
+    cost: number; // Actual cost
+    unitType: LineItemUnit;
+    size?: { width?: number; height?: number }; // Dimensions if relevant
+    addons?: string[]; // Selected addons
+    date: Date; // Order date
+    customerId?: string;
+    customerName?: string;
+    notes?: string; // Notes from order
+}
+
+export interface AdHocProduct {
+    id: string;
+    name: string;
+    description?: string;
+    orderId: string;
+    orderNumber: string;
+    supplierId?: string;
+    supplierName?: string;
+    quantity: number;
+    unitPrice: number;
+    cost?: number;
+    unitType: LineItemUnit;
+    date: Date;
+    customerId?: string;
+    customerName?: string;
+    notes?: string;
+    suggestedProductId?: string; // Link to product in price list (if suggested)
 }

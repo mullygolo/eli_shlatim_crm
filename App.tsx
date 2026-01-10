@@ -35,6 +35,7 @@ import QuotesPage from './components/QuotesPage';
 import SettingsPage from './components/SettingsPage';
 import FinancePage from './components/FinancePage';
 import AttendancePage from './components/AttendancePage';
+import PriceListPage from './components/PriceListPage';
 
 // A map for page titles
 export const PAGE_TITLES: Record<Page, string> = {
@@ -51,6 +52,7 @@ export const PAGE_TITLES: Record<Page, string> = {
     Settings: 'הגדרות מערכת',
     Finance: 'דוחות / תקציב',
     Attendance: 'נוכחות ושכר',
+    PriceList: 'מחירון',
 };
 
 const App: React.FC = () => {
@@ -411,6 +413,8 @@ const App: React.FC = () => {
                             attendanceRecords={attendanceRecords}
                             setAttendanceRecords={setAttendanceRecordsWithSync}
                         />;
+            case 'PriceList':
+                return <PriceListPage suppliers={suppliers} />;
             default:
                 return <Dashboard customers={customers} orders={orders} activities={activities} monthlyGoal={monthlyGoal} setMonthlyGoal={setMonthlyGoalWithSync} employees={employees} onNavigateToOrder={handleNavigateToOrder} statusConfigs={statusConfigs} vatRate={vatRate} systemMessage={systemMessage} manualEvents={manualEvents} addManualEvent={addManualEvent} />;
         }

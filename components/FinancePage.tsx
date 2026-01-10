@@ -1,10 +1,48 @@
 
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, Component, ErrorInfo } from 'react';
 import { FixedExpense, VariableExpense, Loan, EquityInvestment, Debt, Receivable, ReceivablePayment, PaymentMethod, DebtPayment, Order, TransactionStatus, CustomerPayment, SupplierPayment, LineItemUnit, Attachment, PaymentStatusHistory, AmortizationEntry, Employee, AttendanceRecord, OrderStatusConfiguration } from '../types';
 import { PlusIcon, EditIcon, DeleteIcon, BankIcon, TrendingUpIcon, LogIcon, CashIcon, ClockIcon, LockIcon, DownloadIcon, ImportIcon } from './icons';
 import Modal from './Modal';
 import PnLReport from './PnLReport';
 import * as mongoService from '../services/mongoService';
+
+// Error Boundary Component
+class ErrorBoundary extends Component<
+    { children: React.ReactNode; fallback?: React.ReactNode },
+    { hasError: boolean; error?: Error }
+> {
+    constructor(props: { children: React.ReactNode; fallback?: React.ReactNode }) {
+        super(props);
+        this.state = { hasError: false };
+    }
+
+    static getDerivedStateFromError(error: Error) {
+        return { hasError: true, error };
+    }
+
+    componentDidCatch(error: Error, errorInfo: ErrorInfo) {
+        console.error('Error in FinancePage:', error, errorInfo);
+    }
+
+    render() {
+        if (this.state.hasError) {
+            return this.props.fallback || (
+                <div className="p-6 bg-red-50 border border-red-200 rounded-md">
+                    <h3 className="text-red-800 font-bold mb-2">שגיאה בטעינת הדוח</h3>
+                    <p className="text-red-600 text-sm mb-4">{this.state.error?.message || 'שגיאה לא ידועה'}</p>
+                    <button
+                        onClick={() => this.setState({ hasError: false, error: undefined })}
+                        className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700"
+                    >
+                        נסה שוב
+                    </button>
+                </div>
+            );
+        }
+
+        return this.props.children;
+    }
+}
 
 // --- Financial Engine Helpers ---
 
@@ -2108,11 +2146,21 @@ const FinancePage: React.FC<FinancePageProps> = ({
     };
 
     const handleRemoveCheckFromFixedForm = (index: number) => {
+        const check = fixedForm.checks?.[index];
+        const checkInfo = check ? `צ'ק בסכום ₪${check.amount.toLocaleString()}` : 'צ\'ק';
+        if (!window.confirm(`האם אתה בטוח שברצונך למחוק את ${checkInfo}?`)) {
+            return;
+        }
         const updatedChecks = (fixedForm.checks || []).filter((_, i) => i !== index);
         setFixedForm(prev => ({ ...prev, checks: updatedChecks }));
     };
 
     const handleRemoveCheckFromVariableForm = (index: number) => {
+        const check = variableForm.checks?.[index];
+        const checkInfo = check ? `צ'ק בסכום ₪${check.amount.toLocaleString()}` : 'צ\'ק';
+        if (!window.confirm(`האם אתה בטוח שברצונך למחוק את ${checkInfo}?`)) {
+            return;
+        }
         const updatedChecks = (variableForm.checks || []).filter((_, i) => i !== index);
         setVariableForm(prev => ({ ...prev, checks: updatedChecks }));
     };
@@ -2376,7 +2424,22 @@ const FinancePage: React.FC<FinancePageProps> = ({
                 </div>
 
                 <div className="p-6 min-h-[400px]">
-                    {activeTab === 'PNL' && <PnLReport orders={orders} fixedExpenses={fixedExpenses} variableExpenses={variableExpenses} loans={loans} employees={employees} attendanceRecords={attendanceRecords} statusConfigs={statusConfigs} vatRate={vatRate} debts={debts} receivables={receivables} />}
+                    {activeTab === 'PNL' && (
+                        <ErrorBoundary>
+                            <PnLReport 
+                                orders={orders} 
+                                fixedExpenses={fixedExpenses} 
+                                variableExpenses={variableExpenses} 
+                                loans={loans} 
+                                employees={employees} 
+                                attendanceRecords={attendanceRecords} 
+                                statusConfigs={statusConfigs} 
+                                vatRate={vatRate} 
+                                debts={debts} 
+                                receivables={receivables} 
+                            />
+                        </ErrorBoundary>
+                    )}
 
                     {activeTab === 'CHECKS' && <CheckCenter orders={orders} setOrders={setOrders} fixedExpenses={fixedExpenses} setFixedExpenses={setFixedExpenses} variableExpenses={variableExpenses} setVariableExpenses={setVariableExpenses} debts={debts} setDebts={setDebts} receivables={receivables} setReceivables={setReceivables} addActivity={addActivity} />}
 

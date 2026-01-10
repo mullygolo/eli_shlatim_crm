@@ -601,6 +601,11 @@ const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, custo
     };
 
     const removeContact = (contactId: string) => {
+        const contact = editableCustomer.contacts.find(c => c.id === contactId);
+        const contactName = contact?.name || 'איש קשר';
+        if (!window.confirm(`האם אתה בטוח שברצונך למחוק את איש הקשר "${contactName}"?`)) {
+            return;
+        }
         setEditableCustomer(prev => ({...prev, contacts: prev.contacts.filter(c => c.id !== contactId)}));
     };
 
@@ -1024,13 +1029,14 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
         setIsCollectionCenterOpen(true);
     };
 
-    const handleDeleteCustomer = (customerId: string) => {
-        const customerName = customers.find(c => c.id === customerId)?.name;
-        if(window.confirm(`האם אתה בטוח שברצונך למחוק את ${customerName}?`)) {
-            setCustomers(prev => prev.filter(c => c.id !== customerId));
-            addActivity(`לקוח נמחק: ${customerName}`);
-        }
-    };
+    // Customer deletion is disabled - customers should not be deleted
+    // const handleDeleteCustomer = (customerId: string) => {
+    //     const customerName = customers.find(c => c.id === customerId)?.name;
+    //     if(window.confirm(`האם אתה בטוח שברצונך למחוק את ${customerName}?`)) {
+    //         setCustomers(prev => prev.filter(c => c.id !== customerId));
+    //         addActivity(`לקוח נמחק: ${customerName}`);
+    //     }
+    // };
 
     const handleSaveNewCustomer = (customerData: Partial<Customer>, contactData: Partial<Contact>) => {
         // Search for existing duplicates before creating
@@ -1319,9 +1325,6 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
                                             </button>
                                             <button onClick={() => handleViewCustomer(customer)} className="p-2 bg-indigo-50 text-primary hover:bg-primary hover:text-white rounded-lg transition-all" title="ערוך">
                                                 <EditIcon className="h-5 w-5"/>
-                                            </button>
-                                            <button onClick={() => handleDeleteCustomer(customer.id)} className="p-2 bg-red-50 text-red-600 hover:bg-red-600 hover:text-white rounded-lg transition-all" aria-label={`מחק את ${customer.name}`}>
-                                                <DeleteIcon className="h-5 w-5"/>
                                             </button>
                                         </div>
                                     </td>

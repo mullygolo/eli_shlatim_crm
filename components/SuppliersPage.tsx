@@ -154,12 +154,18 @@ const SupplierForm: React.FC<{
     };
 
     const removeContact = (index: number) => {
-        if (formData.contacts.length > 1) {
-            setFormData(prev => ({
-                ...prev,
-                contacts: prev.contacts.filter((_, i) => i !== index)
-            }));
+        if (formData.contacts.length <= 1) {
+            return; // Keep at least one contact
         }
+        const contact = formData.contacts[index];
+        const contactName = contact?.name || 'איש קשר';
+        if (!window.confirm(`האם אתה בטוח שברצונך למחוק את איש הקשר "${contactName}"?`)) {
+            return;
+        }
+        setFormData(prev => ({
+            ...prev,
+            contacts: prev.contacts.filter((_, i) => i !== index)
+        }));
     };
 
     const handleSubmit = (e: React.FormEvent) => {
@@ -317,13 +323,14 @@ const SuppliersPage: React.FC<SuppliersPageProps> = ({ suppliers, setSuppliers, 
         setIsModalOpen(true);
     };
 
-    const handleDeleteSupplier = (supplierId: string) => {
-        const supplierName = suppliers.find(c => c.id === supplierId)?.name;
-        if(window.confirm(`האם אתה בטוח שברצונך למחוק את הספק ${supplierName}?`)) {
-            setSuppliers(prev => prev.filter(c => c.id !== supplierId));
-            addActivity(`ספק נמחק: ${supplierName}`);
-        }
-    };
+    // Supplier deletion is disabled - suppliers should not be deleted
+    // const handleDeleteSupplier = (supplierId: string) => {
+    //     const supplierName = suppliers.find(c => c.id === supplierId)?.name;
+    //     if(window.confirm(`האם אתה בטוח שברצונך למחוק את הספק ${supplierName}?`)) {
+    //         setSuppliers(prev => prev.filter(c => c.id !== supplierId));
+    //         addActivity(`ספק נמחק: ${supplierName}`);
+    //     }
+    // };
 
     const performMerge = (veteranId: string, victimId: string) => {
         const victim = suppliers.find(s => s.id === victimId);
@@ -462,7 +469,7 @@ const SuppliersPage: React.FC<SuppliersPageProps> = ({ suppliers, setSuppliers, 
                                     {calculateOwedForMonth(supplier.id).toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 0, maximumFractionDigits: 0 })}
                                 </td>
                                 <td className="px-6 py-4 whitespace-nowrap text-left text-sm font-medium space-x-2 space-x-reverse align-top">
-                                    <button onClick={() => handleDeleteSupplier(supplier.id)} className="text-red-600 hover:text-red-900 p-1"><DeleteIcon className="h-5 w-5"/></button>
+                                    {/* Supplier deletion is disabled - suppliers should not be deleted */}
                                 </td>
                             </tr>
                         ))}

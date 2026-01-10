@@ -180,7 +180,8 @@ const PnLReport: React.FC<PnLReportProps> = ({
             const config = statusConfigs.find(c => c.label === order.orderStatus);
             if (!config?.isActiveDeal) return;
 
-            const date = order.dealStartDate || order.date;
+            const rawDate = order.dealStartDate || order.date;
+            const date = rawDate instanceof Date ? rawDate : new Date(rawDate);
             const key = getMonthKey(date);
             if (!pnlMap[key]) return;
 
@@ -189,7 +190,8 @@ const PnLReport: React.FC<PnLReportProps> = ({
 
             const vatOutAmount = totals.totalAmount * (currentVat / 100);
             const vatInAmount = totals.totalCost * (currentVat / 100);
-            const displayDate = order.dealStartDate || order.date;
+            const displayDateRaw = order.dealStartDate || order.date;
+            const displayDate = displayDateRaw instanceof Date ? displayDateRaw : new Date(displayDateRaw);
 
             pnlMap[key].income += totals.totalAmount;
             pnlMap[key].incomeItems.push({ 
@@ -221,7 +223,7 @@ const PnLReport: React.FC<PnLReportProps> = ({
             order.payments?.forEach(payment => {
                 if (payment.status && invalidStatuses.includes(payment.status)) return;
                 
-                const date = new Date(payment.date);
+                const date = payment.date instanceof Date ? payment.date : new Date(payment.date);
                 const key = getMonthKey(date);
                 if (!pnlMap[key]) return;
                 
@@ -323,8 +325,8 @@ const PnLReport: React.FC<PnLReportProps> = ({
         // 2. Process Fixed Expenses
         fixedExpenses.forEach(fe => {
             if (!fe.isActive) return;
-            const feStart = new Date(fe.startDate);
-            const feEnd = fe.endDate ? new Date(fe.endDate) : new Date(2099, 11, 31);
+            const feStart = fe.startDate instanceof Date ? fe.startDate : new Date(fe.startDate);
+            const feEnd = fe.endDate ? (fe.endDate instanceof Date ? fe.endDate : new Date(fe.endDate)) : new Date(2099, 11, 31);
 
             Object.keys(pnlMap).forEach(key => {
                 const [y, m] = key.split('-').map(Number);
@@ -350,7 +352,7 @@ const PnLReport: React.FC<PnLReportProps> = ({
 
         // 3. Process Variable Expenses
         variableExpenses.forEach(ve => {
-            const date = new Date(ve.date);
+            const date = ve.date instanceof Date ? ve.date : new Date(ve.date);
             const key = getMonthKey(date);
             if (!pnlMap[key]) return;
 
@@ -371,10 +373,11 @@ const PnLReport: React.FC<PnLReportProps> = ({
         Object.keys(pnlMap).forEach(monthKey => {
             const [year, month] = monthKey.split('-').map(Number);
             employees.forEach(emp => {
-                if (emp.status === 'INACTIVE' && emp.startDate > new Date(year, month, 0)) return;
+                const empStartDate = emp.startDate instanceof Date ? emp.startDate : new Date(emp.startDate);
+                if (emp.status === 'INACTIVE' && empStartDate > new Date(year, month, 0)) return;
 
                 const empRecords = attendanceRecords.filter(r => {
-                    const d = new Date(r.date);
+                    const d = r.date instanceof Date ? r.date : new Date(r.date);
                     return r.employeeId === emp.id && d.getMonth() + 1 === month && d.getFullYear() === year;
                 });
 
@@ -384,7 +387,8 @@ const PnLReport: React.FC<PnLReportProps> = ({
                 } else {
                     empRecords.forEach(r => {
                         if (r.status === 'PRESENT' || r.status === 'WFH') {
-                            const hourlyRate = getEmployeeSalaryAtDate(emp, new Date(r.date)).amount;
+                            const rDate = r.date instanceof Date ? r.date : new Date(r.date);
+                            const hourlyRate = getEmployeeSalaryAtDate(emp, rDate).amount;
                             monthlyGross += (r.totalHours * hourlyRate);
                         }
                     });
@@ -409,7 +413,7 @@ const PnLReport: React.FC<PnLReportProps> = ({
                 today.setHours(0, 0, 0, 0);
                 
                 loan.schedule.forEach(entry => {
-                    const date = new Date(entry.dueDate);
+                    const date = entry.dueDate instanceof Date ? entry.dueDate : new Date(entry.dueDate);
                     const dateClean = new Date(date);
                     dateClean.setHours(0, 0, 0, 0);
                     const key = getMonthKey(date);
@@ -448,7 +452,7 @@ const PnLReport: React.FC<PnLReportProps> = ({
             
             // If loan wasn't processed from schedule, try other methods
             if (!loanProcessed && loan.startDate && loan.monthlyPayment) {
-                const startDate = new Date(loan.startDate);
+                const startDate = loan.startDate instanceof Date ? loan.startDate : new Date(loan.startDate);
                 const monthlyRate = (loan.interestRate && loan.interestRate > 0) ? (loan.interestRate / 100 / 12) : 0;
                 let remainingPrincipal = loan.principalAmount || 0;
                 

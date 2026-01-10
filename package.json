@@ -13,9 +13,11 @@
   },
   "dependencies": {
     "@google/genai": "^1.29.1",
+    "@types/react-window": "^1.8.8",
     "mongodb": "^7.0.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
+    "react-window": "^2.2.4",
     "recharts": "^3.4.1"
   },
   "devDependencies": {

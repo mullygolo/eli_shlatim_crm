@@ -1,11 +1,15 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { Order, Customer, Supplier, Employee, PaymentStatus, LineItem, LineItemUnit, Attachment, Contact, PaymentMethod, AdditionalService, TimelineEvent, AttachmentCategory, OrderType, OrderStatusConfiguration, CustomerPayment, FieldChange } from '../types';
+import { Order, Customer, Supplier, Employee, PaymentStatus, LineItem, LineItemUnit, Attachment, Contact, PaymentMethod, AdditionalService, TimelineEvent, AttachmentCategory, OrderType, OrderStatusConfiguration, CustomerPayment, FieldChange, SalesHistoryEntry, AdHocProduct, PriceListProduct } from '../types';
 import { PAYMENT_STATUSES_ORDERED, PAYMENT_TERMS_OPTIONS, CUSTOMER_CATEGORIES } from '../constants';
 import { PlusIcon, EditIcon, DeleteIcon, WhatsAppIcon, EmailIcon, PhoneIcon, NoteIcon, TaskIcon, LogIcon, SettingsIcon, LockIcon, CashIcon, DownloadIcon } from './icons';
 import Modal from './Modal';
+import ProductSelectorModal from './ProductSelectorModal';
 import { calculateOrderTotals, calculateDueDate } from '../utils/calculations';
 import MultiSelectFilter from './MultiSelectFilter';
 import * as mongoService from '../services/mongoService';
+import { getProducts } from '../services/priceListService';
+import { addSalesHistoryEntry, createAdHocProduct } from '../services/priceListService';
+import { calculateProductPrice } from '../utils/priceCalculations';
 
 interface OrdersPageProps {
     orders: Order[];
@@ -651,8 +655,10 @@ const OrderForm: React.FC<{
          }
      });
 
-     const [isNewSupplierModalOpen, setIsNewSupplierModalOpen] = useState(false);
-     const [newServiceSupplierFor, setNewServiceSupplierFor] = useState<number | null>(null);
+    const [isNewSupplierModalOpen, setIsNewSupplierModalOpen] = useState(false);
+    const [newServiceSupplierFor, setNewServiceSupplierFor] = useState<number | null>(null);
+    const [isProductSelectorOpen, setIsProductSelectorOpen] = useState(false);
+    const [productSelectorFor, setProductSelectorFor] = useState<{ type: 'lineItem' | 'additionalService'; index: number } | null>(null);
      const [timelineFilter, setTimelineFilter] = useState<'ALL' | 'HUMAN' | 'SYSTEM'>('HUMAN');
      const [newTimelineEntry, setNewTimelineEntry] = useState({
         type: 'NOTE' as 'NOTE' | 'TASK',
@@ -803,6 +809,11 @@ const OrderForm: React.FC<{
     };
 
     const removePaymentAttachment = (id: string) => {
+        const attachment = newPaymentAttachments.find(att => att.id === id);
+        const fileName = attachment?.fileName || 'קובץ';
+        if (!window.confirm(`האם אתה בטוח שברצונך למחוק את הקובץ "${fileName}"?`)) {
+            return;
+        }
         setNewPaymentAttachments(prev => prev.filter(att => att.id !== id));
     };
 
@@ -904,7 +915,72 @@ const OrderForm: React.FC<{
     };
 
     const removeLineItem = (index: number) => {
+        const item = formData.lineItems[index];
+        const itemDescription = item?.description || 'פריט';
+        if (!window.confirm(`האם אתה בטוח שברצונך למחוק את הפריט "${itemDescription}"?`)) {
+            return;
+        }
         setFormData(prev => ({ ...prev, lineItems: prev.lineItems.filter((_, i) => i !== index)}));
+    };
+
+    const handleProductSelect = (
+        product: PriceListProduct,
+        supplierId: string,
+        quantity: number,
+        size?: { width?: number; height?: number },
+        selectedAddons?: string[]
+    ) => {
+        if (!productSelectorFor) return;
+
+        try {
+            const calculated = calculateProductPrice(product, quantity, size, selectedAddons, supplierId);
+            
+            if (productSelectorFor.type === 'lineItem') {
+                const newLineItems = [...formData.lineItems];
+                const item = { ...newLineItems[productSelectorFor.index] };
+                
+                item.description = product.name;
+                item.unitPrice = calculated.unitPrice;
+                item.cost = calculated.cost;
+                item.supplierId = supplierId;
+                item.priceListProductId = product.id;
+                item.selectedAddons = selectedAddons;
+                item.priceListNotes = product.notes;
+                
+                if (product.baseUnit === LineItemUnit.M2 && size) {
+                    item.unitType = LineItemUnit.M2;
+                    item.width = size.width;
+                    item.height = size.height;
+                    item.quantity = (size.width || 0) * (size.height || 0);
+                } else {
+                    item.unitType = product.baseUnit;
+                    item.quantity = quantity;
+                }
+                
+                newLineItems[productSelectorFor.index] = item;
+                setFormData(prev => ({ ...prev, lineItems: newLineItems }));
+            } else if (productSelectorFor.type === 'additionalService') {
+                const newServices = [...formData.additionalServices];
+                const service = { ...newServices[productSelectorFor.index] };
+                
+                service.description = product.name;
+                service.price = calculated.totalPrice;
+                service.cost = calculated.totalCost;
+                service.supplierId = supplierId;
+                service.priceListProductId = product.id;
+                service.selectedAddons = selectedAddons;
+                service.priceListNotes = product.notes;
+                
+                newServices[productSelectorFor.index] = service;
+                setFormData(prev => ({ ...prev, additionalServices: newServices }));
+            }
+            
+            setIsProductSelectorOpen(false);
+            setProductSelectorFor(null);
+        } catch (error) {
+            console.error('Error selecting product:', error);
+            alert('שגיאה בבחירת מוצר');
+        }
     };
 
     const handleAdditionalServiceChange = (index: number, e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
@@ -933,6 +1009,11 @@ const OrderForm: React.FC<{
     };
 
     const removeAdditionalService = (index: number) => {
+        const service = formData.additionalServices[index];
+        const serviceDescription = service?.description || 'שירות';
+        if (!window.confirm(`האם אתה בטוח שברצונך למחוק את השירות "${serviceDescription}"?`)) {
+            return;
+        }
         setFormData(prev => ({
             ...prev,
             additionalServices: prev.additionalServices.filter((_, i) => i !== index)
@@ -1354,6 +1435,121 @@ const OrderForm: React.FC<{
             timeline: finalTimeline,
         };
 
+        // Save sales history and ad-hoc products
+        try {
+            const allProducts = await getProducts();
+            const productMap = new Map(allProducts.map(p => [p.id, p]));
+            const selectedCustomer = customers.find(c => c.id === finalOrder.customerId);
+
+            // Process line items
+            for (const item of finalOrder.lineItems) {
+                if (item.priceListProductId && item.supplierId) {
+                    // Save to sales history
+                    const product = productMap.get(item.priceListProductId);
+                    const supplier = suppliers.find(s => s.id === item.supplierId);
+                    
+                    if (product && supplier) {
+                        const historyEntry: SalesHistoryEntry = {
+                            id: `sh_${Date.now()}_${item.id}`,
+                            productId: item.priceListProductId,
+                            productName: product.name,
+                            orderId: finalOrder.id,
+                            orderNumber: finalOrder.orderNumber,
+                            supplierId: item.supplierId,
+                            supplierName: supplier.name,
+                            quantity: item.quantity,
+                            unitPrice: item.unitPrice,
+                            totalPrice: item.quantity * item.unitPrice,
+                            cost: item.cost,
+                            unitType: item.unitType,
+                            size: item.width && item.height ? { width: item.width, height: item.height } : undefined,
+                            addons: item.selectedAddons,
+                            date: finalOrder.date,
+                            customerId: finalOrder.customerId,
+                            customerName: selectedCustomer?.name,
+                            notes: item.priceListNotes
+                        };
+                        await addSalesHistoryEntry(historyEntry);
+                    }
+                } else if (!item.priceListProductId && item.description && item.supplierId) {
+                    // Save as ad-hoc product
+                    const supplier = suppliers.find(s => s.id === item.supplierId);
+                    const adHocProduct: AdHocProduct = {
+                        id: `ah_${Date.now()}_${item.id}`,
+                        name: item.description,
+                        orderId: finalOrder.id,
+                        orderNumber: finalOrder.orderNumber,
+                        supplierId: item.supplierId,
+                        supplierName: supplier?.name,
+                        quantity: item.quantity,
+                        unitPrice: item.unitPrice,
+                        cost: item.cost,
+                        unitType: item.unitType,
+                        date: finalOrder.date,
+                        customerId: finalOrder.customerId,
+                        customerName: selectedCustomer?.name,
+                        notes: item.priceListNotes
+                    };
+                    await createAdHocProduct(adHocProduct);
+                }
+            }
+
+            // Process additional services
+            for (const service of finalOrder.additionalServices) {
+                if (service.priceListProductId && service.supplierId) {
+                    // Save to sales history
+                    const product = productMap.get(service.priceListProductId);
+                    const supplier = suppliers.find(s => s.id === service.supplierId);
+                    
+                    if (product && supplier) {
+                        const historyEntry: SalesHistoryEntry = {
+                            id: `sh_${Date.now()}_${service.id}`,
+                            productId: service.priceListProductId,
+                            productName: product.name,
+                            orderId: finalOrder.id,
+                            orderNumber: finalOrder.orderNumber,
+                            supplierId: service.supplierId,
+                            supplierName: supplier.name,
+                            quantity: 1,
+                            unitPrice: service.price,
+                            totalPrice: service.price,
+                            cost: service.cost,
+                            unitType: LineItemUnit.UNIT,
+                            addons: service.selectedAddons,
+                            date: finalOrder.date,
+                            customerId: finalOrder.customerId,
+                            customerName: selectedCustomer?.name,
+                            notes: service.priceListNotes
+                        };
+                        await addSalesHistoryEntry(historyEntry);
+                    }
+                } else if (!service.priceListProductId && service.description && service.supplierId) {
+                    // Save as ad-hoc product
+                    const supplier = suppliers.find(s => s.id === service.supplierId);
+                    const adHocProduct: AdHocProduct = {
+                        id: `ah_${Date.now()}_${service.id}`,
+                        name: service.description,
+                        orderId: finalOrder.id,
+                        orderNumber: finalOrder.orderNumber,
+                        supplierId: service.supplierId,
+                        supplierName: supplier?.name,
+                        quantity: 1,
+                        unitPrice: service.price,
+                        cost: service.cost,
+                        unitType: LineItemUnit.UNIT,
+                        date: finalOrder.date,
+                        customerId: finalOrder.customerId,
+                        customerName: selectedCustomer?.name,
+                        notes: service.priceListNotes
+                    };
+                    await createAdHocProduct(adHocProduct);
+                }
+            }
+        } catch (error) {
+            console.error('Error saving sales history:', error);
+            // Don't block order save if history save fails
+        }
+
         onSave(finalOrder);
     };
     
@@ -1363,6 +1559,7 @@ const OrderForm: React.FC<{
     const iDealActiveAndDated = isActiveDeal && hasDealDate;
 
     return (
+        <>
         <form onSubmit={handleSubmit} className="space-y-8 text-start">
              {isNewSupplierModalOpen && (
                 <Modal title="הוספת ספק חדש (שליח/מתקין)" onClose={() => setIsNewSupplierModalOpen(false)}>
@@ -1612,7 +1809,19 @@ const OrderForm: React.FC<{
                                     <button type="button" onClick={() => removeLineItem(index)} className="absolute top-2 left-2 text-red-500 hover:text-red-700 p-1 md:hidden"><DeleteIcon className="h-5 w-5"/></button>
                                     <div className="md:col-span-2">
                                         <label className="text-xs font-medium text-slate-500 md:hidden">תיאור</label>
-                                        <input type="text" placeholder="תיאור" name="description" value={item.description} onChange={e => handleLineItemChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+                                        <div className="flex gap-2">
+                                            <input type="text" placeholder="תיאור" name="description" value={item.description} onChange={e => handleLineItemChange(index, e)} className="mt-1 block flex-1 rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    setProductSelectorFor({ type: 'lineItem', index });
+                                                    setIsProductSelectorOpen(true);
+                                                }}
+                                                className="mt-1 px-3 py-2 text-xs bg-primary text-white rounded-md hover:bg-primary-dark whitespace-nowrap"
+                                            >
+                                                בחר מהמחירון
+                                            </button>
+                                        </div>
                                     </div>
                                     <div className="md:col-span-1">
                                         <label className="text-xs font-medium text-slate-500 md:hidden mt-2">סוג יחידה</label>
@@ -1692,7 +1901,19 @@ const OrderForm: React.FC<{
                                 <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                                     <div className="md:col-span-2">
                                         <label className="block text-xs font-medium text-slate-600">תיאור שירות</label>
-                                        <input type="text" name="description" value={service.description} onChange={e => handleAdditionalServiceChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+                                        <div className="flex gap-2">
+                                            <input type="text" name="description" value={service.description} onChange={e => handleAdditionalServiceChange(index, e)} className="mt-1 block flex-1 rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    setProductSelectorFor({ type: 'additionalService', index });
+                                                    setIsProductSelectorOpen(true);
+                                                }}
+                                                className="mt-1 px-3 py-2 text-xs bg-primary text-white rounded-md hover:bg-primary-dark whitespace-nowrap"
+                                            >
+                                                בחר מהמחירון
+                                            </button>
+                                        </div>
                                     </div>
                                     <div>
                                         <label className="block text-xs font-medium text-slate-600">עלות (עבורנו)</label>
@@ -2182,6 +2403,21 @@ const OrderForm: React.FC<{
                 </div>
             </div>
         </form>
+        {isProductSelectorOpen && productSelectorFor && (
+            <ProductSelectorModal
+                isOpen={isProductSelectorOpen}
+                onClose={() => {
+                    setIsProductSelectorOpen(false);
+                    setProductSelectorFor(null);
+                }}
+                onSelect={handleProductSelect}
+                suppliers={suppliers}
+                orderId={order?.id}
+                orderNumber={order?.orderNumber}
+                orderStatus={order?.orderStatus}
+            />
+        )}
+    </>
     );
 };
 

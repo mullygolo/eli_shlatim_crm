@@ -79,10 +79,17 @@ interface GroupedPaymentTransaction {
     }[];
 }
 
-const calculateDueDate = (orderDate: Date, paymentTerms: string, customDueDate?: Date): Date => {
-    if (customDueDate) return new Date(customDueDate);
+// Helper to ensure date is a Date object
+const ensureDate = (date: Date | string): Date => {
+    if (date instanceof Date) return date;
+    if (typeof date === 'string') return new Date(date);
+    return new Date();
+};
 
-    const orderDateObj = new Date(orderDate);
+const calculateDueDate = (orderDate: Date | string, paymentTerms: string, customDueDate?: Date | string): Date => {
+    if (customDueDate) return ensureDate(customDueDate);
+
+    const orderDateObj = ensureDate(orderDate);
     const endOfMonth = new Date(orderDateObj.getFullYear(), orderDateObj.getMonth() + 1, 0);
 
     if (paymentTerms.startsWith('שוטף ')) {
@@ -285,7 +292,7 @@ const PaymentManagementModal: React.FC<{
     const [notes, setNotes] = useState('');
     
     // Only for single item:
-    const [overrideDate, setOverrideDate] = useState<string>(item ? item.dueDate.toISOString().split('T')[0] : '');
+    const [overrideDate, setOverrideDate] = useState<string>(item ? ensureDate(item.dueDate).toISOString().split('T')[0] : '');
     const [attachment, setAttachment] = useState<Attachment | undefined>(undefined);
     const [activeTab, setActiveTab] = useState<'new' | 'history' | 'settings'>('new');
 
@@ -653,7 +660,7 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
 
                 const calculationBaseDate = order.dealStartDate || order.date;
                 let effectivePaymentTerms = supplier ? supplier.paymentTerms : 'תשלום מיידי';
-                const dueDate = calculateDueDate(calculationBaseDate, effectivePaymentTerms, costItem.customDueDate);
+                const dueDate = calculateDueDate(ensureDate(calculationBaseDate), effectivePaymentTerms, costItem.customDueDate);
                 
                 let totalItemCost = costItem.cost;
                 if (type === 'lineItem') {
@@ -727,7 +734,7 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
                     costGross: costGross, // Gross
                     paidAmount,
                     remainingAmount: Math.max(0, remainingAmount),
-                    orderDate: order.date,
+                    orderDate: ensureDate(order.date),
                     dueDate,
                     isCustomDueDate: !!costItem.customDueDate,
                     status,
@@ -751,7 +758,8 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
         rawPayables.forEach(item => {
             if (item.payments && item.payments.length > 0) {
                 item.payments.forEach(p => {
-                    const dateStr = p.date.toISOString().split('T')[0];
+                    const paymentDate = ensureDate(p.date);
+                    const dateStr = paymentDate.toISOString().split('T')[0];
                     const safeRef = p.reference || 'NO_REF';
                     // Group Key: Date + Supplier + Reference + Method
                     const key = `${dateStr}_${item.supplierId}_${safeRef}_${p.method}`;
@@ -761,7 +769,7 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
                             id: key,
                             supplierId: item.supplierId,
                             supplierName: item.supplierName,
-                            date: p.date,
+                            date: paymentDate,
                             method: p.method,
                             reference: p.reference || '',
                             totalAmount: 0,

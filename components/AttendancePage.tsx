@@ -7,6 +7,7 @@ import { calculateOrderTotals, getEmployeeSalaryAtDate } from '../utils/calculat
 import { getJewishHoliday } from '../utils/holidays';
 import { useAuth } from '../contexts/AuthContext';
 import * as mongoService from '../services/mongoService';
+import { getDateStringForComparison, getDateStringIsrael } from '../utils/timezone';
 
 interface AttendancePageProps {
     employees: Employee[];
@@ -363,6 +364,26 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
         return () => clearInterval(timer);
     }, []);
     
+    // Auto-close old records on component mount and periodically
+    useEffect(() => {
+        const checkAndCloseOldRecords = async () => {
+            try {
+                // Refresh records from server (this will trigger auto-close on server side)
+                const updatedRecords = await mongoService.getAttendanceRecords();
+                setRecords(updatedRecords);
+            } catch (error) {
+                console.error('Error refreshing records to close old ones:', error);
+            }
+        };
+        
+        // Check immediately on mount
+        checkAndCloseOldRecords();
+        
+        // Also check every 5 minutes to catch any old records
+        const interval = setInterval(checkAndCloseOldRecords, 5 * 60 * 1000);
+        return () => clearInterval(interval);
+    }, [setRecords]);
+    
     // עדכן currentEmployeeId אם המשתמש הוא עובד רגיל
     useEffect(() => {
         if (user?.roleType === 'EMPLOYEE' && user.id) {
@@ -386,9 +407,13 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
     const isManager = isUserManager;
 
     const todaysRecords = useMemo(() => {
-        const todayStr = new Date().toDateString();
+        const todayStr = getDateStringIsrael(); // Use Israel timezone
         return records
-            .filter(r => r.employeeId === currentEmployeeId && new Date(r.date).toDateString() === todayStr)
+            .filter(r => {
+                if (r.employeeId !== currentEmployeeId) return false;
+                const recordDateStr = getDateStringForComparison(r.date);
+                return recordDateStr === todayStr;
+            })
             .sort((a, b) => new Date(a.clockIn || 0).getTime() - new Date(b.clockIn || 0).getTime());
     }, [records, currentEmployeeId]);
 
@@ -409,6 +434,35 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
     const saveToOfflineQueue = (action: 'IN' | 'OUT', data: any) => {
         try {
             const queue = JSON.parse(localStorage.getItem('attendanceQueue') || '[]');
+            const todayStr = getDateStringIsrael();
+            
+            // Check for duplicates before adding to queue
+            if (action === 'IN') {
+                // Check if there's already a pending clock-in for this employee today
+                const hasPendingClockIn = queue.some((item: any) => 
+                    item.action === 'IN' && 
+                    item.data.employeeId === data.employeeId &&
+                    // Check if it's from today (within last 24 hours)
+                    (Date.now() - item.timestamp) < 24 * 60 * 60 * 1000
+                );
+                
+                if (hasPendingClockIn) {
+                    console.log('Skipping duplicate clock-in in offline queue');
+                    return;
+                }
+            } else if (action === 'OUT') {
+                // Check if there's already a pending clock-out for this record
+                const hasPendingClockOut = queue.some((item: any) => 
+                    item.action === 'OUT' && 
+                    item.data.recordId === data.recordId
+                );
+                
+                if (hasPendingClockOut) {
+                    console.log('Skipping duplicate clock-out in offline queue');
+                    return;
+                }
+            }
+            
             queue.push({ action, data, timestamp: Date.now() });
             localStorage.setItem('attendanceQueue', JSON.stringify(queue));
         } catch (error) {
@@ -444,18 +498,59 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
                 const queue = JSON.parse(localStorage.getItem('attendanceQueue') || '[]');
                 if (queue.length === 0) return;
 
+                // First, refresh records to get latest state
+                const currentRecords = await mongoService.getAttendanceRecords();
+                setRecords(currentRecords);
+
                 const processed: number[] = [];
+                const todayStr = getDateStringIsrael();
+                
                 for (const item of queue) {
                     try {
+                        // Check if this action is still valid before processing
                         if (item.action === 'IN') {
+                            // Check if there's already an active clock-in for this employee today
+                            const hasActiveRecord = currentRecords.some(r => {
+                                if (r.employeeId !== item.data.employeeId) return false;
+                                const recordDateStr = getDateStringForComparison(r.date);
+                                return recordDateStr === todayStr && !r.clockOut;
+                            });
+                            
+                            if (hasActiveRecord) {
+                                // Skip this item - already clocked in
+                                console.log('Skipping duplicate clock-in from queue');
+                                processed.push(item.timestamp);
+                                continue;
+                            }
+                            
                             await mongoService.clockIn(item.data.employeeId, item.data.isWFH);
                         } else if (item.action === 'OUT') {
+                            // Check if the record still exists and doesn't have clockOut
+                            const record = currentRecords.find(r => r.id === item.data.recordId);
+                            if (!record) {
+                                // Record doesn't exist, skip
+                                console.log('Skipping clock-out for non-existent record');
+                                processed.push(item.timestamp);
+                                continue;
+                            }
+                            if (record.clockOut) {
+                                // Already clocked out, skip
+                                console.log('Skipping duplicate clock-out from queue');
+                                processed.push(item.timestamp);
+                                continue;
+                            }
+                            
                             await mongoService.clockOut(item.data.recordId);
                         }
                         processed.push(item.timestamp);
-                    } catch (error) {
+                    } catch (error: any) {
                         console.error('Error processing offline queue item:', error);
-                        // Keep failed items in queue for next attempt
+                        // If it's a duplicate error, mark as processed to avoid retrying
+                        if (error?.message && error.message.includes('already has an active clock-in')) {
+                            console.log('Skipping duplicate clock-in from queue (server rejected)');
+                            processed.push(item.timestamp);
+                        }
+                        // Otherwise, keep failed items in queue for next attempt
                     }
                 }
 
@@ -480,7 +575,7 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
 
             return () => clearInterval(interval);
         }
-    }, [setRecords]);
+    }, [setRecords, currentEmployeeId]);
 
     const handleClockAction = async (action: 'IN' | 'OUT') => {
         if (isClocking) return; // Prevent double-clicks
@@ -490,9 +585,20 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
 
         try {
             if (action === 'IN') {
-                if (activeRecord) {
+                // Double-check activeRecord before proceeding (defense in depth)
+                const latestRecords = await mongoService.getAttendanceRecords();
+                const todayStr = getDateStringIsrael();
+                const hasActive = latestRecords.some(r => {
+                    if (r.employeeId !== currentEmployeeId) return false;
+                    const recordDateStr = getDateStringForComparison(r.date);
+                    return recordDateStr === todayStr && !r.clockOut;
+                });
+                
+                if (hasActive || activeRecord) {
                     setErrorMessage('כבר יש כניסה פעילה להיום');
                     setIsClocking(false);
+                    // Refresh records to show the active one
+                    setRecords(latestRecords);
                     return;
                 }
 
@@ -504,12 +610,15 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
                 // Update local state with server response
                 setRecords(prev => {
                     // Remove any existing record for today (shouldn't happen, but safety)
-                    const todayStr = new Date().toDateString();
+                    const todayStr = getDateStringIsrael(); // Use Israel timezone
                     const filtered = prev.filter(r => {
-                        const recordDate = new Date(r.date).toDateString();
-                        return !(r.employeeId === currentEmployeeId && recordDate === todayStr && !r.clockOut);
+                        if (r.employeeId !== currentEmployeeId) return true;
+                        const recordDateStr = getDateStringForComparison(r.date);
+                        return !(recordDateStr === todayStr && !r.clockOut);
                     });
-                    return [...filtered, savedRecord];
+                    // Check if savedRecord already exists in filtered array to avoid duplicates
+                    const exists = filtered.some(r => r.id === savedRecord.id);
+                    return exists ? filtered : [...filtered, savedRecord];
                 });
                 
                 // Refresh all records from server to ensure consistency
@@ -703,7 +812,7 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
         const uniqueDays = new Set(
             empRecords
                 .filter(r => r.status === 'PRESENT' || r.status === 'WFH')
-                .map(r => new Date(r.date).toDateString())
+                .map(r => getDateStringForComparison(r.date))
         );
         const workDays = uniqueDays.size;
         
@@ -841,10 +950,10 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
         ];
         
         const dataRows = daysInMonth.map(date => {
-            const dateKey = date.toDateString();
+            const dateKey = getDateStringForComparison(date);
             const dayRecords = records.filter(r => 
                 r.employeeId === currentEmployeeId && 
-                new Date(r.date).toDateString() === dateKey
+                getDateStringForComparison(r.date) === dateKey
             );
             
             if (dayRecords.length === 0) {
@@ -1173,10 +1282,10 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
                             </thead>
                             <tbody className="divide-y divide-slate-100">
                                 {daysInMonth.map((date) => {
-                                    const dateKey = date.toDateString();
+                                    const dateKey = getDateStringForComparison(date);
                                     const holiday = getJewishHoliday(date);
                                     const dayRecords = records
-                                        .filter(r => r.employeeId === currentEmployeeId && new Date(r.date).toDateString() === dateKey)
+                                        .filter(r => r.employeeId === currentEmployeeId && getDateStringForComparison(r.date) === dateKey)
                                         .sort((a, b) => new Date(a.clockIn || 0).getTime() - new Date(b.clockIn || 0).getTime());
                                     const isWeekend = date.getDay() === 5 || date.getDay() === 6;
                                     const isFuture = date > new Date();
@@ -1203,6 +1312,12 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
                                         const isWfh = record.status === 'WFH';
                                         const isPresence = record.status === 'PRESENT' || isWfh;
                                         const hasCertificate = !!record.certificate || !!record.correctionRequest?.certificate;
+                                        
+                                        // Check if this record is from today (to show "פעיל..." only for today's records)
+                                        const todayStr = getDateStringIsrael();
+                                        const recordDateStr = getDateStringForComparison(record.date);
+                                        const isToday = recordDateStr === todayStr;
+                                        
                                         return (
                                             <tr key={record.id} className={`hover:bg-slate-50 transition-colors ${record.status === 'PENDING_APPROVAL' ? 'bg-orange-50/60' : isRejected ? 'bg-red-50' : isLeave ? 'bg-amber-50/40' : isWfh ? 'bg-indigo-50/40' : holiday ? 'bg-purple-50/30' : ''}`}>
                                                 <td className="px-6 py-4">
@@ -1216,7 +1331,8 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
                                                 </td>
                                                 <td className="px-6 py-4 text-slate-500 font-medium">{idx === 0 && date.toLocaleDateString('he-IL', { weekday: 'long' })}</td>
                                                 <td className={`px-6 py-4 font-mono font-bold ${record.status === 'PENDING_APPROVAL' ? 'text-slate-400 italic' : 'text-slate-700'}`}>{record.clockIn ? new Date(record.clockIn).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : (record.correctionRequest?.requestedClockIn ? new Date(record.correctionRequest.requestedClockIn).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : '-')}</td>
-                                                <td className={`px-6 py-4 font-mono font-bold ${record.status === 'PENDING_APPROVAL' ? 'text-slate-400 italic' : 'text-slate-700'}`}>{record.clockOut ? new Date(record.clockOut).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : (record.correctionRequest?.requestedClockOut ? new Date(record.correctionRequest.requestedClockOut).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : (isPresence ? 'פעיל...' : '-'))}</td>
+                                                <td className={`px-6 py-4 font-mono font-bold ${record.status === 'PENDING_APPROVAL' ? 'text-slate-400 italic' : 'text-slate-700'}`}>{record.clockOut ? new Date(record.clockOut).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : (record.correctionRequest?.requestedClockOut ? new Date(record.correctionRequest.requestedClockOut).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : (isPresence && isToday ? 'פעיל...' : (isPresence && !isToday ? 'לא הושלם' : '-')))}
+                                                </td>
                                                 <td className={`px-6 py-4 font-black ${isLeave ? 'text-slate-400 font-medium italic' : 'text-slate-800'}`}>{isPresence ? formatDecimalHoursToTime(record.totalHours) : (isLeave ? 'ללא שעות' : '0:00')}</td>
                                                 <td className="px-6 py-4"><div className="flex flex-col gap-1">{record.status === 'PENDING_APPROVAL' ? (<span className="text-[10px] bg-orange-100 text-orange-800 px-2 py-1 rounded-full font-black w-fit uppercase tracking-tight">ממתין לאישור</span>) : isRejected ? (<span className="text-[10px] bg-red-100 text-red-800 px-2 py-1 rounded-full font-black w-fit uppercase tracking-tight">נדחה</span>) : record.status === 'VACATION' ? (<span className="text-[10px] bg-amber-100 text-amber-800 px-2 py-1 rounded-full font-black w-fit uppercase tracking-tight">חופשה</span>) : record.status === 'SICK' ? (<button onClick={() => hasCertificate && setViewingCertificate(record.certificate || record.correctionRequest?.certificate || null)} className={`text-[10px] bg-rose-100 text-rose-800 px-2 py-1 rounded-full font-black w-fit flex items-center gap-1 uppercase tracking-tight ${hasCertificate ? 'hover:bg-rose-200 cursor-pointer shadow-sm' : 'cursor-default'}`} title={hasCertificate ? "לחץ לצפייה באישור" : "מחלה"}>מחלה {hasCertificate && <span>📄</span>}</button>) : record.status === 'WFH' ? (<span className="text-[10px] bg-indigo-100 text-indigo-800 px-2.5 py-1 rounded-full font-black w-fit flex items-center gap-1 uppercase tracking-tight shadow-sm ring-1 ring-indigo-200">🏠 מהבית</span>) : (<span className="text-[10px] bg-green-100 text-green-800 px-2.5 py-1 rounded-full font-black w-fit uppercase tracking-tight shadow-sm ring-1 ring-green-200">נוכח</span>)}{record.note && <span className="text-[9px] text-slate-400 font-bold max-w-[120px] truncate" title={record.note}>{record.note}</span>}</div></td>
                                                 <td className="px-6 py-4">{(record.status !== 'PENDING_APPROVAL' && !isRejected) && (<button onClick={() => openCorrectionModal(date, record)} className="text-primary hover:bg-indigo-100 p-2 rounded-full transition-all" title="בקש תיקון"><EditIcon className="w-4 h-4"/></button>)}</td>

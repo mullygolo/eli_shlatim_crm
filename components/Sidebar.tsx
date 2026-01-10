@@ -1,7 +1,7 @@
 
 import React from 'react';
 import { Page } from '../types';
-import { DashboardIcon, OrdersIcon, CustomersIcon, SuppliersIcon, ReportsIcon, SettingsIcon, FinanceIcon, ClockIcon } from './icons';
+import { DashboardIcon, OrdersIcon, CustomersIcon, SuppliersIcon, ReportsIcon, SettingsIcon, FinanceIcon, ClockIcon, PriceListIcon } from './icons';
 import { PAGE_TITLES } from '../App';
 import { useAuth } from '../contexts/AuthContext';
 
@@ -19,6 +19,7 @@ const Sidebar: React.FC<SidebarProps> = ({ currentPage, setCurrentPage }) => {
         { page: 'Orders', icon: <OrdersIcon className="h-6 w-6" /> },
         { page: 'Customers', icon: <CustomersIcon className="h-6 w-6" /> },
         { page: 'Suppliers', icon: <SuppliersIcon className="h-6 w-6" /> },
+        { page: 'PriceList', icon: <PriceListIcon className="h-6 w-6" /> },
         { page: 'Reports', icon: <ReportsIcon className="h-6 w-6" />, label: 'תשלום לספקים' },
         ...(isEmployee ? [] : [{ page: 'Finance', icon: <FinanceIcon className="h-6 w-6" />, label: 'דוחות כספיים' }]),
         { page: 'Attendance', icon: <ClockIcon className="h-6 w-6" />, label: 'נוכחות ושכר' },

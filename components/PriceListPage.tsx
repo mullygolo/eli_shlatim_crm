@@ -286,20 +286,20 @@ const PriceListPage: React.FC<PriceListPageProps> = ({ suppliers }) => {
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-slate-200">
-                                    {filteredProducts.map(product => (
+                        {filteredProducts.map(product => (
                                             <tr key={product.id} className="hover:bg-slate-50">
                                                 <td className="px-6 py-4">
                                                     {product.images && product.images.length > 0 ? (
-                                                        <img 
-                                                            src={product.images[0].dataUrl} 
-                                                            alt={product.name}
+                                        <img 
+                                            src={product.images[0].dataUrl} 
+                                            alt={product.name}
                                                             className="w-12 h-12 object-cover rounded"
-                                                        />
+                                        />
                                                     ) : (
                                                         <div className="w-12 h-12 bg-slate-100 rounded flex items-center justify-center">
                                                             <span className="text-slate-400 text-xs">אין תמונה</span>
-                                                        </div>
-                                                    )}
+                                    </div>
+                                )}
                                                 </td>
                                                 <td className="px-6 py-4">
                                                     <div className="font-bold text-dark-text">{product.name}</div>
@@ -311,7 +311,7 @@ const PriceListPage: React.FC<PriceListPageProps> = ({ suppliers }) => {
                                                 <td className="px-6 py-4 text-sm text-slate-600">
                                                     <span className="truncate block max-w-[200px]" title={product.description}>
                                                         {product.description || '-'}
-                                                    </span>
+                                                </span>
                                                 </td>
                                                 <td className="px-6 py-4 text-sm text-slate-700">
                                                     {formatSupplierCost(product)}
@@ -333,15 +333,15 @@ const PriceListPage: React.FC<PriceListPageProps> = ({ suppliers }) => {
                                                         >
                                                             <DeleteIcon className="h-5 w-5" />
                                                         </button>
-                                                    </div>
+                                        </div>
                                                 </td>
                                             </tr>
                                         )
-                                    )}
-                                    {filteredProducts.length === 0 && (
+                                )}
+                    {filteredProducts.length === 0 && (
                                         <tr>
                                             <td colSpan={7} className="px-6 py-12 text-center text-slate-500">
-                                                <p>לא נמצאו מוצרים</p>
+                            <p>לא נמצאו מוצרים</p>
                                             </td>
                                         </tr>
                                     )}

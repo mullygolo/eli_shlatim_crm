@@ -520,6 +520,7 @@ export interface SupplierPricing {
     baseCost?: number; // מחיר בסיס למ"ר (אופציונלי)
     priceTiers?: PriceTier[]; // טווחי מחירים לפי כמויות
     costRange?: { min: number; max: number }; // טווח עלות פשוט (מ-X עד Y ללא קשר ליחידות מידה)
+    variantCosts?: { variantId: string; cost: number }[]; // עלויות לכל תת-מוצר
 }
 
 export interface ProductAddon {
@@ -535,9 +536,8 @@ export interface ProductVariant {
     name?: string; // Optional name for the variant (e.g., "קטן", "בינוני")
     width?: number; // Width in cm
     height?: number; // Height in cm
-    size?: string; // Alternative: free text size (e.g., "10/10 ס״מ")
+    notes?: string; // הערה על התת-מוצר (e.g., "10/10 ס״מ")
     customerPrice: number; // מחיר ללקוח
-    supplierCost?: number; // עלות מספק (optional)
     isActive?: boolean;
 }
 

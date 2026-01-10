@@ -95,12 +95,12 @@ export function calculateProductPrice(
             }
         } else {
             // Fallback to legacy structure for backward compatibility
-            unitCost = calculateTieredPrice(
-                product.supplierBaseCost || 0,
-                valueForTiers,
-                product.supplierPriceTiers || [],
-                'cost'
-            );
+        unitCost = calculateTieredPrice(
+            product.supplierBaseCost || 0,
+            valueForTiers,
+            product.supplierPriceTiers || [],
+            'cost'
+        );
         }
 
     } else if (product.productType === 'shipping') {

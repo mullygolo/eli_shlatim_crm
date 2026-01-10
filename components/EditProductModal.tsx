@@ -100,9 +100,8 @@ const EditProductModal: React.FC<EditProductModalProps> = ({ product, suppliers,
             id: `variant_${Date.now()}`,
             width: undefined,
             height: undefined,
-            size: '',
+            notes: '',
             customerPrice: 0,
-            supplierCost: undefined,
             isActive: true,
         };
         const updated = [...variants, newVariant];
@@ -490,8 +489,8 @@ const EditProductModal: React.FC<EditProductModalProps> = ({ product, suppliers,
                                         </div>
                                     </div>
                                 ))}
-                            </div>
-                        )}
+                               </div>
+                           )}
                     </div>
 
                     {/* תת-מוצרים (מידות מוגדרות מראש) */}
@@ -517,7 +516,7 @@ const EditProductModal: React.FC<EditProductModalProps> = ({ product, suppliers,
                             <div className="space-y-3">
                                 {variants.map((variant, index) => (
                                     <div key={variant.id} className="bg-white p-3 rounded-md border border-slate-200">
-                                        <div className="grid grid-cols-6 gap-3 items-end">
+                                        <div className="grid grid-cols-5 gap-3 items-end">
                                             <div>
                                                 <label className="block text-xs text-slate-600 mb-1">שם (אופציונלי)</label>
                                                 <input
@@ -551,13 +550,13 @@ const EditProductModal: React.FC<EditProductModalProps> = ({ product, suppliers,
                                                 />
                                             </div>
                                             <div>
-                                                <label className="block text-xs text-slate-600 mb-1">או מידה (טקסט)</label>
+                                                <label className="block text-xs text-slate-600 mb-1">הערה</label>
                                                 <input
                                                     type="text"
-                                                    value={variant.size || ''}
-                                                    onChange={(e) => updateVariant(index, 'size', e.target.value)}
+                                                    value={variant.notes || ''}
+                                                    onChange={(e) => updateVariant(index, 'notes', e.target.value)}
                                                     className="w-full px-2 py-1 text-sm border border-slate-300 rounded-md"
-                                                    placeholder="10/10 ס״מ"
+                                                    placeholder="10/10 ס״מ או הערות אחרות"
                                                 />
                                             </div>
                                             <div>
@@ -570,16 +569,31 @@ const EditProductModal: React.FC<EditProductModalProps> = ({ product, suppliers,
                                                     step="0.01"
                                                     required
                                                 />
-                                            </div>
-                                            <div>
-                                                <label className="block text-xs text-slate-600 mb-1">עלות מספק</label>
-                                                <input
-                                                    type="number"
-                                                    value={variant.supplierCost || ''}
-                                                    onChange={(e) => updateVariant(index, 'supplierCost', parseFloat(e.target.value) || undefined)}
-                                                    className="w-full px-2 py-1 text-sm border border-slate-300 rounded-md"
-                                                    step="0.01"
-                                                />
+                                                
+                                                {/* Display supplier costs for this variant */}
+                                                {formData.supplierPricings && formData.supplierPricings.length > 0 && (() => {
+                                                    const supplierCostsForVariant = formData.supplierPricings
+                                                        .map(sp => {
+                                                            const vc = sp.variantCosts?.find(v => v.variantId === variant.id);
+                                                            return vc ? { supplierName: sp.supplierName, cost: vc.cost } : null;
+                                                        })
+                                                        .filter(Boolean) as { supplierName: string; cost: number }[];
+                                                    
+                                                    if (supplierCostsForVariant.length > 0) {
+                                                        return (
+                                                            <div className="mt-1 text-xs text-slate-500 bg-slate-50 p-1 rounded">
+                                                                <span className="font-medium">עלויות מספקים: </span>
+                                                                {supplierCostsForVariant.map((sc, i) => (
+                                                                    <span key={i}>
+                                                                        {sc.supplierName}: ₪{sc.cost.toLocaleString()}
+                                                                        {i < supplierCostsForVariant.length - 1 ? ', ' : ''}
+                                                                    </span>
+                                                                ))}
+                                                            </div>
+                                                        );
+                                                    }
+                                                    return null;
+                                                })()}
                                             </div>
                                         </div>
                                         <div className="flex justify-end mt-2">
@@ -816,6 +830,125 @@ const EditProductModal: React.FC<EditProductModalProps> = ({ product, suppliers,
                                             </div>
                                         )}
                                     </div>
+
+                                    {/* עלויות לתת-מוצרים */}
+                                    {variants && variants.length > 0 && (
+                                        <div className="pt-2 border-t border-slate-200">
+                                            <div className="flex justify-between items-center mb-2">
+                                                <div>
+                                                    <h5 className="text-xs font-medium text-slate-800 mb-1">עלויות לתת-מוצרים</h5>
+                                                    <p className="text-xs text-slate-500">
+                                                        הגדר עלות לכל תת-מוצר. אם לא מוגדר, יוחל המחיר הבסיס או טווחי המחירים.
+                                                    </p>
+                                                </div>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        // Copy all variants from customer pricing
+                                                        const pricings = formData.supplierPricings ? [...formData.supplierPricings] : [];
+                                                        const variantCosts = variants.map(v => ({
+                                                            variantId: v.id,
+                                                            cost: 0 // Default cost, user can update
+                                                        }));
+                                                        pricings[idx] = {
+                                                            ...pricings[idx],
+                                                            variantCosts: variantCosts
+                                                        };
+                                                        setFormData(prev => ({ ...prev, supplierPricings: pricings }));
+                                                    }}
+                                                    className="px-2 py-1 text-xs bg-slate-100 text-slate-700 rounded-md hover:bg-slate-200"
+                                                >
+                                                    העתק תת-מוצרים מלקוח
+                                                </button>
+                                            </div>
+
+                                            {sp.variantCosts && sp.variantCosts.length > 0 && (
+                                                <div className="space-y-2">
+                                                    {sp.variantCosts.map((vc, vcIndex) => {
+                                                        const variant = variants.find(v => v.id === vc.variantId);
+                                                        if (!variant) return null;
+                                                        return (
+                                                            <div key={vc.variantId} className="bg-white p-2 rounded-md border border-slate-200">
+                                                                <div className="grid grid-cols-4 gap-2 items-center">
+                                                                    <div className="col-span-2">
+                                                                        <div className="space-y-1">
+                                                                            <span className="text-xs font-medium text-slate-700 block">
+                                                                                {variant.name || `תת-מוצר ${vcIndex + 1}`}
+                                                                            </span>
+                                                                            {(variant.width || variant.height) && (
+                                                                                <span className="text-xs text-slate-600 block">
+                                                                                    {variant.width && variant.height 
+                                                                                        ? `${variant.width}x${variant.height} ס״מ`
+                                                                                        : variant.width 
+                                                                                        ? `רוחב: ${variant.width} ס״מ`
+                                                                                        : `גובה: ${variant.height} ס״מ`}
+                                                                                </span>
+                                                                            )}
+                                                                            {variant.notes && (
+                                                                                <p className="text-xs text-slate-500">{variant.notes}</p>
+                                                                            )}
+                                                                            {variant.customerPrice && (
+                                                                                <p className="text-xs text-slate-400">
+                                                                                    מחיר ללקוח: ₪{variant.customerPrice.toLocaleString()}
+                                                                                </p>
+                                                                            )}
+                                                                        </div>
+                                                                    </div>
+                                                                    <div>
+                                                                        <label className="block text-xs text-slate-600 mb-1">עלות מספק</label>
+                                                                        <input
+                                                                            type="number"
+                                                                            value={vc.cost || 0}
+                                                                            onChange={(e) => {
+                                                                                const pricings = formData.supplierPricings ? [...formData.supplierPricings] : [];
+                                                                                const updatedCosts = [...(pricings[idx].variantCosts || [])];
+                                                                                const existingIndex = updatedCosts.findIndex(v => v.variantId === vc.variantId);
+                                                                                if (existingIndex >= 0) {
+                                                                                    updatedCosts[existingIndex] = {
+                                                                                        ...updatedCosts[existingIndex],
+                                                                                        cost: parseFloat(e.target.value) || 0
+                                                                                    };
+                                                                                } else {
+                                                                                    updatedCosts.push({
+                                                                                        variantId: vc.variantId,
+                                                                                        cost: parseFloat(e.target.value) || 0
+                                                                                    });
+                                                                                }
+                                                                                pricings[idx] = {
+                                                                                    ...pricings[idx],
+                                                                                    variantCosts: updatedCosts
+                                                                                };
+                                                                                setFormData(prev => ({ ...prev, supplierPricings: pricings }));
+                                                                            }}
+                                                                            className="w-full px-2 py-1 text-xs border border-slate-300 rounded-md"
+                                                                            step="0.01"
+                                                                        />
+                                                                    </div>
+                                                                    <div className="flex justify-end">
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={() => {
+                                                                                const pricings = formData.supplierPricings ? [...formData.supplierPricings] : [];
+                                                                                const updatedCosts = (pricings[idx].variantCosts || []).filter(v => v.variantId !== vc.variantId);
+                                                                                pricings[idx] = {
+                                                                                    ...pricings[idx],
+                                                                                    variantCosts: updatedCosts.length > 0 ? updatedCosts : undefined
+                                                                                };
+                                                                                setFormData(prev => ({ ...prev, supplierPricings: pricings }));
+                                                                            }}
+                                                                            className="px-1 py-1 text-red-600 hover:text-red-800"
+                                                                        >
+                                                                            <DeleteIcon className="h-4 w-4" />
+                                                                        </button>
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+                                                        );
+                                                    })}
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
                                         </>
                            )}
                                 </div>

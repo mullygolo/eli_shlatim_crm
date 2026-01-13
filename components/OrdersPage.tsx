@@ -4,11 +4,13 @@ import { PAYMENT_STATUSES_ORDERED, PAYMENT_TERMS_OPTIONS, CUSTOMER_CATEGORIES } 
 import { PlusIcon, EditIcon, DeleteIcon, WhatsAppIcon, EmailIcon, PhoneIcon, NoteIcon, TaskIcon, LogIcon, SettingsIcon, LockIcon, CashIcon, DownloadIcon } from './icons';
 import Modal from './Modal';
 import ProductSelectorModal from './ProductSelectorModal';
+import SendItemToSuppliersModal from './SendItemToSuppliersModal';
+import SendOrderToSuppliersModal from './SendOrderToSuppliersModal';
 import { calculateOrderTotals, calculateDueDate } from '../utils/calculations';
 import MultiSelectFilter from './MultiSelectFilter';
 import * as mongoService from '../services/mongoService';
 import { getProducts } from '../services/priceListService';
-import { addSalesHistoryEntry, createAdHocProduct } from '../services/priceListService';
+import { addSalesHistoryEntry, createAdHocProduct, sendQuoteRequests } from '../services/priceListService';
 import { calculateProductPrice } from '../utils/priceCalculations';
 
 interface OrdersPageProps {
@@ -608,7 +610,7 @@ const OrderForm: React.FC<{
         address: '',
         category: '',
         paymentMethod: PaymentMethod.BANK_TRANSFER,
-        paymentTerms: 'שוטף 30',
+        paymentTerms: 'תשלום מיידי',
     });
 
     const isEditMode = !!order;
@@ -659,6 +661,9 @@ const OrderForm: React.FC<{
     const [newServiceSupplierFor, setNewServiceSupplierFor] = useState<number | null>(null);
     const [isProductSelectorOpen, setIsProductSelectorOpen] = useState(false);
     const [productSelectorFor, setProductSelectorFor] = useState<{ type: 'lineItem' | 'additionalService'; index: number } | null>(null);
+    const [sendItemModalOpen, setSendItemModalOpen] = useState(false);
+    const [sendItemForIndex, setSendItemForIndex] = useState<number | null>(null);
+    const [sendOrderModalOpen, setSendOrderModalOpen] = useState(false);
      const [timelineFilter, setTimelineFilter] = useState<'ALL' | 'HUMAN' | 'SYSTEM'>('HUMAN');
      const [newTimelineEntry, setNewTimelineEntry] = useState({
         type: 'NOTE' as 'NOTE' | 'TASK',
@@ -893,17 +898,69 @@ const OrderForm: React.FC<{
         setNewCustomerData(prev => ({ ...prev, [name]: value }));
     };
     
-    const handleLineItemChange = (index: number, e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
+    const handleLineItemChange = async (index: number, e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
         const { name, value } = e.target;
         const newLineItems = [...formData.lineItems];
         const item = { ...newLineItems[index] };
 
-        (item as any)[name] = (name === 'description' || name === 'unitType' || name === 'supplierId') ? value : parseFloat(value) || 0;
+        (item as any)[name] = (name === 'description' || name === 'unitType' || name === 'supplierId' || name === 'notes') ? value : parseFloat(value) || 0;
 
         if (item.unitType === LineItemUnit.M2) {
             const width = item.width || 0;
             const height = item.height || 0;
             item.quantity = width * height;
+        }
+
+        // Auto-update price if priceListProductId exists and relevant fields changed
+        if (item.priceListProductId && (name === 'quantity' || name === 'width' || name === 'height' || name === 'unitType' || name === 'supplierId')) {
+            try {
+                const products = await getProducts();
+                const product = products.find(p => p.id === item.priceListProductId);
+                if (product) {
+                    // אם supplierId ריק או לא קיים, הגדר cost = 0
+                    if (!item.supplierId || item.supplierId === '') {
+                        item.cost = 0;
+                        // unitPrice נשאר כמו שהוא (מחיר ללקוח לא תלוי בספק)
+                    } else {
+                        // בדוק אם לספק שנבחר יש מחירים במוצר
+                        const hasSupplierPricing = product.supplierPricings?.some(sp => {
+                            if (sp.supplierId !== item.supplierId) return false;
+                            // בדוק אם לספק יש לפחות אחד מהאופציות הבאות:
+                            return sp.baseCost !== undefined || 
+                                   (sp.priceTiers && sp.priceTiers.length > 0) ||
+                                   (sp.variantCosts && sp.variantCosts.length > 0) ||
+                                   (sp.costRange && sp.costRange.min !== undefined);
+                        });
+                        
+                        if (!hasSupplierPricing) {
+                            // לספק אין מחירים - הגדר cost = 0
+                            item.cost = 0;
+                            // unitPrice נשאר כמו שהוא
+                        } else {
+                            // לספק יש מחירים - חשב רגיל
+                            const size = item.unitType === LineItemUnit.M2 && item.width && item.height 
+                                ? { width: item.width, height: item.height } 
+                                : undefined;
+                            const quantity = item.unitType === LineItemUnit.M2 && item.width && item.height
+                                ? item.width * item.height
+                                : item.quantity;
+                            const calculated = calculateProductPrice(
+                                product,
+                                quantity,
+                                size,
+                                item.selectedAddons,
+                                item.supplierId || undefined,
+                                item.variantId,
+                                item.unitType
+                            );
+                            item.unitPrice = calculated.unitPrice;
+                            item.cost = calculated.unitCost;
+                        }
+                    }
+                }
+            } catch (error) {
+                console.error('Error updating price:', error);
+            }
         }
 
         newLineItems[index] = item;
@@ -923,60 +980,111 @@ const OrderForm: React.FC<{
         setFormData(prev => ({ ...prev, lineItems: prev.lineItems.filter((_, i) => i !== index)}));
     };
 
+    // Track if this is the first product being added (to replace empty item) or subsequent ones (to add new items)
+    const productSelectionCounterRef = React.useRef<number>(0);
+
     const handleProductSelect = (
         product: PriceListProduct,
         supplierId: string,
         quantity: number,
         size?: { width?: number; height?: number },
-        selectedAddons?: string[]
+        selectedAddons?: string[],
+        variantId?: string,
+        description?: string,
+        unitType?: LineItemUnit,
+        notes?: string
     ) => {
         if (!productSelectorFor) return;
 
         try {
-            const calculated = calculateProductPrice(product, quantity, size, selectedAddons, supplierId);
+            const calculated = calculateProductPrice(product, quantity, size, selectedAddons, supplierId, variantId, unitType);
+            const isFirstProduct = productSelectionCounterRef.current === 0;
+            productSelectionCounterRef.current++;
+            
+            // Use provided description or fall back to product name
+            const itemDescription = description || product.name;
+            // Use provided unitType or fall back to product baseUnit
+            const itemUnitType = unitType || product.baseUnit || LineItemUnit.UNIT;
             
             if (productSelectorFor.type === 'lineItem') {
-                const newLineItems = [...formData.lineItems];
-                const item = { ...newLineItems[productSelectorFor.index] };
+                // Create new line item
+                const newItem: LineItem = {
+                    id: `li_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                    description: itemDescription,
+                    unitPrice: calculated.unitPrice,
+                    cost: calculated.unitCost,
+                    supplierId: supplierId,
+                    priceListProductId: product.id,
+                    selectedAddons: selectedAddons,
+                    priceListNotes: product.notes,
+                    unitType: itemUnitType,
+                    variantId: variantId,
+                    notes: notes,
+                };
                 
-                item.description = product.name;
-                item.unitPrice = calculated.unitPrice;
-                item.cost = calculated.cost;
-                item.supplierId = supplierId;
-                item.priceListProductId = product.id;
-                item.selectedAddons = selectedAddons;
-                item.priceListNotes = product.notes;
-                
-                if (product.baseUnit === LineItemUnit.M2 && size) {
-                    item.unitType = LineItemUnit.M2;
-                    item.width = size.width;
-                    item.height = size.height;
-                    item.quantity = (size.width || 0) * (size.height || 0);
-                } else {
-                    item.unitType = product.baseUnit;
-                    item.quantity = quantity;
+                // Set width and height if provided
+                if (size && size.width !== undefined && size.height !== undefined) {
+                    newItem.width = size.width;
+                    newItem.height = size.height;
                 }
                 
-                newLineItems[productSelectorFor.index] = item;
-                setFormData(prev => ({ ...prev, lineItems: newLineItems }));
+                // Calculate quantity based on unit type
+                if (itemUnitType === LineItemUnit.M2 && size && size.width && size.height) {
+                    newItem.quantity = size.width * size.height;
+                } else {
+                    newItem.quantity = quantity;
+                }
+                
+                // Use functional update to ensure we're working with the latest state
+                setFormData(prev => {
+                    const currentLineItems = [...prev.lineItems];
+                    
+                    // If first product and item is empty, replace it; otherwise add new items
+                    if (isFirstProduct && currentLineItems[productSelectorFor.index] && currentLineItems[productSelectorFor.index].description === '') {
+                        // Replace empty item
+                        currentLineItems[productSelectorFor.index] = newItem;
+                    } else {
+                        // Add new item after the current index (or at the end for subsequent items)
+                        const insertIndex = isFirstProduct ? productSelectorFor.index + 1 : currentLineItems.length;
+                        currentLineItems.splice(insertIndex, 0, newItem);
+                    }
+                    
+                    return { ...prev, lineItems: currentLineItems };
+                });
             } else if (productSelectorFor.type === 'additionalService') {
-                const newServices = [...formData.additionalServices];
-                const service = { ...newServices[productSelectorFor.index] };
+                // Create new service
+                // For AdditionalService, price and cost are total (not per unit)
+                const quantityForService = itemUnitType === LineItemUnit.M2 && size && size.width && size.height
+                    ? size.width * size.height
+                    : quantity;
+                const newService: AdditionalService = {
+                    id: `as_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                    description: itemDescription,
+                    price: calculated.unitPrice * quantityForService,
+                    cost: calculated.unitCost * quantityForService,
+                    supplierId: supplierId,
+                    priceListProductId: product.id,
+                    selectedAddons: selectedAddons,
+                    priceListNotes: product.notes,
+                };
                 
-                service.description = product.name;
-                service.price = calculated.totalPrice;
-                service.cost = calculated.totalCost;
-                service.supplierId = supplierId;
-                service.priceListProductId = product.id;
-                service.selectedAddons = selectedAddons;
-                service.priceListNotes = product.notes;
-                
-                newServices[productSelectorFor.index] = service;
-                setFormData(prev => ({ ...prev, additionalServices: newServices }));
+                // Use functional update to ensure we're working with the latest state
+                setFormData(prev => {
+                    const currentServices = [...prev.additionalServices];
+                    
+                    // If first product and service is empty, replace it; otherwise add new services
+                    if (isFirstProduct && currentServices[productSelectorFor.index] && currentServices[productSelectorFor.index].description === '') {
+                        // Replace empty service
+                        currentServices[productSelectorFor.index] = newService;
+                    } else {
+                        // Add new service after the current index (or at the end for subsequent items)
+                        const insertIndex = isFirstProduct ? productSelectorFor.index + 1 : currentServices.length;
+                        currentServices.splice(insertIndex, 0, newService);
+                    }
+                    
+                    return { ...prev, additionalServices: currentServices };
+                });
             }
-            
-            setIsProductSelectorOpen(false);
-            setProductSelectorFor(null);
         } catch (error) {
             console.error('Error selecting product:', error);
             alert('שגיאה בבחירת מוצר');
@@ -1025,7 +1133,7 @@ const OrderForm: React.FC<{
             const newSupplier: Supplier = {
                 id: `supp_${Date.now()}`,
                 name: supplierData.name || 'ספק חדש',
-                paymentTerms: 'שוטף 30',
+                paymentTerms: 'שוטף 90',
                 contacts: [{
                     id: `sc_${Date.now()}`,
                     name: supplierData.contactPerson || '',
@@ -1787,7 +1895,37 @@ const OrderForm: React.FC<{
                     <input type="text" name="description" value={formData.description} onChange={handleMasterChange} required className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
                 </div>
                 <div>
-                    <h4 className="text-lg font-medium text-slate-800 mb-2">פריטי הזמנה</h4>
+                    <div className="flex items-center justify-between mb-2">
+                        <h4 className="text-lg font-medium text-slate-800">פריטי הזמנה</h4>
+                        <div className="flex items-center gap-2">
+                            {formData.lineItems.some(item => item.priceListProductId) && (
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        setSendOrderModalOpen(true);
+                                    }}
+                                    className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 flex items-center gap-2 text-sm font-medium"
+                                >
+                                    <EmailIcon className="w-4 h-4" />
+                                    שלח בקשות הצעת מחיר
+                                </button>
+                            )}
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    // מצא פריט ריק ראשון או הוסף בסוף
+                                    const emptyIndex = formData.lineItems.findIndex(item => !item.description || item.description === '');
+                                    const indexToUse = emptyIndex >= 0 ? emptyIndex : formData.lineItems.length;
+                                    setProductSelectorFor({ type: 'lineItem', index: indexToUse });
+                                    setIsProductSelectorOpen(true);
+                                    productSelectionCounterRef.current = 0;
+                                }}
+                                className="px-4 py-2 bg-primary text-white rounded-md hover:bg-primary-dark text-sm font-medium"
+                            >
+                                בחר מהמחירון
+                            </button>
+                        </div>
+                    </div>
                     <div className="hidden md:grid text-[11px] grid-cols-12 gap-2 px-2 text-slate-500 font-bold uppercase tracking-tight">
                         <div className="col-span-2">תיאור</div>
                         <div className="col-span-1">סוג יח'</div>
@@ -1809,19 +1947,14 @@ const OrderForm: React.FC<{
                                     <button type="button" onClick={() => removeLineItem(index)} className="absolute top-2 left-2 text-red-500 hover:text-red-700 p-1 md:hidden"><DeleteIcon className="h-5 w-5"/></button>
                                     <div className="md:col-span-2">
                                         <label className="text-xs font-medium text-slate-500 md:hidden">תיאור</label>
-                                        <div className="flex gap-2">
-                                            <input type="text" placeholder="תיאור" name="description" value={item.description} onChange={e => handleLineItemChange(index, e)} className="mt-1 block flex-1 rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
-                                            <button
-                                                type="button"
-                                                onClick={() => {
-                                                    setProductSelectorFor({ type: 'lineItem', index });
-                                                    setIsProductSelectorOpen(true);
-                                                }}
-                                                className="mt-1 px-3 py-2 text-xs bg-primary text-white rounded-md hover:bg-primary-dark whitespace-nowrap"
-                                            >
-                                                בחר מהמחירון
-                                            </button>
-                                        </div>
+                                        <input 
+                                            type="text" 
+                                            placeholder="תיאור" 
+                                            name="description" 
+                                            value={item.description} 
+                                            onChange={e => handleLineItemChange(index, e)} 
+                                            className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" 
+                                        />
                                     </div>
                                     <div className="md:col-span-1">
                                         <label className="text-xs font-medium text-slate-500 md:hidden mt-2">סוג יחידה</label>
@@ -1876,12 +2009,36 @@ const OrderForm: React.FC<{
                                         <div className="col-span-2 md:col-span-2">
                                             <label className="text-xs font-medium text-slate-500 md:hidden">ספק</label>
                                             <div className="flex items-center gap-1 mt-1">
-                                                <select name="supplierId" value={item.supplierId || ''} onChange={e => handleLineItemChange(index, e)} className="flex-grow block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" disabled={!item.cost || item.cost <= 0}>
+                                                <select name="supplierId" value={item.supplierId || ''} onChange={e => handleLineItemChange(index, e)} className="flex-grow block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm">
                                                     <option value="">בחר ספק</option>
                                                     {suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
                                                 </select>
+                                                {item.priceListProductId && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => {
+                                                            setSendItemForIndex(index);
+                                                            setSendItemModalOpen(true);
+                                                        }}
+                                                        className="px-2 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700 flex items-center gap-1"
+                                                        title="שלח לספק"
+                                                    >
+                                                        <EmailIcon className="w-3 h-3" />
+                                                    </button>
+                                                )}
                                                 <button type="button" onClick={() => removeLineItem(index)} className="hidden md:block text-red-500 hover:text-red-700 p-1"><DeleteIcon className="h-5 w-5"/></button>
                                             </div>
+                                        </div>
+                                        <div className="col-span-12 md:col-span-12 mt-2">
+                                            <label className="text-xs font-medium text-slate-500 md:hidden">הערה</label>
+                                            <textarea
+                                                name="notes"
+                                                value={item.notes || ''}
+                                                onChange={e => handleLineItemChange(index, e)}
+                                                className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm"
+                                                placeholder="הערות לפריט זה"
+                                                rows={2}
+                                            />
                                         </div>
                                     </div>
                                 </div>
@@ -2407,6 +2564,7 @@ const OrderForm: React.FC<{
             <ProductSelectorModal
                 isOpen={isProductSelectorOpen}
                 onClose={() => {
+                    productSelectionCounterRef.current = 0; // Reset counter
                     setIsProductSelectorOpen(false);
                     setProductSelectorFor(null);
                 }}
@@ -2415,6 +2573,116 @@ const OrderForm: React.FC<{
                 orderId={order?.id}
                 orderNumber={order?.orderNumber}
                 orderStatus={order?.orderStatus}
+            />
+        )}
+        {sendItemModalOpen && sendItemForIndex !== null && formData.lineItems[sendItemForIndex] && (
+            <SendItemToSuppliersModal
+                isOpen={sendItemModalOpen}
+                onClose={() => {
+                    setSendItemModalOpen(false);
+                    setSendItemForIndex(null);
+                }}
+                lineItem={formData.lineItems[sendItemForIndex]}
+                suppliers={suppliers}
+                onSend={async (supplierIds, methods) => {
+                    try {
+                        const orderForRequest = {
+                            ...(order || {}),
+                            id: order?.id || 'temp',
+                            orderNumber: order?.orderNumber || formData.description || 'טיוטה',
+                            ...formData,
+                            lineItems: formData.lineItems
+                        } as Order;
+
+                        const lineItem = formData.lineItems[sendItemForIndex!];
+                        const requests = [{
+                            lineItemId: lineItem.id,
+                            supplierIds,
+                            methods
+                        }];
+
+                        const result = await sendQuoteRequests(orderForRequest, requests);
+                        
+                        // Handle WhatsApp URLs - open in new tabs
+                        const whatsappUrls: string[] = [];
+                        result.results?.[0]?.results?.forEach((supplierResult: any) => {
+                            if (supplierResult.success && supplierResult.method === 'WHATSAPP' && supplierResult.contact) {
+                                whatsappUrls.push(supplierResult.contact);
+                            }
+                        });
+
+                        // Open WhatsApp URLs
+                        whatsappUrls.forEach(url => {
+                            window.open(url, '_blank');
+                        });
+
+                        const successCount = result.results?.[0]?.results?.filter((r: any) => r.success).length || 0;
+
+                        if (successCount === supplierIds.length) {
+                            alert(`שליחה הושלמה בהצלחה ל-${successCount} ספקים`);
+                        } else {
+                            alert(`שליחה הושלמה חלקית: ${successCount} מתוך ${supplierIds.length} ספקים`);
+                        }
+                    } catch (error: any) {
+                        console.error('Error sending quote requests:', error);
+                        alert(`שגיאה בשליחת בקשות: ${error.message || 'שגיאה לא ידועה'}`);
+                    }
+                }}
+            />
+        )}
+        {sendOrderModalOpen && (
+            <SendOrderToSuppliersModal
+                isOpen={sendOrderModalOpen}
+                onClose={() => setSendOrderModalOpen(false)}
+                order={{
+                    ...(order || {}),
+                    id: order?.id || 'temp',
+                    orderNumber: order?.orderNumber || formData.description || 'טיוטה',
+                    ...formData,
+                    lineItems: formData.lineItems
+                } as Order}
+                suppliers={suppliers}
+                onSend={async (requests) => {
+                    try {
+                        const orderForRequest = {
+                            ...(order || {}),
+                            id: order?.id || 'temp',
+                            orderNumber: order?.orderNumber || formData.description || 'טיוטה',
+                            ...formData,
+                            lineItems: formData.lineItems
+                        } as Order;
+
+                        const result = await sendQuoteRequests(orderForRequest, requests);
+                        
+                        // Handle WhatsApp URLs - open in new tabs
+                        const whatsappUrls: string[] = [];
+                        result.results?.forEach((lineItemResult: any) => {
+                            lineItemResult.results?.forEach((supplierResult: any) => {
+                                if (supplierResult.success && supplierResult.method === 'WHATSAPP' && supplierResult.contact) {
+                                    whatsappUrls.push(supplierResult.contact);
+                                }
+                            });
+                        });
+
+                        // Open WhatsApp URLs
+                        whatsappUrls.forEach(url => {
+                            window.open(url, '_blank');
+                        });
+
+                        const successCount = result.results?.reduce((sum: number, lineItemResult: any) => 
+                            sum + (lineItemResult.results?.filter((r: any) => r.success).length || 0), 0) || 0;
+                        const totalCount = requests.reduce((sum, req) => sum + req.supplierIds.length, 0);
+
+                        if (successCount === totalCount) {
+                            alert(`שליחה הושלמה בהצלחה ל-${successCount} ספקים`);
+                        } else {
+                            alert(`שליחה הושלמה חלקית: ${successCount} מתוך ${totalCount} ספקים`);
+                        }
+                    } catch (error: any) {
+                        console.error('Error sending quote requests:', error);
+                        alert(`שגיאה בשליחת בקשות: ${error.message || 'שגיאה לא ידועה'}`);
+                    }
+                }}
             />
         )}
     </>

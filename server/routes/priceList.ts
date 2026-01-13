@@ -15,7 +15,7 @@ import {
     suggestProductMatch,
     getOrders
 } from '../services/mongoService.js';
-import { sendPriceListEmail } from '../services/emailService.js';
+import { sendPriceListEmail, sendQuoteRequest } from '../services/emailService.js';
 import { Order } from '../types';
 
 const router = Router();
@@ -175,6 +175,66 @@ router.post('/send-email', async (req, res) => {
     } catch (error) {
         console.error('Error sending email:', error);
         res.status(500).json({ error: 'Failed to send email' });
+    }
+});
+
+// Send quote requests
+router.post('/send-quote-requests', async (req, res) => {
+    try {
+        const { order, requests } = req.body;
+
+        if (!order || !requests || !Array.isArray(requests) || requests.length === 0) {
+            return res.status(400).json({ error: 'Missing required fields: order, requests' });
+        }
+
+        // Get full order data
+        const orders = await getOrders();
+        const fullOrder = orders.find(o => o.id === order.id) || order as Order;
+
+        const results = [];
+        for (const request of requests) {
+            const { lineItemId, supplierIds, methods } = request;
+            
+            if (!lineItemId || !supplierIds || !Array.isArray(supplierIds) || supplierIds.length === 0) {
+                results.push({
+                    lineItemId,
+                    error: 'Invalid request format'
+                });
+                continue;
+            }
+
+            const lineItemResults = [];
+            for (const supplierId of supplierIds) {
+                const methodObj = methods.find((m: { supplierId: string; method: string }) => m.supplierId === supplierId);
+                const method = methodObj?.method || 'EMAIL';
+                
+                try {
+                    const result = await sendQuoteRequest(fullOrder, lineItemId, supplierId, method);
+                    lineItemResults.push({
+                        supplierId,
+                        ...result
+                    });
+                } catch (error: any) {
+                    console.error(`Error sending quote request to supplier ${supplierId}:`, error);
+                    lineItemResults.push({
+                        supplierId,
+                        success: false,
+                        method,
+                        error: error.message
+                    });
+                }
+            }
+
+            results.push({
+                lineItemId,
+                results: lineItemResults
+            });
+        }
+
+        res.json({ results });
+    } catch (error: any) {
+        console.error('Error sending quote requests:', error);
+        res.status(500).json({ error: 'Failed to send quote requests', details: error.message });
     }
 });
 

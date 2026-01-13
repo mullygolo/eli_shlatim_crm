@@ -114,7 +114,7 @@ const SupplierForm: React.FC<{
 }> = ({ supplier, onSave, onCancel, onMergeClick }) => {
     const [formData, setFormData] = useState<{ name: string, paymentTerms: string, contacts: Contact[] }>({
         name: supplier?.name || '',
-        paymentTerms: supplier?.paymentTerms || 'שוטף 30',
+        paymentTerms: supplier?.paymentTerms || 'שוטף 90',
         contacts: supplier?.contacts || [{
             id: `con_${Date.now()}`,
             name: '',
@@ -232,6 +232,18 @@ const SupplierForm: React.FC<{
                                 <div>
                                     <label className="block text-xs text-slate-500">טלפון</label>
                                     <input type="tel" name="phone" value={contact.phone} onChange={e => handleContactChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-xs" />
+                                </div>
+                                <div>
+                                    <label className="block text-xs text-slate-500">שיטת תקשורת מועדפת</label>
+                                    <select 
+                                        name="contactPreference" 
+                                        value={contact.contactPreference || 'EMAIL'} 
+                                        onChange={e => handleContactChange(index, e)} 
+                                        className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-xs bg-white"
+                                    >
+                                        <option value="EMAIL">אימייל</option>
+                                        <option value="WHATSAPP">WhatsApp</option>
+                                    </select>
                                 </div>
                             </div>
                         </div>

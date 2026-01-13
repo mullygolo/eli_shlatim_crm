@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { PriceListProduct, ProductType, LineItemUnit, PriceTier, Attachment, Supplier, SupplierPricing, ProductVariant } from '../types';
-import { DeleteIcon, PlusIcon } from './icons';
+import { DeleteIcon, PlusIcon, DownloadIcon } from './icons';
 import Modal from './Modal';
 
 interface EditProductModalProps {
@@ -40,12 +40,7 @@ const EditProductModal: React.FC<EditProductModalProps> = ({ product, suppliers,
             baseUnit: LineItemUnit.M2,
             customerBasePrice: undefined,
             customerPriceTiers: [],
-            supplierPricings: suppliers.length > 0 ? [{
-                supplierId: suppliers[0].id,
-                supplierName: suppliers[0].name,
-                baseCost: undefined,
-                priceTiers: []
-            }] : [],
+            supplierPricings: [],
             images: [],
             addons: [],
             variants: [],
@@ -58,6 +53,9 @@ const EditProductModal: React.FC<EditProductModalProps> = ({ product, suppliers,
     const [customerUseOnlyTiers, setCustomerUseOnlyTiers] = useState(false);
     const [useSimplePriceRange, setUseSimplePriceRange] = useState(false);
     const [variants, setVariants] = useState<ProductVariant[]>(formData.variants || []);
+    const [primaryImageId, setPrimaryImageId] = useState<string | null>(
+        formData.images?.find(img => img.isPrimary)?.id || formData.images?.[0]?.id || null
+    );
 
     useEffect(() => {
         const initialData = getInitialFormData();
@@ -65,6 +63,8 @@ const EditProductModal: React.FC<EditProductModalProps> = ({ product, suppliers,
         setVariants(initialData.variants || []);
         setCustomerUseOnlyTiers(!initialData.customerBasePrice && (initialData.customerPriceTiers?.length || 0) > 0);
         setUseSimplePriceRange(!!initialData.customerPriceRange);
+        const primaryId = initialData.images?.find(img => img.isPrimary)?.id || initialData.images?.[0]?.id || null;
+        setPrimaryImageId(primaryId);
     }, [product]);
 
     const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
@@ -211,15 +211,22 @@ const EditProductModal: React.FC<EditProductModalProps> = ({ product, suppliers,
     const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
         if (e.target.files && e.target.files.length > 0) {
             const files: File[] = Array.from(e.target.files);
-            const filePromises = files.map(file => {
+            const filePromises = files.map((file, index) => {
                 return new Promise<Attachment>((resolve, reject) => {
                     const reader = new FileReader();
                     reader.onload = (event) => {
                         if (event.target?.result) {
+                            const dataUrl = event.target.result as string;
+                            // Check if image is too large (e.g., > 5MB as base64)
+                            if (dataUrl.length > 5 * 1024 * 1024) {
+                                reject(new Error(`התמונה ${file.name} גדולה מדי. אנא השתמש בתמונה קטנה יותר (מקסימום 5MB)`));
+                                return;
+                            }
+                            
                             resolve({
-                                id: `img_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                                id: `img_${Date.now()}_${Math.random().toString(36).substr(2, 9)}_${index}`,
                                 fileName: file.name,
-                                dataUrl: event.target.result as string,
+                                dataUrl: dataUrl,
                                 type: file.type || 'image/jpeg',
                                 uploadedAt: new Date(),
                             });
@@ -233,15 +240,44 @@ const EditProductModal: React.FC<EditProductModalProps> = ({ product, suppliers,
             });
 
             Promise.all(filePromises).then(newImages => {
+                const updatedImages = [...(formData.images || []), ...newImages];
+                // Set first image as primary if no primary exists
+                if (!primaryImageId && updatedImages.length > 0) {
+                    const firstNewImage = { ...updatedImages[updatedImages.length - newImages.length], isPrimary: true };
+                    updatedImages[updatedImages.length - newImages.length] = firstNewImage;
+                    setPrimaryImageId(firstNewImage.id);
+                }
                 setFormData(prev => ({
                     ...prev,
-                    images: [...(prev.images || []), ...newImages]
+                    images: updatedImages
                 }));
+                // Clear input to allow re-uploading same file
+                e.target.value = '';
             }).catch(error => {
                 console.error('Error uploading images:', error);
-                alert('שגיאה בהעלאת תמונות');
+                alert(error.message || 'שגיאה בהעלאת תמונות');
             });
         }
+    };
+    
+    const handleSetPrimaryImage = (imageId: string) => {
+        setPrimaryImageId(imageId);
+        setFormData(prev => ({
+            ...prev,
+            images: prev.images?.map(img => ({
+                ...img,
+                isPrimary: img.id === imageId
+            })) || []
+        }));
+    };
+
+    const handleDownloadImage = (image: Attachment) => {
+        const link = document.createElement('a');
+        link.href = image.dataUrl;
+        link.download = image.fileName || 'image.jpg';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
     };
     
     const handleRemoveImage = (imageId: string) => {
@@ -250,9 +286,18 @@ const EditProductModal: React.FC<EditProductModalProps> = ({ product, suppliers,
         if (!window.confirm(`האם אתה בטוח שברצונך למחוק את ${imageName}?`)) {
             return;
         }
+        const updatedImages = (formData.images || []).filter(img => img.id !== imageId);
+        // If deleted image was primary, set first remaining as primary
+        if (primaryImageId === imageId && updatedImages.length > 0) {
+            const newPrimary = { ...updatedImages[0], isPrimary: true };
+            updatedImages[0] = newPrimary;
+            setPrimaryImageId(newPrimary.id);
+        } else if (updatedImages.length === 0) {
+            setPrimaryImageId(null);
+        }
         setFormData(prev => ({
             ...prev,
-            images: (prev.images || []).filter(img => img.id !== imageId)
+            images: updatedImages
         }));
     };
 
@@ -998,22 +1043,51 @@ const EditProductModal: React.FC<EditProductModalProps> = ({ product, suppliers,
                                 />
                                 {formData.images && formData.images.length > 0 && (
                                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4">
-                                        {formData.images.map((img) => (
+                                        {formData.images.map((img, index) => {
+                                            const isPrimary = img.isPrimary || primaryImageId === img.id || (index === 0 && !primaryImageId);
+                                            return (
                                             <div key={img.id} className="relative group">
+                                                    {isPrimary && (
+                                                        <div className="absolute top-1 left-1 bg-primary text-white text-xs px-2 py-1 rounded z-10">
+                                                            ראשית
+                                                        </div>
+                                                    )}
                                                 <img
                                                     src={img.dataUrl}
                                                     alt={img.fileName}
-                                                    className="w-full h-32 object-cover rounded-md border border-slate-200"
-                                                />
+                                                        className="w-full h-32 object-cover rounded-md border-2"
+                                                        style={{ borderColor: isPrimary ? '#3b82f6' : '#e2e8f0' }}
+                                                    />
+                                                    <div className="absolute inset-0 bg-black bg-opacity-0 group-hover:bg-opacity-50 transition-all rounded-md flex items-center justify-center gap-2">
+                                                        {!isPrimary && (
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => handleSetPrimaryImage(img.id)}
+                                                                className="opacity-0 group-hover:opacity-100 bg-blue-600 text-white px-2 py-1 rounded text-xs transition-opacity"
+                                                            >
+                                                                הגדר כראשית
+                                                            </button>
+                                                        )}
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => handleDownloadImage(img)}
+                                                            className="opacity-0 group-hover:opacity-100 bg-green-600 text-white px-2 py-1 rounded text-xs transition-opacity flex items-center gap-1"
+                                                            title="הורד תמונה"
+                                                        >
+                                                            <DownloadIcon className="w-3 h-3" />
+                                                            הורד
+                                                        </button>
                                                 <button
                                                     type="button"
                                                     onClick={() => handleRemoveImage(img.id)}
-                                                    className="absolute top-1 right-1 p-1 bg-red-600 text-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity"
+                                                            className="opacity-0 group-hover:opacity-100 bg-red-600 text-white px-2 py-1 rounded text-xs transition-opacity"
                                                 >
-                                                    <DeleteIcon className="h-4 w-4" />
+                                                            מחק
                                                 </button>
                                             </div>
-                                        ))}
+                                                </div>
+                                            );
+                                        })}
                                     </div>
                                 )}
                             </div>

@@ -36,6 +36,7 @@ export interface Contact {
     role: string;
     isBillingContact: boolean;
     isDefault?: boolean;
+    contactPreference?: 'EMAIL' | 'WHATSAPP' | 'PHONE'; // Preferred communication method, default: 'EMAIL'
 }
 
 export interface Customer {
@@ -120,6 +121,8 @@ export interface LineItem {
     priceListProductId?: string; // Link to product in price list
     selectedAddons?: string[]; // Selected addons from price list
     priceListNotes?: string; // Notes from price list
+    variantId?: string; // Selected variant ID from price list
+    notes?: string; // General notes
 }
 
 export interface AdditionalService {
@@ -147,6 +150,7 @@ export interface Attachment {
     type: string; // MIME type
     uploadedAt?: Date;
     category?: AttachmentCategory;
+    isPrimary?: boolean; // For product images - indicates primary/main image
 }
 
 export type AttachmentCategory = 'GRAPHICS' | 'SITE_BEFORE' | 'SITE_AFTER' | 'DOCUMENTS' | 'GENERAL';

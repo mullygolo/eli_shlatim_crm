@@ -158,3 +158,14 @@ export async function sendPriceListEmail(
     });
 }
 
+
+// Send Quote Requests
+export async function sendQuoteRequests(
+    order: any,
+    requests: { lineItemId: string; supplierIds: string[]; methods: { supplierId: string; method: 'EMAIL' | 'WHATSAPP' }[] }[]
+): Promise<any> {
+    return apiRequest<any>('/price-list/send-quote-requests', {
+        method: 'POST',
+        body: JSON.stringify({ order, requests }),
+    });
+}

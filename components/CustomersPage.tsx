@@ -434,7 +434,7 @@ const NewCustomerForm: React.FC<{ onSave: (customer: Partial<Customer>, firstCon
         address: '',
         notes: '',
         paymentMethod: PaymentMethod.BANK_TRANSFER,
-        paymentTerms: 'שוטף 30',
+        paymentTerms: 'תשלום מיידי',
         isSpecial: false
     });
     const [contactData, setContactData] = useState({ name: '', email: '', phone: '', role: '' });
@@ -660,7 +660,7 @@ const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, custo
                             <label className="block text-sm font-medium text-slate-700 mb-1">תנאי תשלום</label>
                             <select 
                                 name="paymentTerms" 
-                                value={editableCustomer.paymentTerms || 'שוטף 30'} 
+                                value={editableCustomer.paymentTerms || 'תשלום מיידי'} 
                                 onChange={handleCustomerChange} 
                                 className="p-2 border rounded w-full bg-white border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm"
                             >
@@ -943,7 +943,7 @@ const CustomerImportModal: React.FC<{ onImport: (customers: Customer[]) => void;
                 contacts: [newContact],
                 createdAt: new Date(),
                 paymentMethod: PaymentMethod.BANK_TRANSFER,
-                paymentTerms: 'שוטף 30',
+                paymentTerms: 'תשלום מיידי',
             };
             newCustomers.push(newCustomer);
         });
@@ -1075,7 +1075,7 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
                 contacts: [newContact],
                 createdAt: new Date(),
                 paymentMethod: customerData.paymentMethod || PaymentMethod.BANK_TRANSFER,
-                paymentTerms: customerData.paymentTerms || 'שוטף 30',
+                paymentTerms: customerData.paymentTerms || 'תשלום מיידי',
             };
             
             // Save to MongoDB

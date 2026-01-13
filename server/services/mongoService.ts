@@ -125,7 +125,38 @@ export async function getOrders(): Promise<Order[]> {
         const database = await getDb();
         const collection = database.collection<Order>('orders');
         const docs = await collection.find({}).toArray();
-        return docs.map(deserializeDates) as Order[];
+        const orders = docs.map(deserializeDates) as Order[];
+        
+        // #region agent log - Hypothesis F: Server-side orders check
+        try {
+            const fs = await import('fs');
+            const path = await import('path');
+            const logPath = path.join(process.cwd(), '.cursor', 'debug.log');
+            orders.forEach((order) => {
+                const logEntry = {
+                    location: 'mongoService.ts:128',
+                    message: 'Server-side order check',
+                    data: {
+                        orderNumber: order.orderNumber,
+                        hasPayments: !!order.payments,
+                        paymentsCount: order.payments?.length || 0,
+                        paymentsType: typeof order.payments,
+                        paymentsIsArray: Array.isArray(order.payments),
+                        paymentsSample: order.payments?.slice(0, 2).map((p: any) => ({ id: p.id, amount: p.amount, date: p.date })) || []
+                    },
+                    timestamp: Date.now(),
+                    sessionId: 'debug-session',
+                    runId: 'run3-server',
+                    hypothesisId: 'F'
+                };
+                fs.appendFileSync(logPath, JSON.stringify(logEntry) + '\n', 'utf8');
+            });
+        } catch (logError) {
+            // Ignore log errors
+        }
+        // #endregion
+        
+        return orders;
     } catch (error) {
         console.error('Error fetching orders:', error);
         throw error;

@@ -137,8 +137,8 @@ export async function getCustomersPaginated(
         const statusConfigs = await getStatusConfigs();
         
         // Load all customers (we'll filter after to match searchTerm logic)
-        let allCustomers = await customersCollection.find({}).toArray();
-        allCustomers = allCustomers.map(deserializeDates) as Customer[];
+        const allCustomersDocs = await customersCollection.find({}).toArray();
+        const allCustomers = allCustomersDocs.map(deserializeDates) as Customer[];
         
         // Apply search filter (matching client-side logic)
         if (filters.searchTerm) {

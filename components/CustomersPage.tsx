@@ -42,11 +42,44 @@ const CollectionCenterModal: React.FC<{
     statusConfigs: OrderStatusConfiguration[];
     vatRate: number;
 }> = ({ customer, orders, setOrders, onClose, addActivity, statusConfigs, vatRate }) => {
-    // 1. Get all orders for this customer and calculate their actual balance
-    const allCustomerOrders = useMemo(() => {
-        return orders
+    const [loading, setLoading] = useState(false);
+    const [allCustomerOrders, setAllCustomerOrders] = useState<Order[]>([]);
+    
+    // Fetch customer orders with active deals from API
+    useEffect(() => {
+        const fetchCustomerOrders = async () => {
+            setLoading(true);
+            try {
+                // Use isCollectionMode filter which already filters for active deals that are not fully paid
+                const filters = {
+                    customerFilter: [customer.id],
+                    isCollectionMode: true,
+                    showCompletedOrders: false
+                };
+                
+                // Get all orders (no pagination limit for this modal)
+                const result = await mongoService.getOrdersPaginated(filters, 1, 10000);
+                
+                // Calculate balance for each order
+                const ordersWithBalance = result.orders.map(o => {
+                    const { totalAmount, totalPaid } = calculateOrderTotals(o);
+                    const currentOrderVat = o.vatRate ?? vatRate;
+                    const gross = totalAmount * (1 + currentOrderVat / 100);
+                    const remaining = Math.max(0, gross - totalPaid);
+                    return { 
+                        ...o,
+                        gross,
+                        paid: totalPaid,
+                        remaining: Number(remaining.toFixed(2))
+                    };
+                }).sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+                
+                setAllCustomerOrders(ordersWithBalance);
+            } catch (error) {
+                console.error('Error fetching customer orders:', error);
+                // Fallback to local orders if API fails
+                const localOrders = orders
             .filter(o => {
-                // Filter: Only ACTIVE deals count towards debt
                 const config = statusConfigs.find(c => c.label === o.orderStatus);
                 return o.customerId === customer.id && config?.isActiveDeal;
             })
@@ -63,7 +96,14 @@ const CollectionCenterModal: React.FC<{
                 };
             })
             .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-    }, [orders, customer.id, statusConfigs, vatRate]);
+                setAllCustomerOrders(localOrders);
+            } finally {
+                setLoading(false);
+            }
+        };
+        
+        fetchCustomerOrders();
+    }, [customer.id, statusConfigs, vatRate]);
 
     // 2. Filter only orders that REALLY have a debt ( > 1 NIS to avoid rounding issues)
     const orderData = useMemo(() => {
@@ -1001,23 +1041,35 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
     const [pendingNewCustomer, setPendingNewCustomer] = useState<{customer: Partial<Customer>, contact: Partial<Contact>} | null>(null);
     const [isMergeModalOpen, setIsMergeModalOpen] = useState(false);
 
-    const filteredCustomers = useMemo(() => {
-        if (!searchTerm) {
-            return customers;
-        }
-        const lowercasedTerm = searchTerm.toLowerCase();
-        return customers.filter(customer => {
-            const nameMatch = customer.name.toLowerCase().includes(lowercasedTerm);
-            const hpMatch = customer.businessId?.toLowerCase().includes(lowercasedTerm);
-            if (nameMatch || hpMatch) return true;
+    // Pagination state
+    const [currentPage, setCurrentPage] = useState(1);
+    const [pageSize, setPageSize] = useState(50);
+    const [totalCount, setTotalCount] = useState(0);
+    const [loading, setLoading] = useState(true);
+    const [paginatedCustomers, setPaginatedCustomers] = useState<(Customer & { debt?: number })[]>([]);
 
-            return customer.contacts.some(contact => 
-                contact.name.toLowerCase().includes(lowercasedTerm) ||
-                contact.email.toLowerCase().includes(lowercasedTerm) ||
-                contact.phone.toLowerCase().includes(lowercasedTerm)
-            );
-        });
-    }, [customers, searchTerm]);
+    // Load customers from API with pagination
+    const refetchCustomers = async () => {
+        try {
+            setLoading(true);
+            const filters = { searchTerm: searchTerm || undefined };
+            const result = await mongoService.getCustomersPaginated(filters, currentPage, pageSize);
+            setPaginatedCustomers(result.customers);
+            setTotalCount(result.totalCount);
+        } catch (error) {
+            console.error('Error loading customers:', error);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    // Load customers when search term or pagination changes
+    useEffect(() => {
+        refetchCustomers();
+    }, [searchTerm, currentPage, pageSize]);
+
+    // Use paginated customers for display
+    const filteredCustomers = paginatedCustomers;
 
     const handleViewCustomer = (customer: Customer) => {
         setViewingCustomer(customer);
@@ -1083,6 +1135,8 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
             
             // Update local state with the saved customer (which may have MongoDB _id)
             setCustomers(prev => [...prev, savedCustomer]);
+            // Refetch paginated customers to show the new customer
+            await refetchCustomers();
             addActivity(`לקוח חדש נוסף: ${savedCustomer.name}`);
             setIsNewCustomerModalOpen(false);
             setPendingNewCustomer(null);
@@ -1093,7 +1147,7 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
         }
     };
 
-    const handleMergeWithExisting = () => {
+    const handleMergeWithExisting = async () => {
         if (!duplicateFound || !pendingNewCustomer) return;
 
         const oldCustomer = duplicateFound;
@@ -1117,6 +1171,8 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
         };
 
         setCustomers(prev => prev.map(c => c.id === oldCustomer.id ? updatedOldCustomer : c));
+        // Refetch paginated customers after merge
+        await refetchCustomers();
         addActivity(`לקוח מוזג לתוך כרטיס קיים: ${oldCustomer.name}`);
         
         setDuplicateFound(null);
@@ -1125,7 +1181,7 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
     };
 
     // MANUAL MERGE HANDLER
-    const handleManualMerge = (victimId: string) => {
+    const handleManualMerge = async (victimId: string) => {
         if (!viewingCustomer) return;
         const veteranId = viewingCustomer.id;
         const victim = customers.find(c => c.id === victimId);
@@ -1158,17 +1214,20 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
             .filter(c => c.id !== victimId) // Delete Victim
             .map(c => c.id === veteranId ? updatedVeteran : c) // Update Veteran
         );
-
+        // Refetch paginated customers after merge
+        await refetchCustomers();
         addActivity(`בוצע מיזוג ידני: ${victim.name} מוזג לתוך ${viewingCustomer.name}`);
         setViewingCustomer(updatedVeteran); // Update view
         setIsMergeModalOpen(false);
     };
 
-    const handleSaveCustomerUpdate = (updatedCustomer: Customer) => {
+    const handleSaveCustomerUpdate = async (updatedCustomer: Customer) => {
         // Find previous state to check for changes
         const originalCustomer = customers.find(c => c.id === updatedCustomer.id);
         
         setCustomers(prev => prev.map(c => c.id === updatedCustomer.id ? updatedCustomer : c));
+        // Refetch paginated customers after update
+        await refetchCustomers();
         
         // Automatic cascading update for Payment Terms
         if (originalCustomer && updatedCustomer.paymentTerms && originalCustomer.paymentTerms !== updatedCustomer.paymentTerms) {
@@ -1196,6 +1255,8 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
             
             // Update local state with saved customers
             setCustomers(prev => [...prev, ...savedCustomers]);
+            // Refetch paginated customers to show imported customers
+            await refetchCustomers();
             addActivity(`${savedCustomers.length} לקוחות יובאו בהצלחה`);
             setIsImportModalOpen(false);
         } catch (error) {
@@ -1270,19 +1331,8 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
                                 }
                             }
 
-                            // Calculate specific debt for this customer
-                            // ONLY include active deals based on configuration
-                            const customerDebt = orders
-                                .filter(o => {
-                                    const config = statusConfigs.find(c => c.label === o.orderStatus);
-                                    return o.customerId === customer.id && config?.isActiveDeal;
-                                })
-                                .reduce((sum, o) => {
-                                    const { totalAmount, totalPaid } = calculateOrderTotals(o);
-                                    const currentOrderVat = o.vatRate ?? vatRate;
-                                    const gross = totalAmount * (1 + currentOrderVat / 100);
-                                    return sum + Math.max(0, gross - totalPaid);
-                                }, 0);
+                            // Debt is already calculated on the server
+                            const customerDebt = (customer as Customer & { debt?: number }).debt || 0;
 
                             return(
                                 <tr key={customer.id} className="hover:bg-slate-50">
@@ -1333,11 +1383,75 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
                         })}
                     </tbody>
                 </table>
-                 {filteredCustomers.length === 0 && (
+                 {filteredCustomers.length === 0 && !loading && (
                     <div className="text-center py-12 text-slate-500">
                         <p className="font-semibold text-lg">לא נמצאו לקוחות</p>
                         <p>נסה מונח חיפוש אחר או הוסף לקוח חדש.</p>
                     </div>
+                )}
+                
+                {/* Pagination Controls */}
+                {totalCount > 0 && (
+                    <div className="mt-4 flex items-center justify-between bg-white px-4 py-3 border-t border-slate-200">
+                        <div className="flex items-center gap-4">
+                            <div className="text-sm text-slate-600">
+                                מציג {((currentPage - 1) * pageSize) + 1} - {Math.min(currentPage * pageSize, totalCount)} מתוך {totalCount} לקוחות
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <label className="text-sm text-slate-600">שורות לעמוד:</label>
+                                <select 
+                                    value={pageSize} 
+                                    onChange={(e) => {
+                                        setPageSize(parseInt(e.target.value));
+                                        setCurrentPage(1);
+                                    }}
+                                    className="text-sm border border-slate-300 rounded px-2 py-1 focus:ring-primary focus:border-primary"
+                                >
+                                    <option value={25}>25</option>
+                                    <option value={50}>50</option>
+                                    <option value={100}>100</option>
+                                    <option value={200}>200</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <button
+                                onClick={() => setCurrentPage(1)}
+                                disabled={currentPage === 1 || loading}
+                                className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                ראשון
+                            </button>
+                            <button
+                                onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
+                                disabled={currentPage === 1 || loading}
+                                className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                קודם
+                            </button>
+                            <span className="px-3 py-1 text-sm text-slate-600">
+                                עמוד {currentPage} מתוך {Math.ceil(totalCount / pageSize)}
+                            </span>
+                            <button
+                                onClick={() => setCurrentPage(prev => Math.min(Math.ceil(totalCount / pageSize), prev + 1))}
+                                disabled={currentPage >= Math.ceil(totalCount / pageSize) || loading}
+                                className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                הבא
+                            </button>
+                            <button
+                                onClick={() => setCurrentPage(Math.ceil(totalCount / pageSize))}
+                                disabled={currentPage >= Math.ceil(totalCount / pageSize) || loading}
+                                className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                אחרון
+                            </button>
+                        </div>
+                    </div>
+                )}
+                
+                {loading && (
+                    <div className="mt-4 text-center text-slate-500 text-sm">טוען...</div>
                 )}
             </div>
             

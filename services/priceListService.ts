@@ -44,6 +44,32 @@ export async function getProducts(): Promise<PriceListProduct[]> {
     return apiRequest<PriceListProduct[]>('/price-list/products');
 }
 
+export async function getProductsPaginated(
+    filters: {
+        searchQuery?: string;
+        categoryFilter?: string;
+    } = {},
+    page: number = 1,
+    limit: number = 50
+): Promise<{
+    products: PriceListProduct[];
+    totalCount: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+    categories: string[];
+}> {
+    const queryParams = new URLSearchParams({
+        page: page.toString(),
+        limit: limit.toString(),
+    });
+    
+    if (filters.searchQuery) queryParams.append('searchQuery', filters.searchQuery);
+    if (filters.categoryFilter) queryParams.append('categoryFilter', filters.categoryFilter);
+    
+    return apiRequest<any>(`/price-list/products/paginated?${queryParams}`);
+}
+
 export async function getProduct(id: string): Promise<PriceListProduct> {
     return apiRequest<PriceListProduct>(`/price-list/products/${id}`);
 }
@@ -157,7 +183,6 @@ export async function sendPriceListEmail(
         body: JSON.stringify({ orderId, supplierIds, emailType }),
     });
 }
-
 
 // Send Quote Requests
 export async function sendQuoteRequests(

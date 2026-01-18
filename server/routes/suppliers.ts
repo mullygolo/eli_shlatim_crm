@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { getSuppliers, createSupplier, updateSupplier, deleteSupplier } from '../services/mongoService.js';
+import { getSuppliers, getSuppliersPaginated, createSupplier, updateSupplier, deleteSupplier } from '../services/mongoService.js';
 
 const router = Router();
 
@@ -9,6 +9,21 @@ router.get('/', async (req, res) => {
         res.json(suppliers);
     } catch (error) {
         res.status(500).json({ error: 'Failed to fetch suppliers' });
+    }
+});
+
+router.get('/paginated', async (req, res) => {
+    try {
+        const page = parseInt(req.query.page as string) || 1;
+        const limit = parseInt(req.query.limit as string) || 50;
+        const filters: any = {};
+        
+        if (req.query.searchTerm) filters.searchTerm = req.query.searchTerm as string;
+        
+        const result = await getSuppliersPaginated(filters, page, limit);
+        res.json(result);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch paginated suppliers' });
     }
 });
 

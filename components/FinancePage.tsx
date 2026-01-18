@@ -1413,10 +1413,24 @@ const FinancePage: React.FC<FinancePageProps> = ({
     // Debt Filter States
     const [debtSearch, setDebtSearch] = useState('');
     const [debtStatusFilter, setDebtStatusFilter] = useState<'ALL' | 'OPEN' | 'OVERDUE' | 'PAID'>('OPEN');
+    
+    // Debt Pagination States
+    const [paginatedDebts, setPaginatedDebts] = useState<(Debt & { gross: number; paid: number; remaining: number; isFullyPaid: boolean; isOverdue: boolean })[]>([]);
+    const [debtsCurrentPage, setDebtsCurrentPage] = useState(1);
+    const [debtsPageSize, setDebtsPageSize] = useState(50);
+    const [debtsTotalCount, setDebtsTotalCount] = useState(0);
+    const [loadingDebts, setLoadingDebts] = useState(false);
 
     // Receivable Filter States
     const [receivableSearch, setReceivableSearch] = useState('');
     const [receivableStatusFilter, setReceivableStatusFilter] = useState<'ALL' | 'OPEN' | 'OVERDUE' | 'PAID'>('OPEN');
+    
+    // Receivable Pagination States
+    const [paginatedReceivables, setPaginatedReceivables] = useState<(Receivable & { gross: number; collected: number; remaining: number; isFullyPaid: boolean; isOverdue: boolean })[]>([]);
+    const [receivablesCurrentPage, setReceivablesCurrentPage] = useState(1);
+    const [receivablesPageSize, setReceivablesPageSize] = useState(50);
+    const [receivablesTotalCount, setReceivablesTotalCount] = useState(0);
+    const [loadingReceivables, setLoadingReceivables] = useState(false);
 
     const [equityLogs, setEquityLogs] = useState<AuditLogEntry[]>(() => {
         const saved = localStorage.getItem('equity_audit_logs');
@@ -1671,8 +1685,61 @@ const FinancePage: React.FC<FinancePageProps> = ({
         }, { net: 0, gross: 0 });
     }, [filteredVariableExpenses, vatRate]);
 
+    // Refetch paginated debts
+    const refetchDebts = async () => {
+        if (activeTab !== 'DEBTS') return; // Only refetch when DEBTS tab is active
+        try {
+            setLoadingDebts(true);
+            const filters: any = {};
+            if (debtSearch) filters.searchTerm = debtSearch;
+            if (debtStatusFilter) filters.statusFilter = debtStatusFilter;
+            
+            const result = await mongoService.getDebtsPaginated(filters, debtsCurrentPage, debtsPageSize, vatRate);
+            setPaginatedDebts(result.debts);
+            setDebtsTotalCount(result.totalCount);
+        } catch (error) {
+            console.error('Error loading paginated debts:', error);
+        } finally {
+            setLoadingDebts(false);
+        }
+    };
+    
+    // Refetch paginated receivables
+    const refetchReceivables = async () => {
+        if (activeTab !== 'RECEIVABLES') return; // Only refetch when RECEIVABLES tab is active
+        try {
+            setLoadingReceivables(true);
+            const filters: any = {};
+            if (receivableSearch) filters.searchTerm = receivableSearch;
+            if (receivableStatusFilter) filters.statusFilter = receivableStatusFilter;
+            
+            const result = await mongoService.getReceivablesPaginated(filters, receivablesCurrentPage, receivablesPageSize, vatRate);
+            setPaginatedReceivables(result.receivables);
+            setReceivablesTotalCount(result.totalCount);
+        } catch (error) {
+            console.error('Error loading paginated receivables:', error);
+        } finally {
+            setLoadingReceivables(false);
+        }
+    };
+    
+    // Load paginated debts when filters or pagination change (only when DEBTS tab is active)
+    useEffect(() => {
+        if (activeTab === 'DEBTS') {
+            refetchDebts();
+        }
+    }, [debtSearch, debtStatusFilter, debtsCurrentPage, debtsPageSize, vatRate, activeTab]);
+    
+    // Load paginated receivables when filters or pagination change (only when RECEIVABLES tab is active)
+    useEffect(() => {
+        if (activeTab === 'RECEIVABLES') {
+            refetchReceivables();
+        }
+    }, [receivableSearch, receivableStatusFilter, receivablesCurrentPage, receivablesPageSize, vatRate, activeTab]);
+
     // --- Debts Logic with Filtering and Sorting ---
-    const filteredDebts = useMemo(() => {
+    // Use paginated debts instead of client-side filtering when DEBTS tab is active
+    const filteredDebts = activeTab === 'DEBTS' ? paginatedDebts : (useMemo(() => {
         let result = debts.map(d => {
             const amount = d.amount || 0;
             const gross = d.isVatExempt ? amount : (d.includesVat ? amount : amount * (1 + vatRate / 100));
@@ -1746,7 +1813,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
             if (!a.isFullyPaid && b.isFullyPaid) return -1;
             return new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime();
         });
-    }, [receivables, receivableSearch, receivableStatusFilter, vatRate]);
+    }, [receivables, receivableSearch, receivableStatusFilter, vatRate]) : []);
 
     const handleAdd = (type: string) => {
         setEditingId(null);
@@ -1937,6 +2004,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
             setDebts(prev => prev.map(d => d.id === debtId ? saved : d));
             setIsPaymentModalOpen(false);
             setSelectedDebtForPayment(null);
+            await refetchDebts(); // Refresh paginated debts after payment
         } catch (error) {
             console.error('Error saving debt payment to MongoDB:', error);
             alert('שגיאה בשמירת תשלום חוב למונגו. אנא נסה שוב.');
@@ -1970,6 +2038,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
             setReceivables(prev => prev.map(r => r.id === receivableId ? saved : r));
             setIsPaymentModalOpen(false);
             setSelectedReceivableForCollection(null);
+            await refetchReceivables(); // Refresh paginated receivables after payment
         } catch (error) {
             console.error('Error saving receivable collection to MongoDB:', error);
             alert('שגיאה בשמירת גבייה למונגו. אנא נסה שוב.');
@@ -2003,6 +2072,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
             
             const saved = await mongoService.updateDebt(updatedDebt);
             setDebts(prev => prev.map(d => d.id === debtId ? saved : d));
+            await refetchDebts(); // Refresh paginated debts after payment delete
         } catch (error) {
             console.error('Error deleting debt payment from MongoDB:', error);
             alert('שגיאה במחיקת תשלום חוב ממונגו. אנא נסה שוב.');
@@ -2036,6 +2106,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
             
             const saved = await mongoService.updateReceivable(updatedReceivable);
             setReceivables(prev => prev.map(r => r.id === receivableId ? saved : r));
+            await refetchReceivables(); // Refresh paginated receivables after payment delete
         } catch (error) {
             console.error('Error deleting receivable payment from MongoDB:', error);
             alert('שגיאה במחיקת גבייה ממונגו. אנא נסה שוב.');
@@ -2068,6 +2139,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
             const saved = await mongoService.updateDebt(updatedDebt);
             setDebts(prev => prev.map(d => d.id === debtId ? saved : d));
             addActivity(`סטטוס תשלום חוב עודכן ל-${newStatus}`);
+            await refetchDebts(); // Refresh paginated debts after payment status update
         } catch (error) {
             console.error('Error updating debt payment status in MongoDB:', error);
             alert('שגיאה בעדכון סטטוס תשלום חוב במונגו. אנא נסה שוב.');
@@ -2100,6 +2172,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
             const saved = await mongoService.updateReceivable(updatedReceivable);
             setReceivables(prev => prev.map(r => r.id === receivableId ? saved : r));
             addActivity(`סטטוס גבייה עודכן ל-${newStatus}`);
+            await refetchReceivables(); // Refresh paginated receivables after payment status update
         } catch (error) {
             console.error('Error updating receivable payment status in MongoDB:', error);
             alert('שגיאה בעדכון סטטוס גבייה במונגו. אנא נסה שוב.');
@@ -2251,9 +2324,11 @@ const FinancePage: React.FC<FinancePageProps> = ({
                 if (editingId) {
                     const saved = await mongoService.updateReceivable(newItem);
                     setReceivables(prev => prev.map(r => r.id === editingId ? saved : r));
+                    await refetchReceivables(); // Refresh paginated receivables after update
                 } else {
                     const saved = await mongoService.createReceivable(newItem);
                     setReceivables(prev => [...prev, saved]);
+                    await refetchReceivables(); // Refresh paginated receivables after create
                 }
             } else if (activeTab === 'EQUITY') {
                 if (!equityForm.investorName || !equityForm.amount) { alert('חסרים שדות חובה'); return; }
@@ -2671,7 +2746,10 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                         type="text" 
                                         placeholder="חיפוש חוב או ספק..." 
                                         value={debtSearch}
-                                        onChange={e => setDebtSearch(e.target.value)}
+                                        onChange={e => {
+                                            setDebtSearch(e.target.value);
+                                            setDebtsCurrentPage(1); // Reset to first page on search
+                                        }}
                                         className="w-full pl-10 pr-4 py-2 border border-slate-300 rounded-lg focus:ring-purple-500 focus:border-purple-500 text-sm bg-white p-2"
                                     />
                                     <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400">
@@ -2679,12 +2757,12 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                     </div>
                                 </div>
                                 <div className="flex bg-slate-100 p-1 rounded-lg w-full md:w-auto overflow-x-auto">
-                                    <button onClick={() => setDebtStatusFilter('OPEN')} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${debtStatusFilter === 'OPEN' ? 'bg-white text-purple-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>פתוחים</button>
-                                    <button onClick={() => setDebtStatusFilter('OVERDUE')} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${debtStatusFilter === 'OVERDUE' ? 'bg-white text-red-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>באיחור</button>
-                                    <button onClick={() => setDebtStatusFilter('ALL')} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${debtStatusFilter === 'ALL' ? 'bg-white text-slate-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>הכל</button>
-                                    <button onClick={() => setDebtStatusFilter('PAID')} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${debtStatusFilter === 'PAID' ? 'bg-white text-green-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>שולמו</button>
+                                    <button onClick={() => { setDebtStatusFilter('OPEN'); setDebtsCurrentPage(1); }} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${debtStatusFilter === 'OPEN' ? 'bg-white text-purple-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>פתוחים</button>
+                                    <button onClick={() => { setDebtStatusFilter('OVERDUE'); setDebtsCurrentPage(1); }} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${debtStatusFilter === 'OVERDUE' ? 'bg-white text-red-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>באיחור</button>
+                                    <button onClick={() => { setDebtStatusFilter('ALL'); setDebtsCurrentPage(1); }} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${debtStatusFilter === 'ALL' ? 'bg-white text-slate-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>הכל</button>
+                                    <button onClick={() => { setDebtStatusFilter('PAID'); setDebtsCurrentPage(1); }} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${debtStatusFilter === 'PAID' ? 'bg-white text-green-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>שולמו</button>
                                 </div>
-                                <div className="text-xs text-slate-400 font-medium px-2 whitespace-nowrap">מציג {filteredDebts.length} מתוך {debts.length}</div>
+                                <div className="text-xs text-slate-400 font-medium px-2 whitespace-nowrap">מציג {filteredDebts.length} מתוך {debtsTotalCount}</div>
                             </div>
 
                             <div className="border rounded-xl overflow-x-auto bg-white shadow-sm">
@@ -2718,6 +2796,70 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                     </tbody>
                                 </table>
                             </div>
+                            
+                            {/* Pagination Controls for DEBTS */}
+                            {debtsTotalCount > 0 && (
+                                <div className="mt-4 flex items-center justify-between bg-white px-4 py-3 border-t border-slate-200">
+                                    <div className="flex items-center gap-4">
+                                        <div className="text-sm text-slate-600">
+                                            מציג {((debtsCurrentPage - 1) * debtsPageSize) + 1} - {Math.min(debtsCurrentPage * debtsPageSize, debtsTotalCount)} מתוך {debtsTotalCount} חובות
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                            <label className="text-sm text-slate-600">שורות לעמוד:</label>
+                                            <select 
+                                                value={debtsPageSize} 
+                                                onChange={(e) => {
+                                                    setDebtsPageSize(parseInt(e.target.value));
+                                                    setDebtsCurrentPage(1);
+                                                }}
+                                                className="text-sm border border-slate-300 rounded px-2 py-1 focus:ring-primary focus:border-primary"
+                                            >
+                                                <option value={25}>25</option>
+                                                <option value={50}>50</option>
+                                                <option value={100}>100</option>
+                                                <option value={200}>200</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <button
+                                            onClick={() => setDebtsCurrentPage(1)}
+                                            disabled={debtsCurrentPage === 1 || loadingDebts}
+                                            className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                        >
+                                            ראשון
+                                        </button>
+                                        <button
+                                            onClick={() => setDebtsCurrentPage(prev => Math.max(1, prev - 1))}
+                                            disabled={debtsCurrentPage === 1 || loadingDebts}
+                                            className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                        >
+                                            קודם
+                                        </button>
+                                        <span className="px-3 py-1 text-sm text-slate-600">
+                                            עמוד {debtsCurrentPage} מתוך {Math.ceil(debtsTotalCount / debtsPageSize) || 1}
+                                        </span>
+                                        <button
+                                            onClick={() => setDebtsCurrentPage(prev => Math.min(Math.ceil(debtsTotalCount / debtsPageSize) || 1, prev + 1))}
+                                            disabled={debtsCurrentPage >= Math.ceil(debtsTotalCount / debtsPageSize) || loadingDebts}
+                                            className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                        >
+                                            הבא
+                                        </button>
+                                        <button
+                                            onClick={() => setDebtsCurrentPage(Math.ceil(debtsTotalCount / debtsPageSize) || 1)}
+                                            disabled={debtsCurrentPage >= Math.ceil(debtsTotalCount / debtsPageSize) || loadingDebts}
+                                            className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                        >
+                                            אחרון
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+                            
+                            {loadingDebts && (
+                                <div className="mt-4 text-center text-slate-500 text-sm">טוען...</div>
+                            )}
                         </div>
                     )}
                     {activeTab === 'RECEIVABLES' && (
@@ -2736,7 +2878,10 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                         type="text" 
                                         placeholder="חיפוש חייב..." 
                                         value={receivableSearch}
-                                        onChange={e => setReceivableSearch(e.target.value)}
+                                        onChange={e => {
+                                            setReceivableSearch(e.target.value);
+                                            setReceivablesCurrentPage(1); // Reset to first page on search
+                                        }}
                                         className="w-full pl-10 pr-4 py-2 border border-slate-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 text-sm bg-white p-2"
                                     />
                                     <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400">
@@ -2744,10 +2889,10 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                     </div>
                                 </div>
                                 <div className="flex bg-slate-100 p-1 rounded-lg w-full md:w-auto overflow-x-auto">
-                                    <button onClick={() => setReceivableStatusFilter('OPEN')} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${receivableStatusFilter === 'OPEN' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>פתוחים</button>
-                                    <button onClick={() => setReceivableStatusFilter('OVERDUE')} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${receivableStatusFilter === 'OVERDUE' ? 'bg-white text-red-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>בפיגור</button>
-                                    <button onClick={() => setReceivableStatusFilter('ALL')} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${receivableStatusFilter === 'ALL' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>הכל</button>
-                                    <button onClick={() => setReceivableStatusFilter('PAID')} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${receivableStatusFilter === 'PAID' ? 'bg-white text-green-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>נגבו</button>
+                                    <button onClick={() => { setReceivableStatusFilter('OPEN'); setReceivablesCurrentPage(1); }} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${receivableStatusFilter === 'OPEN' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>פתוחים</button>
+                                    <button onClick={() => { setReceivableStatusFilter('OVERDUE'); setReceivablesCurrentPage(1); }} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${receivableStatusFilter === 'OVERDUE' ? 'bg-white text-red-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>בפיגור</button>
+                                    <button onClick={() => { setReceivableStatusFilter('ALL'); setReceivablesCurrentPage(1); }} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${receivableStatusFilter === 'ALL' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>הכל</button>
+                                    <button onClick={() => { setReceivableStatusFilter('PAID'); setReceivablesCurrentPage(1); }} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${receivableStatusFilter === 'PAID' ? 'bg-white text-green-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>נגבו</button>
                                 </div>
                             </div>
 
@@ -2782,6 +2927,70 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                     </tbody>
                                 </table>
                             </div>
+                            
+                            {/* Pagination Controls for RECEIVABLES */}
+                            {receivablesTotalCount > 0 && (
+                                <div className="mt-4 flex items-center justify-between bg-white px-4 py-3 border-t border-slate-200">
+                                    <div className="flex items-center gap-4">
+                                        <div className="text-sm text-slate-600">
+                                            מציג {((receivablesCurrentPage - 1) * receivablesPageSize) + 1} - {Math.min(receivablesCurrentPage * receivablesPageSize, receivablesTotalCount)} מתוך {receivablesTotalCount} חייבים
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                            <label className="text-sm text-slate-600">שורות לעמוד:</label>
+                                            <select 
+                                                value={receivablesPageSize} 
+                                                onChange={(e) => {
+                                                    setReceivablesPageSize(parseInt(e.target.value));
+                                                    setReceivablesCurrentPage(1);
+                                                }}
+                                                className="text-sm border border-slate-300 rounded px-2 py-1 focus:ring-primary focus:border-primary"
+                                            >
+                                                <option value={25}>25</option>
+                                                <option value={50}>50</option>
+                                                <option value={100}>100</option>
+                                                <option value={200}>200</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <button
+                                            onClick={() => setReceivablesCurrentPage(1)}
+                                            disabled={receivablesCurrentPage === 1 || loadingReceivables}
+                                            className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                        >
+                                            ראשון
+                                        </button>
+                                        <button
+                                            onClick={() => setReceivablesCurrentPage(prev => Math.max(1, prev - 1))}
+                                            disabled={receivablesCurrentPage === 1 || loadingReceivables}
+                                            className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                        >
+                                            קודם
+                                        </button>
+                                        <span className="px-3 py-1 text-sm text-slate-600">
+                                            עמוד {receivablesCurrentPage} מתוך {Math.ceil(receivablesTotalCount / receivablesPageSize) || 1}
+                                        </span>
+                                        <button
+                                            onClick={() => setReceivablesCurrentPage(prev => Math.min(Math.ceil(receivablesTotalCount / receivablesPageSize) || 1, prev + 1))}
+                                            disabled={receivablesCurrentPage >= Math.ceil(receivablesTotalCount / receivablesPageSize) || loadingReceivables}
+                                            className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                        >
+                                            הבא
+                                        </button>
+                                        <button
+                                            onClick={() => setReceivablesCurrentPage(Math.ceil(receivablesTotalCount / receivablesPageSize) || 1)}
+                                            disabled={receivablesCurrentPage >= Math.ceil(receivablesTotalCount / receivablesPageSize) || loadingReceivables}
+                                            className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                        >
+                                            אחרון
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+                            
+                            {loadingReceivables && (
+                                <div className="mt-4 text-center text-slate-500 text-sm">טוען...</div>
+                            )}
                         </div>
                     )}
                     {activeTab === 'EQUITY' && (

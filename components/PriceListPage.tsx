@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { PriceListProduct, SalesHistoryEntry, AdHocProduct, Supplier, Attachment, PriceTier, SupplierPricing, ProductVariant } from '../types';
-import { getProducts, getSalesHistory, getAdHocProducts, updateProduct, createProduct, deleteProduct } from '../services/priceListService';
+import { getProducts, getProductsPaginated, getSalesHistory, getAdHocProducts, updateProduct, createProduct, deleteProduct } from '../services/priceListService';
 import { PlusIcon, EditIcon, DeleteIcon, ImportIcon } from './icons';
 import Modal from './Modal';
 import EditProductModal from './EditProductModal';
@@ -444,10 +444,12 @@ const VariantPriceTooltip: React.FC<{
 
 const PriceListPage: React.FC<PriceListPageProps> = ({ suppliers }) => {
     const [products, setProducts] = useState<PriceListProduct[]>([]);
+    const [paginatedProducts, setPaginatedProducts] = useState<PriceListProduct[]>([]);
     const [salesHistory, setSalesHistory] = useState<SalesHistoryEntry[]>([]);
     const [adHocProducts, setAdHocProducts] = useState<AdHocProduct[]>([]);
     const [activeTab, setActiveTab] = useState<'products' | 'history' | 'adHoc' | 'analytics'>('products');
     const [loading, setLoading] = useState(true);
+    const [loadingProducts, setLoadingProducts] = useState(false);
     const [searchQuery, setSearchQuery] = useState('');
     const [categoryFilter, setCategoryFilter] = useState<string>('');
     const [isModalOpen, setIsModalOpen] = useState(false);
@@ -455,20 +457,32 @@ const PriceListPage: React.FC<PriceListPageProps> = ({ suppliers }) => {
     const [lightboxImages, setLightboxImages] = useState<Attachment[]>([]);
     const [lightboxIndex, setLightboxIndex] = useState(0);
     const [showLightbox, setShowLightbox] = useState(false);
+    
+    // Pagination state for products tab
+    const [currentPage, setCurrentPage] = useState(1);
+    const [pageSize, setPageSize] = useState(50);
+    const [totalCount, setTotalCount] = useState(0);
+    const [categories, setCategories] = useState<string[]>([]);
 
     useEffect(() => {
         loadData();
     }, []);
 
+    // Load paginated products when filters or pagination change (only for products tab)
+    useEffect(() => {
+        if (activeTab === 'products') {
+            refetchProducts();
+        }
+    }, [activeTab, searchQuery, categoryFilter, currentPage, pageSize]);
+
     const loadData = async () => {
         try {
             setLoading(true);
-            const [productsData, historyData, adHocData] = await Promise.all([
-                getProducts(),
+            // Only load history and adHoc data here (products are loaded via pagination)
+            const [historyData, adHocData] = await Promise.all([
                 getSalesHistory(),
                 getAdHocProducts()
             ]);
-            setProducts(productsData);
             setSalesHistory(historyData);
             setAdHocProducts(adHocData);
         } catch (error) {
@@ -478,7 +492,32 @@ const PriceListPage: React.FC<PriceListPageProps> = ({ suppliers }) => {
         }
     };
 
+    const refetchProducts = async () => {
+        try {
+            setLoadingProducts(true);
+            const filters: any = {};
+            if (searchQuery) filters.searchQuery = searchQuery;
+            if (categoryFilter) filters.categoryFilter = categoryFilter;
+            
+            const result = await getProductsPaginated(filters, currentPage, pageSize);
+            setPaginatedProducts(result.products);
+            setTotalCount(result.totalCount);
+            setCategories(result.categories);
+        } catch (error) {
+            console.error('Error loading paginated products:', error);
+        } finally {
+            setLoadingProducts(false);
+        }
+    };
+
+    // For backwards compatibility, keep products state (used by other tabs or fallback)
+    // But use paginatedProducts for products tab
     const filteredProducts = useMemo(() => {
+        // If in products tab, use paginated products (already filtered server-side)
+        if (activeTab === 'products') {
+            return paginatedProducts;
+        }
+        // Otherwise use client-side filtering (for other tabs if needed)
         return products.filter(product => {
             const matchesSearch = !searchQuery || 
                 product.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -487,20 +526,9 @@ const PriceListPage: React.FC<PriceListPageProps> = ({ suppliers }) => {
             
             const matchesCategory = !categoryFilter || product.category === categoryFilter;
             
-            // Note: Supplier filter was removed as it depended on the old data structure.
-            // It can be re-added based on a new logic if needed.
-            
             return matchesSearch && matchesCategory;
         });
-    }, [products, searchQuery, categoryFilter]);
-
-    const categories = useMemo(() => {
-        const cats = new Set<string>();
-        products.forEach(p => {
-            if (p.category) cats.add(p.category);
-        });
-        return Array.from(cats).sort();
-    }, [products]);
+    }, [activeTab, paginatedProducts, products, searchQuery, categoryFilter]);
     
     // Helper function to calculate price range including variantCosts and costRange
     const calculateSupplierPriceRange = (sp: SupplierPricing, productVariants?: ProductVariant[]): { min: number; max: number } | null => {
@@ -875,7 +903,12 @@ const PriceListPage: React.FC<PriceListPageProps> = ({ suppliers }) => {
             } else {
                 await createProduct(product);
             }
-            await loadData();
+            // Refresh products data after save
+            if (activeTab === 'products') {
+                await refetchProducts();
+            } else {
+                await loadData();
+            }
             setIsModalOpen(false);
             setEditingProduct(null);
         } catch (error) {
@@ -890,7 +923,12 @@ const PriceListPage: React.FC<PriceListPageProps> = ({ suppliers }) => {
         }
         try {
             await deleteProduct(id);
-            await loadData();
+            // Refresh products data after delete
+            if (activeTab === 'products') {
+                await refetchProducts();
+            } else {
+                await loadData();
+            }
         } catch (error) {
             console.error('Error deleting product:', error);
             alert('שגיאה במחיקת המוצר');
@@ -972,13 +1010,19 @@ const PriceListPage: React.FC<PriceListPageProps> = ({ suppliers }) => {
                                 type="text"
                                 placeholder="חיפוש מוצרים..."
                                 value={searchQuery}
-                                onChange={(e) => setSearchQuery(e.target.value)}
+                                onChange={(e) => {
+                                    setSearchQuery(e.target.value);
+                                    setCurrentPage(1); // Reset to first page on search
+                                }}
                                 className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-primary focus:border-transparent"
                             />
                         </div>
                         <select
                             value={categoryFilter}
-                            onChange={(e) => setCategoryFilter(e.target.value)}
+                            onChange={(e) => {
+                                setCategoryFilter(e.target.value);
+                                setCurrentPage(1); // Reset to first page on filter change
+                            }}
                             className="px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-primary focus:border-transparent"
                         >
                             <option value="">כל הקטגוריות</option>
@@ -1090,6 +1134,70 @@ const PriceListPage: React.FC<PriceListPageProps> = ({ suppliers }) => {
                                 </tbody>
                             </table>
                         </div>
+                        
+                        {/* Pagination Controls */}
+                        {totalCount > 0 && (
+                            <div className="mt-4 flex items-center justify-between bg-white px-4 py-3 border-t border-slate-200">
+                                <div className="flex items-center gap-4">
+                                    <div className="text-sm text-slate-600">
+                                        מציג {((currentPage - 1) * pageSize) + 1} - {Math.min(currentPage * pageSize, totalCount)} מתוך {totalCount} מוצרים
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <label className="text-sm text-slate-600">שורות לעמוד:</label>
+                                        <select 
+                                            value={pageSize} 
+                                            onChange={(e) => {
+                                                setPageSize(parseInt(e.target.value));
+                                                setCurrentPage(1);
+                                            }}
+                                            className="text-sm border border-slate-300 rounded px-2 py-1 focus:ring-primary focus:border-primary"
+                                        >
+                                            <option value={25}>25</option>
+                                            <option value={50}>50</option>
+                                            <option value={100}>100</option>
+                                            <option value={200}>200</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    <button
+                                        onClick={() => setCurrentPage(1)}
+                                        disabled={currentPage === 1 || loadingProducts}
+                                        className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                    >
+                                        ראשון
+                                    </button>
+                                    <button
+                                        onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
+                                        disabled={currentPage === 1 || loadingProducts}
+                                        className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                    >
+                                        קודם
+                                    </button>
+                                    <span className="px-3 py-1 text-sm text-slate-600">
+                                        עמוד {currentPage} מתוך {Math.ceil(totalCount / pageSize) || 1}
+                                    </span>
+                                    <button
+                                        onClick={() => setCurrentPage(prev => Math.min(Math.ceil(totalCount / pageSize) || 1, prev + 1))}
+                                        disabled={currentPage >= Math.ceil(totalCount / pageSize) || loadingProducts}
+                                        className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                    >
+                                        הבא
+                                    </button>
+                                    <button
+                                        onClick={() => setCurrentPage(Math.ceil(totalCount / pageSize) || 1)}
+                                        disabled={currentPage >= Math.ceil(totalCount / pageSize) || loadingProducts}
+                                        className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                    >
+                                        אחרון
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+                        
+                        {loadingProducts && (
+                            <div className="mt-4 text-center text-slate-500 text-sm">טוען...</div>
+                        )}
                     </div>
                 </div>
             )}

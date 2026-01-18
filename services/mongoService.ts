@@ -61,9 +61,116 @@ export async function deleteCustomer(customerId: string): Promise<void> {
     });
 }
 
+export async function getCustomersPaginated(filters: { searchTerm?: string }, page: number = 1, limit: number = 50): Promise<any> {
+    const queryParams = new URLSearchParams({
+        page: page.toString(),
+        limit: limit.toString(),
+        filters: JSON.stringify(filters)
+    });
+    
+    const response = await fetch(`${API_BASE_URL}/customers/paginated?${queryParams}`, {
+        headers: {
+            'Authorization': `Bearer ${localStorage.getItem('authToken')}`,
+            'Content-Type': 'application/json'
+        }
+    });
+    
+    if (!response.ok) throw new Error('Failed to fetch paginated customers');
+    return response.json();
+}
+
 // ==================== ORDERS ====================
 export async function getOrders(): Promise<Order[]> {
     return apiRequest<Order[]>('/orders');
+}
+
+export async function getOrdersPaginated(filters: any, page: number = 1, limit: number = 50): Promise<any> {
+    const queryParams = new URLSearchParams({
+        page: page.toString(),
+        limit: limit.toString(),
+        filters: JSON.stringify(filters)
+    });
+    
+    const response = await fetch(`${API_BASE_URL}/orders/paginated?${queryParams}`, {
+        headers: {
+            'Authorization': `Bearer ${localStorage.getItem('authToken')}`,
+            'Content-Type': 'application/json'
+        }
+    });
+    
+    if (!response.ok) throw new Error('Failed to fetch paginated orders');
+    return response.json();
+}
+
+export async function getOrderById(orderId: string): Promise<Order> {
+    return apiRequest<Order>(`/orders/${orderId}`);
+}
+
+export async function getOrdersByParentId(parentOrderId: string): Promise<Order[]> {
+    return apiRequest<Order[]>(`/orders/parent/${parentOrderId}`);
+}
+
+// PayableItem interface for supplier payments report (matches server interface)
+interface PayableItem {
+    uniqueId: string;
+    supplierId: string;
+    supplierName: string;
+    orderId: string;
+    orderNumber: string;
+    orderDescription: string;
+    itemDescription: string;
+    cost: number;
+    costGross: number;
+    paidAmount: number;
+    remainingAmount: number;
+    orderDate: Date | string;
+    dueDate: Date | string;
+    isCustomDueDate: boolean;
+    status: 'שולם' | 'שולם חלקית' | 'איחור' | 'לתשלום החודש' | 'צפוי' | 'ממתין לסיום';
+    timeStatus: 'איחור' | 'לתשלום החודש' | 'צפוי' | 'ממתין לסיום';
+    payments: any[];
+    itemType: 'lineItem' | 'additionalService';
+    itemIndex: number;
+}
+
+export async function getPayableItems(
+    filters: {
+        supplierFilterId?: string;
+        dateStart?: string;
+        dateEnd?: string;
+        showPaid?: boolean;
+        viewMode?: 'forecast' | 'purchase_history' | 'payment_log';
+    } = {},
+    page: number = 1,
+    limit: number = 1000
+): Promise<{
+    items: PayableItem[];
+    totalCount: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+    summaryStats: {
+        totalDebt: number;
+        overdueDebt: number;
+        thisMonthDue: number;
+        unassignedCount: number;
+    };
+}> {
+    const queryParams = new URLSearchParams({
+        page: page.toString(),
+        limit: limit.toString(),
+        filters: JSON.stringify(filters)
+    });
+    
+    const response = await fetch(`${API_BASE_URL}/orders/payables?${queryParams}`, {
+        headers: {
+            'Authorization': `Bearer ${localStorage.getItem('authToken')}`,
+            'Content-Type': 'application/json'
+        }
+    });
+    
+    if (!response.ok) throw new Error('Failed to fetch payable items');
+    return response.json();
 }
 
 export async function createOrder(order: Order): Promise<Order> {
@@ -89,6 +196,29 @@ export async function deleteOrder(orderId: string): Promise<void> {
 // ==================== SUPPLIERS ====================
 export async function getSuppliers(): Promise<Supplier[]> {
     return apiRequest<Supplier[]>('/suppliers');
+}
+
+export async function getSuppliersPaginated(
+    filters: {
+        searchTerm?: string;
+    } = {},
+    page: number = 1,
+    limit: number = 50
+): Promise<{
+    suppliers: Supplier[];
+    totalCount: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+}> {
+    const queryParams = new URLSearchParams({
+        page: page.toString(),
+        limit: limit.toString(),
+    });
+    
+    if (filters.searchTerm) queryParams.append('searchTerm', filters.searchTerm);
+    
+    return apiRequest<any>(`/suppliers/paginated?${queryParams}`);
 }
 
 export async function createSupplier(supplier: Supplier): Promise<Supplier> {
@@ -240,6 +370,33 @@ export async function getDebts(): Promise<Debt[]> {
     return apiRequest<Debt[]>('/finance/debts');
 }
 
+export async function getDebtsPaginated(
+    filters: {
+        searchTerm?: string;
+        statusFilter?: 'ALL' | 'OPEN' | 'OVERDUE' | 'PAID';
+    } = {},
+    page: number = 1,
+    limit: number = 50,
+    vatRate: number = 0
+): Promise<{
+    debts: (Debt & { gross: number; paid: number; remaining: number; isFullyPaid: boolean; isOverdue: boolean })[];
+    totalCount: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+}> {
+    const queryParams = new URLSearchParams({
+        page: page.toString(),
+        limit: limit.toString(),
+        vatRate: vatRate.toString(),
+    });
+    
+    if (filters.searchTerm) queryParams.append('searchTerm', filters.searchTerm);
+    if (filters.statusFilter) queryParams.append('statusFilter', filters.statusFilter);
+    
+    return apiRequest<any>(`/finance/debts/paginated?${queryParams}`);
+}
+
 export async function createDebt(debt: Debt): Promise<Debt> {
     return apiRequest<Debt>('/finance/debts', {
         method: 'POST',
@@ -263,6 +420,33 @@ export async function deleteDebt(debtId: string): Promise<void> {
 // ==================== RECEIVABLES ====================
 export async function getReceivables(): Promise<Receivable[]> {
     return apiRequest<Receivable[]>('/finance/receivables');
+}
+
+export async function getReceivablesPaginated(
+    filters: {
+        searchTerm?: string;
+        statusFilter?: 'ALL' | 'OPEN' | 'OVERDUE' | 'PAID';
+    } = {},
+    page: number = 1,
+    limit: number = 50,
+    vatRate: number = 0
+): Promise<{
+    receivables: (Receivable & { gross: number; collected: number; remaining: number; isFullyPaid: boolean; isOverdue: boolean })[];
+    totalCount: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+}> {
+    const queryParams = new URLSearchParams({
+        page: page.toString(),
+        limit: limit.toString(),
+        vatRate: vatRate.toString(),
+    });
+    
+    if (filters.searchTerm) queryParams.append('searchTerm', filters.searchTerm);
+    if (filters.statusFilter) queryParams.append('statusFilter', filters.statusFilter);
+    
+    return apiRequest<any>(`/finance/receivables/paginated?${queryParams}`);
 }
 
 export async function createReceivable(receivable: Receivable): Promise<Receivable> {
@@ -313,6 +497,37 @@ export async function deleteEquity(equityId: string): Promise<void> {
 // ==================== ATTENDANCE RECORDS ====================
 export async function getAttendanceRecords(): Promise<AttendanceRecord[]> {
     return apiRequest<AttendanceRecord[]>('/attendance');
+}
+
+export async function getAttendanceRecordsPaginated(
+    filters: {
+        employeeId?: string;
+        month?: number;
+        year?: number;
+        dateStart?: string;
+        dateEnd?: string;
+    } = {},
+    page: number = 1,
+    limit: number = 50
+): Promise<{
+    records: AttendanceRecord[];
+    totalCount: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+}> {
+    const queryParams = new URLSearchParams({
+        page: page.toString(),
+        limit: limit.toString(),
+    });
+    
+    if (filters.employeeId) queryParams.append('employeeId', filters.employeeId);
+    if (filters.month) queryParams.append('month', filters.month.toString());
+    if (filters.year) queryParams.append('year', filters.year.toString());
+    if (filters.dateStart) queryParams.append('dateStart', filters.dateStart);
+    if (filters.dateEnd) queryParams.append('dateEnd', filters.dateEnd);
+    
+    return apiRequest<any>(`/attendance/paginated?${queryParams}`);
 }
 
 export async function createAttendanceRecord(record: AttendanceRecord): Promise<AttendanceRecord> {

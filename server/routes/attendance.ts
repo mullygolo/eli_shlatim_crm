@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import fs from 'fs';
-import { getAttendanceRecords, createAttendanceRecord, updateAttendanceRecord, deleteAttendanceRecord, clockInAttendance, clockOutAttendance } from '../services/mongoService.js';
+import { getAttendanceRecords, getAttendanceRecordsPaginated, createAttendanceRecord, updateAttendanceRecord, deleteAttendanceRecord, clockInAttendance, clockOutAttendance } from '../services/mongoService.js';
 
 const router = Router();
 
@@ -10,6 +10,25 @@ router.get('/', async (req, res) => {
         res.json(records);
     } catch (error) {
         res.status(500).json({ error: 'Failed to fetch attendance records' });
+    }
+});
+
+router.get('/paginated', async (req, res) => {
+    try {
+        const page = parseInt(req.query.page as string) || 1;
+        const limit = parseInt(req.query.limit as string) || 50;
+        const filters: any = {};
+        
+        if (req.query.employeeId) filters.employeeId = req.query.employeeId as string;
+        if (req.query.month) filters.month = parseInt(req.query.month as string);
+        if (req.query.year) filters.year = parseInt(req.query.year as string);
+        if (req.query.dateStart) filters.dateStart = req.query.dateStart as string;
+        if (req.query.dateEnd) filters.dateEnd = req.query.dateEnd as string;
+        
+        const result = await getAttendanceRecordsPaginated(filters, page, limit);
+        res.json(result);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch paginated attendance records' });
     }
 });
 

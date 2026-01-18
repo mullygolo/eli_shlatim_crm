@@ -160,13 +160,13 @@ export function calculateProductPrice(
             fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'priceCalculations.ts:125',message:'Using customerPriceRange',data:{unitPrice,priceRangeMin:product.customerPriceRange.min},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
             // #endregion
         } else {
-            // Calculate customer price
-            unitPrice = calculateTieredPrice(
-                product.customerBasePrice || 0,
-                valueForTiers,
-                product.customerPriceTiers || [],
-                'price'
-            );
+        // Calculate customer price
+        unitPrice = calculateTieredPrice(
+            product.customerBasePrice || 0,
+            valueForTiers,
+            product.customerPriceTiers || [],
+            'price'
+        );
             // #region agent log
             fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'priceCalculations.ts:133',message:'After calculateTieredPrice',data:{unitPrice,basePrice:product.customerBasePrice||0,valueForTiers},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
             // #endregion
@@ -174,37 +174,37 @@ export function calculateProductPrice(
 
         // Calculate supplier cost - use new structure if available, otherwise fall back to legacy
         if (unitCost === 0) {
-            if (product.supplierPricings && product.supplierPricings.length > 0) {
-                // Find the supplier pricing (by supplierId if provided, otherwise use first)
-                let supplierPricing: SupplierPricing | undefined;
-                if (supplierId) {
-                    supplierPricing = product.supplierPricings.find(sp => sp.supplierId === supplierId);
-                }
-                if (!supplierPricing) {
-                    supplierPricing = product.supplierPricings[0];
-                }
-                
-                if (supplierPricing) {
+        if (product.supplierPricings && product.supplierPricings.length > 0) {
+            // Find the supplier pricing (by supplierId if provided, otherwise use first)
+            let supplierPricing: SupplierPricing | undefined;
+            if (supplierId) {
+                supplierPricing = product.supplierPricings.find(sp => sp.supplierId === supplierId);
+            }
+            if (!supplierPricing) {
+                supplierPricing = product.supplierPricings[0];
+            }
+            
+            if (supplierPricing) {
                     // Check if supplier pricing uses simple cost range (costRange)
                     if (supplierPricing.costRange && supplierPricing.costRange.min !== undefined) {
                         unitCost = supplierPricing.costRange.min;
                     } else {
-                        unitCost = calculateTieredPrice(
-                            supplierPricing.baseCost || 0,
-                            valueForTiers,
-                            supplierPricing.priceTiers || [],
-                            'cost'
-                        );
-                    }
-                }
-            } else {
-                // Fallback to legacy structure for backward compatibility
                 unitCost = calculateTieredPrice(
-                    product.supplierBaseCost || 0,
+                    supplierPricing.baseCost || 0,
                     valueForTiers,
-                    product.supplierPriceTiers || [],
+                    supplierPricing.priceTiers || [],
                     'cost'
                 );
+                    }
+            }
+        } else {
+            // Fallback to legacy structure for backward compatibility
+        unitCost = calculateTieredPrice(
+            product.supplierBaseCost || 0,
+            valueForTiers,
+            product.supplierPriceTiers || [],
+            'cost'
+        );
             }
         }
 
@@ -214,7 +214,7 @@ export function calculateProductPrice(
         // This logic can be refined based on business rules.
         unitPrice = product.customerPriceRange?.min || 0;
         if (unitCost === 0) {
-            unitCost = product.supplierCostRange?.min || 0;
+        unitCost = product.supplierCostRange?.min || 0;
         }
     }
 

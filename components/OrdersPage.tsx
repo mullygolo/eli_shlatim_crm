@@ -591,12 +591,11 @@ const OrderForm: React.FC<{
     onDraftCreate: (order: Order) => void;
     onCancel: () => void;
     addActivity: (description: string) => void;
-    allOrders?: Order[]; 
     onSwitchOrder: (orderId: string) => void; 
     statusConfigs: OrderStatusConfiguration[];
     getNextOrderNumber: () => string;
     vatRate: number;
-}> = ({ order, customers, setCustomers, suppliers, setSuppliers, employees, onSave, onDraftCreate, onCancel, addActivity, allOrders = [], onSwitchOrder, statusConfigs, getNextOrderNumber, vatRate }) => {
+}> = ({ order, customers, setCustomers, suppliers, setSuppliers, employees, onSave, onDraftCreate, onCancel, addActivity, onSwitchOrder, statusConfigs, getNextOrderNumber, vatRate }) => {
     
     // Find Dynamic Initial Status
     const initialStatus = useMemo(() => statusConfigs.find(c => c.isLead)?.label || 'ליד חדש', [statusConfigs]);
@@ -733,9 +732,43 @@ const OrderForm: React.FC<{
     const selectedCustomer = useMemo(() => customers.find(c => c.id === formData.customerId), [customers, formData.customerId]);
     const selectedContact = useMemo(() => selectedCustomer?.contacts.find(c => c.id === formData.contactId), [selectedCustomer, formData.contactId]);
     
-    const parentOrder = useMemo(() => formData.parentOrderId ? allOrders.find(o => o.id === formData.parentOrderId) : null, [formData.parentOrderId, allOrders]);
+    // Fetch parent order and child orders from API
+    const [parentOrder, setParentOrder] = useState<Order | null>(null);
+    const [childOrders, setChildOrders] = useState<Order[]>([]);
     
-    const childOrders = useMemo(() => order ? allOrders.filter(o => o.parentOrderId === order.id) : [], [order, allOrders]);
+    useEffect(() => {
+        const fetchParentOrder = async () => {
+            if (formData.parentOrderId) {
+                try {
+                    const parent = await mongoService.getOrderById(formData.parentOrderId);
+                    setParentOrder(parent);
+                } catch (error) {
+                    console.error('Error fetching parent order:', error);
+                    setParentOrder(null);
+                }
+            } else {
+                setParentOrder(null);
+            }
+        };
+        fetchParentOrder();
+    }, [formData.parentOrderId]);
+    
+    useEffect(() => {
+        const fetchChildOrders = async () => {
+            if (order?.id) {
+                try {
+                    const children = await mongoService.getOrdersByParentId(order.id);
+                    setChildOrders(children);
+                } catch (error) {
+                    console.error('Error fetching child orders:', error);
+                    setChildOrders([]);
+                }
+            } else {
+                setChildOrders([]);
+            }
+        };
+        fetchChildOrders();
+    }, [order?.id]);
 
     const openTasks = useMemo(() => 
         formData.timeline.filter(t => t.type === 'TASK' && !t.isCompleted),
@@ -2705,6 +2738,14 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
     const [dateFilterType, setDateFilterType] = useState<'ORDER_DATE' | 'DEAL_DATE'>('ORDER_DATE'); // New Date Type Filter
     const [isCollectionMode, setIsCollectionMode] = useState(false);
     const [showCompletedOrders, setShowCompletedOrders] = useState(false); 
+    
+    // Pagination state
+    const [currentPage, setCurrentPage] = useState(1);
+    const [pageSize, setPageSize] = useState(50);
+    const [totalCount, setTotalCount] = useState(0);
+    const [loading, setLoading] = useState(false);
+    const [paginatedOrders, setPaginatedOrders] = useState<Order[]>([]);
+    const [summaryTotals, setSummaryTotals] = useState({ totalAmount: 0, totalProfit: 0, totalBalance: 0, totalCost: 0, totalAmountInclVat: 0, totalBalanceInclVat: 0 }); 
 
     const customerOptions = useMemo(() => customers.map(c => ({ value: c.id, label: c.name })), [customers]);
     const supplierOptions = useMemo(() => suppliers.map(s => ({ value: s.id, label: s.name })), [suppliers]);
@@ -2712,10 +2753,11 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
     const orderStatusOptions = useMemo(() => (statusConfigs || []).map(s => ({ value: s.label, label: s.label })), [statusConfigs]);
     const paymentStatusOptions = useMemo(() => PAYMENT_STATUSES_ORDERED.map(s => ({ value: s, label: s })), []);
 
+    // Generate available years (current year and last 5 years)
     const availableYears = useMemo(() => {
-        const years = new Set(orders.map(o => new Date(o.date).getFullYear()));
-        return Array.from(years).sort((a: number, b: number = 0) => b - a);
-    }, [orders]);
+        const currentYear = new Date().getFullYear();
+        return Array.from({ length: 6 }, (_, i) => currentYear - i);
+    }, []);
     
     const availableMonths = [
         { value: 1, name: 'ינואר' }, { value: 2, name: 'פברואר' }, { value: 3, name: 'מרץ' },
@@ -2748,14 +2790,13 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
         setDateFilterType('ORDER_DATE');
         setIsCollectionMode(false);
         setShowCompletedOrders(false);
+        setCurrentPage(1); // Reset to first page
     };
 
-    const handleStatusChange = (orderId: string, newStatus: string) => {
-        setOrders(prevOrders => {
-            const orderIndex = prevOrders.findIndex(o => o.id === orderId);
-            if (orderIndex === -1) return prevOrders;
-            const originalOrder = prevOrders[orderIndex];
-            if (originalOrder.orderStatus === newStatus) return prevOrders;
+    const handleStatusChange = async (orderId: string, newStatus: string) => {
+        const originalOrder = paginatedOrders.find(o => o.id === orderId) || orders.find(o => o.id === orderId);
+        if (!originalOrder || originalOrder.orderStatus === newStatus) return;
+        
             const user = employees.find(emp => emp.id === originalOrder.employeeId)?.name || 'מערכת';
             const config = statusConfigs.find(c => c.label === newStatus);
             const isNowActiveDeal = config ? config.isActiveDeal : false;
@@ -2781,20 +2822,75 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
                 timeline: [logEvent, ...originalOrder.timeline],
                 statusHistory: [...(originalOrder.statusHistory || []), newStatusHistoryEntry],
             };
+        
+        try {
+            // Update on server
+            await mongoService.updateOrder(updatedOrder);
+            // Update local state
+            setOrders(prevOrders => {
+                const orderIndex = prevOrders.findIndex(o => o.id === orderId);
+                if (orderIndex === -1) return prevOrders;
             const newOrders = [...prevOrders];
             newOrders[orderIndex] = updatedOrder;
-            addActivity(`סטטוס הזמנה ${originalOrder.orderNumber} שונה ל: ${newStatus}`);
             return newOrders;
         });
+            addActivity(`סטטוס הזמנה ${originalOrder.orderNumber} שונה ל: ${newStatus}`);
+            // Refetch paginated data
+            await refetchOrders();
+        } catch (error) {
+            console.error('Error updating order status:', error);
+            alert('שגיאה בעדכון סטטוס הזמנה');
+        }
     };
 
     const handleDraftCreate = (draftOrder: Order) => {
         setEditingOrder(draftOrder);
     };
 
+    // Helper function to fetch paginated orders
+    const refetchOrders = async () => {
+        setLoading(true);
+        try {
+            const filters = {
+                customerFilter,
+                supplierFilter,
+                employeeFilter,
+                orderStatusFilter,
+                paymentStatusFilter,
+                monthFilter,
+                yearFilter,
+                startDateFilter,
+                endDateFilter,
+                dateFilterType,
+                searchTerm,
+                isCollectionMode,
+                showCompletedOrders
+            };
+            
+            const result = await mongoService.getOrdersPaginated(filters, currentPage, pageSize);
+            setPaginatedOrders(result.orders);
+            setTotalCount(result.totalCount);
+            setSummaryTotals(result.summaryTotals || { totalAmount: 0, totalProfit: 0, totalBalance: 0, totalCost: 0, totalAmountInclVat: 0, totalBalanceInclVat: 0 });
+        } catch (error) {
+            console.error('Error fetching paginated orders:', error);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    // Reset to page 1 when filters change
+    useEffect(() => {
+        setCurrentPage(1);
+    }, [customerFilter, supplierFilter, employeeFilter, orderStatusFilter, paymentStatusFilter, monthFilter, yearFilter, startDateFilter, endDateFilter, dateFilterType, searchTerm, isCollectionMode, showCompletedOrders]);
+
+    // Fetch paginated orders when filters or pagination change
+    useEffect(() => {
+        refetchOrders();
+    }, [currentPage, pageSize, customerFilter, supplierFilter, employeeFilter, orderStatusFilter, paymentStatusFilter, monthFilter, yearFilter, startDateFilter, endDateFilter, dateFilterType, searchTerm, isCollectionMode, showCompletedOrders]);
+
     useEffect(() => {
         if (initialOpenOrderId) {
-            const orderToOpen = orders.find(o => o.id === initialOpenOrderId);
+            const orderToOpen = paginatedOrders.find(o => o.id === initialOpenOrderId) || orders.find(o => o.id === initialOpenOrderId);
             if (orderToOpen) {
                 handleEditOrder(orderToOpen);
             }
@@ -2802,24 +2898,45 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
                 onOrderOpened();
             }
         }
-    }, [initialOpenOrderId, orders, onOrderOpened]);
+    }, [initialOpenOrderId, paginatedOrders, orders, onOrderOpened]);
 
-    const handleSaveOrder = (order: Order, keepOpen: boolean = false) => {
-        setOrders(prevOrders => {
-            const exists = prevOrders.some(o => o.id === order.id);
+    const handleSaveOrder = async (order: Order, keepOpen: boolean = false) => {
+        try {
+            const exists = orders.some(o => o.id === order.id);
+            let savedOrder: Order;
+            
             if (exists) {
+                // Update existing order on server
+                savedOrder = await mongoService.updateOrder(order);
                 addActivity(`הזמנה עודכנה: ${order.description}`);
-                return prevOrders.map(o => o.id === order.id ? order : o);
             } else {
+                // Create new order on server
+                savedOrder = await mongoService.createOrder(order);
                 addActivity(`הזמנה חדשה נוספה: ${order.description}`);
-                return [order, ...prevOrders];
+            }
+            
+            // Update local state
+            setOrders(prevOrders => {
+                const exists = prevOrders.some(o => o.id === savedOrder.id);
+                if (exists) {
+                    return prevOrders.map(o => o.id === savedOrder.id ? savedOrder : o);
+                } else {
+                    return [savedOrder, ...prevOrders];
             }
         });
+            
+            // Refetch paginated data
+            await refetchOrders();
+            
         if (keepOpen) {
-            setEditingOrder(order);
+                setEditingOrder(savedOrder);
         } else {
             setIsModalOpen(false);
             setEditingOrder(null);
+            }
+        } catch (error) {
+            console.error('Error saving order:', error);
+            alert('שגיאה בשמירת הזמנה');
         }
     };
 
@@ -2865,122 +2982,8 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
         return parts.join(', ');
     };
 
-    const filteredOrders = useMemo(() => {
-        let result = orders;
-        if (isCollectionMode) {
-             result = result.filter(order => {
-                 const config = statusConfigs.find(c => c.label === order.orderStatus);
-                 const isActive = config ? config.isActiveDeal : false;
-                 return order.paymentStatus !== PaymentStatus.PAID && isActive;
-             });
-        } else {
-             result = result.filter(order => {
-                if (paymentStatusFilter.length === 0) return true;
-                return paymentStatusFilter.includes(order.paymentStatus);
-            });
-        }
-        result = result
-            .filter(order => {
-                const config = statusConfigs.find(c => c.label === order.orderStatus);
-                if (orderStatusFilter.length > 0) {
-                    return orderStatusFilter.includes(order.orderStatus);
-                } 
-                if (isCollectionMode) {
-                    return true;
-                }
-                if (!showCompletedOrders && config?.isCompleted) {
-                    return false;
-                }
-                return true;
-            })
-            .filter(order => {
-                if (customerFilter.length === 0) return true;
-                return customerFilter.includes(order.customerId || '');
-            })
-            .filter(order => {
-                if (employeeFilter.length === 0) return true;
-                return employeeFilter.includes(order.employeeId || '');
-            })
-            .filter(order => {
-                if (supplierFilter.length === 0) return true;
-                const supplierIdsInOrder = new Set<string>();
-                if (order.supplierId) supplierIdsInOrder.add(order.supplierId);
-                order.lineItems.forEach(li => li.supplierId && supplierIdsInOrder.add(li.supplierId));
-                order.additionalServices.forEach(s => s.supplierId && supplierIdsInOrder.add(s.supplierId));
-                return supplierFilter.some(sId => supplierIdsInOrder.has(sId));
-            })
-            .filter(order => {
-                const relevantDate = dateFilterType === 'ORDER_DATE' 
-                    ? new Date(order.date) 
-                    : (order.dealStartDate ? new Date(order.dealStartDate) : null);
-                
-                if (!relevantDate) return dateFilterType === 'ORDER_DATE';
-                
-                const dateStr = relevantDate.toISOString().split('T')[0];
-
-                // NEW: Date Range Filter Priority
-                if (startDateFilter || endDateFilter) {
-                    if (startDateFilter && dateStr < startDateFilter) return false;
-                    if (endDateFilter && dateStr > endDateFilter) return false;
-                    return true;
-                }
-
-                if (monthFilter !== 'all' && (relevantDate.getMonth() + 1) !== parseInt(monthFilter)) return false;
-                if (yearFilter !== 'all' && relevantDate.getFullYear() !== parseInt(yearFilter)) return false;
-                return true;
-            })
-            .filter(order => {
-                if (!searchTerm) return true;
-                const lowercasedTerm = searchTerm.toLowerCase();
-                const customerName = getCustomerName(order.customerId).toLowerCase();
-                const isServiceSearch = (lowercasedTerm.includes('שירות') || lowercasedTerm.includes('תיקון') || lowercasedTerm.includes('service')) && order.type === OrderType.SERVICE_CALL;
-                const parentOrderMatch = order.parentOrderId 
-                    ? orders.find(o => o.id === order.parentOrderId)?.orderNumber.toLowerCase().includes(lowercasedTerm)
-                    : false;
-                return (
-                    order.orderNumber.toLowerCase().includes(lowercasedTerm) ||
-                    order.description.toLowerCase().includes(lowercasedTerm) ||
-                    customerName.includes(lowercasedTerm) ||
-                    isServiceSearch ||
-                    parentOrderMatch
-                );
-            });
-        if (isCollectionMode) {
-            result.sort((a, b) => {
-                 const dateA = calculateDueDate(a.dealStartDate || a.date, a.paymentTerms);
-                 const dateB = calculateDueDate(b.dealStartDate || b.date, b.paymentTerms);
-                 return dateA.getTime() - dateB.getTime();
-            });
-        } else {
-             const dateKey = dateFilterType === 'ORDER_DATE' ? 'date' : 'dealStartDate';
-             result.sort((a,b) => {
-                const dA = a[dateKey] ? new Date(a[dateKey]!).getTime() : 0;
-                const dB = b[dateKey] ? new Date(b[dateKey]!).getTime() : 0;
-                return dB - dA;
-             });
-        }
-        return result;
-    }, [orders, orderStatusFilter, paymentStatusFilter, customerFilter, employeeFilter, supplierFilter, monthFilter, yearFilter, startDateFilter, endDateFilter, searchTerm, isCollectionMode, showCompletedOrders, statusConfigs, dateFilterType]);
-
-    const summaryTotals = useMemo(() => {
-        return filteredOrders.reduce((acc, order) => {
-            const { totalAmount, profit, totalCost } = calculateOrderTotals(order);
-            const currentOrderVat = order.vatRate ?? vatRate;
-            acc.totalAmount += totalAmount;
-            acc.totalProfit += profit;
-            acc.totalCost += totalCost; 
-            acc.totalAmountInclVat += totalAmount * (1 + currentOrderVat / 100);
-            
-            const statusConfig = statusConfigs.find(c => c.label === order.orderStatus);
-            const isActiveDeal = statusConfig ? statusConfig.isActiveDeal : true; 
-            if (isActiveDeal) {
-                const balance = order.paymentStatus === PaymentStatus.PAID ? 0 : totalAmount;
-                acc.totalBalance += balance;
-                acc.totalBalanceInclVat += balance * (1 + currentOrderVat / 100);
-            }
-            return acc;
-        }, { totalAmount: 0, totalProfit: 0, totalBalance: 0, totalCost: 0, totalAmountInclVat: 0, totalBalanceInclVat: 0 });
-    }, [filteredOrders, statusConfigs, vatRate]);
+    // Use paginatedOrders as filteredOrders (filtering is done on server)
+    const filteredOrders = paginatedOrders;
     
     return (
         <div>
@@ -3285,6 +3288,70 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
                         </tr>
                     </tfoot>
                 </table>
+                
+                {/* Pagination Controls */}
+                {totalCount > 0 && (
+                    <div className="mt-4 flex items-center justify-between bg-white px-4 py-3 border-t border-slate-200">
+                        <div className="flex items-center gap-4">
+                            <div className="text-sm text-slate-600">
+                                מציג {((currentPage - 1) * pageSize) + 1} - {Math.min(currentPage * pageSize, totalCount)} מתוך {totalCount} הזמנות
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <label className="text-sm text-slate-600">שורות לעמוד:</label>
+                                <select 
+                                    value={pageSize} 
+                                    onChange={(e) => {
+                                        setPageSize(parseInt(e.target.value));
+                                        setCurrentPage(1);
+                                    }}
+                                    className="text-sm border border-slate-300 rounded px-2 py-1 focus:ring-primary focus:border-primary"
+                                >
+                                    <option value={25}>25</option>
+                                    <option value={50}>50</option>
+                                    <option value={100}>100</option>
+                                    <option value={200}>200</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <button
+                                onClick={() => setCurrentPage(1)}
+                                disabled={currentPage === 1 || loading}
+                                className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                ראשון
+                            </button>
+                            <button
+                                onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
+                                disabled={currentPage === 1 || loading}
+                                className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                קודם
+                            </button>
+                            <span className="px-3 py-1 text-sm text-slate-600">
+                                עמוד {currentPage} מתוך {Math.ceil(totalCount / pageSize)}
+                            </span>
+                            <button
+                                onClick={() => setCurrentPage(prev => Math.min(Math.ceil(totalCount / pageSize), prev + 1))}
+                                disabled={currentPage >= Math.ceil(totalCount / pageSize) || loading}
+                                className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                הבא
+                            </button>
+                            <button
+                                onClick={() => setCurrentPage(Math.ceil(totalCount / pageSize))}
+                                disabled={currentPage >= Math.ceil(totalCount / pageSize) || loading}
+                                className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                אחרון
+                            </button>
+                        </div>
+                    </div>
+                )}
+                
+                {loading && (
+                    <div className="mt-4 text-center text-slate-500 text-sm">טוען...</div>
+                )}
             </div>
             {isModalOpen && (
                 <Modal 
@@ -3304,10 +3371,13 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
                         onDraftCreate={handleDraftCreate}
                         onCancel={() => setIsModalOpen(false)} 
                         addActivity={addActivity}
-                        allOrders={orders}
-                        onSwitchOrder={(id) => {
-                            const target = orders.find(o => o.id === id);
+                        onSwitchOrder={async (id) => {
+                            try {
+                                const target = await mongoService.getOrderById(id);
                             if (target) handleEditOrder(target);
+                            } catch (error) {
+                                console.error('Error fetching order for switch:', error);
+                            }
                         }}
                         statusConfigs={statusConfigs}
                         getNextOrderNumber={getNextOrderNumber}

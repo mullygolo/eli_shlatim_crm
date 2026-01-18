@@ -719,7 +719,7 @@ const ProductSelectorModal: React.FC<ProductSelectorModalProps> = ({
             const hasCostRange = sp.costRange && sp.costRange.min !== undefined && sp.costRange.max !== undefined;
             return hasBaseCost || hasTiers || hasVariantCosts || hasCostRange;
         });
-        
+
         const optionalSuppliers = product.supplierPricings.filter(sp => {
             const hasBaseCost = sp.baseCost !== undefined;
             const hasTiers = (sp.priceTiers?.length || 0) > 0;
@@ -1080,7 +1080,7 @@ const ProductSelectorModal: React.FC<ProductSelectorModalProps> = ({
                             selected.unitType,
                             selected.notes
                         );
-                    }
+        }
                 });
             }
         });
@@ -1135,19 +1135,19 @@ const ProductSelectorModal: React.FC<ProductSelectorModalProps> = ({
                                 </tr>
                             </thead>
                             <tbody className="bg-white divide-y divide-slate-200">
-                                {loading ? (
+                        {loading ? (
                                     <tr>
                                         <td colSpan={7} className="px-4 py-8 text-center text-slate-500">
                                             טוען...
                                         </td>
                                     </tr>
-                                ) : filteredProducts.length === 0 ? (
+                        ) : filteredProducts.length === 0 ? (
                                     <tr>
                                         <td colSpan={7} className="px-4 py-8 text-center text-slate-500">
                                             לא נמצאו מוצרים
                                         </td>
                                     </tr>
-                                ) : (
+                        ) : (
                                     filteredProducts.map(product => {
                                         const instances = selectedProducts.get(product.id);
                                         const isSelected = instances !== undefined && instances.length > 0;
@@ -1211,22 +1211,22 @@ const ProductSelectorModal: React.FC<ProductSelectorModalProps> = ({
                                                 </td>
                                                 <td className="px-4 py-3 whitespace-nowrap">
                                                     {product.images && product.images.length > 0 ? (
-                                                        <img
+                                        <img
                                                             src={product.images.find(img => img.isPrimary)?.dataUrl || product.images[0].dataUrl}
-                                                            alt={product.name}
+                                            alt={product.name}
                                                             className="w-12 h-12 object-cover rounded"
-                                    />
+                                        />
                                                     ) : (
                                                         <div className="w-12 h-12 bg-slate-100 rounded flex items-center justify-center">
                                                             <span className="text-slate-400 text-xs">אין</span>
                             </div>
-                        )}
+                                    )}
                                                 </td>
                                                 <td className="px-4 py-3">
                                                     <div className="font-medium text-slate-900">{product.name}</div>
-                                                    {product.category && (
+                                    {product.category && (
                                                         <div className="text-sm text-slate-500">{product.category}</div>
-                        )}
+                                    )}
                                                 </td>
                                                 <td className="px-4 py-3">
                                                     <div 
@@ -1290,14 +1290,14 @@ const ProductSelectorModal: React.FC<ProductSelectorModalProps> = ({
                                                         <div className="flex flex-col">
                                                             <div className="text-sm font-medium text-slate-900">
                                                                 ₪{calculatedPrice.unitPrice.toLocaleString()}
-                                                            </div>
+                                </div>
                                                             {calculatedPrice.unitCost > 0 && (
                                                                 <div className="text-xs text-slate-500">
                                                                     עלות: ₪{calculatedPrice.unitCost.toLocaleString()}
                                     </div>
-                                )}
-                                        </div>
-                                                    ) : (
+                        )}
+                    </div>
+                ) : (
                                                         <span className="text-sm text-slate-400">-</span>
                                                     )}
                                                 </td>
@@ -1336,7 +1336,7 @@ const ProductSelectorModal: React.FC<ProductSelectorModalProps> = ({
                                                                             </div>
                                                                         )}
                                                                         {tiers.length > 0 && (
-                                                                            <div>
+                            <div>
                                                                                 <div className="text-xs font-medium text-slate-600 mb-2">טווחי מחירים לפי כמות:</div>
                                                                                 <div className="space-y-2">
                                                                                     {tiers
@@ -1375,7 +1375,7 @@ const ProductSelectorModal: React.FC<ProductSelectorModalProps> = ({
                                                                                                 )}
                                                                                                 <div className="font-semibold text-primary">
                                                                                                     ₪{variant.customerPrice.toLocaleString()}
-                                                                                                </div>
+                            </div>
                                                                                             </div>
                                                                                         );
                                                                                     })}
@@ -1401,14 +1401,14 @@ const ProductSelectorModal: React.FC<ProductSelectorModalProps> = ({
                                                         <div className="bg-white border border-slate-200 rounded-lg p-4">
                                                             <div className="flex justify-between items-center mb-3">
                                                                 <h4 className="text-sm font-semibold text-slate-700">פרטי ספקים ועלויות</h4>
-                                                                <button
+                            <button
                                                                     type="button"
                                                                     onClick={() => toggleDetailsExpanded(product.id, 'supplier')}
                                                                     className="text-slate-600 hover:text-slate-800 text-sm"
-                                                                >
+                            >
                                                                     ✕ סגור
-                                                                </button>
-                                                            </div>
+                            </button>
+                        </div>
                                                             {(() => {
                                                                 if (!product.supplierPricings || product.supplierPricings.length === 0) {
                                                                     return <span className="text-slate-400">אין מחיר</span>;
@@ -1477,8 +1477,8 @@ const ProductSelectorModal: React.FC<ProductSelectorModalProps> = ({
                                                                                                         </div>
                                                                                                     ))}
                                                                                                 </div>
-                                                                                            </div>
-                                                                                        )}
+                            </div>
+                        )}
                                                                                         {variantCosts.length > 0 && (
                                                                                             <div>
                                                                                                 <div className="text-xs font-medium text-slate-600 mb-2">עלויות לפי תת-מוצר:</div>
@@ -1549,35 +1549,35 @@ const ProductSelectorModal: React.FC<ProductSelectorModalProps> = ({
                                                                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                                                                         {/* Variant Selection */}
                                                                         {product.variants && product.variants.length > 0 && (
-                                                                            <div>
+                        <div>
                                                                                 <label className="block text-sm font-medium text-slate-700 mb-1">תת-מוצר</label>
-                                                                                <select
+                            <select
                                                                                     value={instance.variantId || ''}
                                                                                     onChange={(e) => handleVariantChange(product.id, instance.selectedItemId, e.target.value)}
                                                                                     className="w-full px-3 py-2 text-sm border border-slate-300 rounded-md focus:ring-2 focus:ring-primary focus:border-transparent"
-                                                                                >
+                            >
                                                                                     <option value="">בחר תת-מוצר</option>
                                                                                     {product.variants.filter(v => v.isActive).map(variant => (
                                                                                         <option key={variant.id} value={variant.id}>
                                                                                             {variant.name || (variant.width && variant.height ? `${variant.width}x${variant.height}` : variant.notes || 'תת-מוצר')}
                                                                                             {variant.customerPrice > 0 && ` (₪${variant.customerPrice.toLocaleString()})`}
-                                                                                        </option>
+                                            </option>
                                                                                     ))}
-                                                                                </select>
-                                                                            </div>
+                            </select>
+                        </div>
                                                                         )}
 
                                                                         {/* Description */}
-                                                                        <div>
+                                        <div>
                                                                             <label className="block text-sm font-medium text-slate-700 mb-1">תיאור</label>
-                                                                            <input
+                                            <input
                                                                                 type="text"
                                                                                 value={instance.description || ''}
                                                                                 onChange={(e) => handleDescriptionChange(product.id, instance.selectedItemId, e.target.value)}
                                                                                 className="w-full px-3 py-2 text-sm border border-slate-300 rounded-md focus:ring-2 focus:ring-primary focus:border-transparent"
                                                                                 placeholder="תיאור הפריט"
-                                                                            />
-                                                                        </div>
+                                            />
+                                        </div>
                                                                         
                                                                         {/* Notes */}
                                                                         <div className="md:col-span-2 lg:col-span-3">
@@ -1592,7 +1592,7 @@ const ProductSelectorModal: React.FC<ProductSelectorModalProps> = ({
                                                                         </div>
                                                                         
                                                                         {/* Unit Type */}
-                                                                        <div>
+                                        <div>
                                                                             <label className="block text-sm font-medium text-slate-700 mb-1">יחידת מידה</label>
                                                                             <select
                                                                                 value={instance.unitType || LineItemUnit.UNIT}
@@ -1648,10 +1648,10 @@ const ProductSelectorModal: React.FC<ProductSelectorModalProps> = ({
                                                                                     onChange={(e) => handleQuantityChange(product.id, instance.selectedItemId, parseFloat(e.target.value) || 0)}
                                                                                     className="w-full px-3 py-2 text-sm border border-slate-300 rounded-md focus:ring-2 focus:ring-primary focus:border-transparent"
                                                                                 />
-                                                                            </div>
-                                                                        )}
-                                                                    </div>
-                                                                </div>
+                                    </div>
+                                )}
+                                        </div>
+                                        </div>
                                                             ))}
                                                             <div className="flex justify-center pt-2">
                                                                 <button
@@ -1695,9 +1695,9 @@ const ProductSelectorModal: React.FC<ProductSelectorModalProps> = ({
                             className="px-4 py-2 bg-primary text-white rounded-lg hover:bg-primary-dark disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                             הוסף להזמנה ({totalInstances})
-                        </button>
+                                    </button>
+                                </div>
                     </div>
-                </div>
             </div>
         </Modal>
     );

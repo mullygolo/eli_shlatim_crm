@@ -1,10 +1,11 @@
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { Supplier, Order, Contact, Transaction } from '../types';
 import { PlusIcon, DeleteIcon } from './icons';
 import Modal from './Modal';
 import { calculateOrderTotals } from '../utils/calculations';
 import { PAYMENT_TERMS_OPTIONS } from '../constants';
+import * as mongoService from '../services/mongoService';
 
 interface SuppliersPageProps {
     suppliers: Supplier[];
@@ -278,6 +279,35 @@ const SuppliersPage: React.FC<SuppliersPageProps> = ({ suppliers, setSuppliers, 
     const [duplicateFound, setDuplicateFound] = useState<Supplier | null>(null);
     const [pendingNewSupplier, setPendingNewSupplier] = useState<Supplier | null>(null);
     const [isMergeModalOpen, setIsMergeModalOpen] = useState(false);
+    
+    // Pagination state
+    const [paginatedSuppliers, setPaginatedSuppliers] = useState<Supplier[]>([]);
+    const [currentPage, setCurrentPage] = useState(1);
+    const [pageSize, setPageSize] = useState(50);
+    const [totalCount, setTotalCount] = useState(0);
+    const [loadingSuppliers, setLoadingSuppliers] = useState(false);
+    
+    // Refetch function for paginated suppliers
+    const refetchSuppliers = async () => {
+        try {
+            setLoadingSuppliers(true);
+            const filters: any = {};
+            if (searchTerm) filters.searchTerm = searchTerm;
+            
+            const result = await mongoService.getSuppliersPaginated(filters, currentPage, pageSize);
+            setPaginatedSuppliers(result.suppliers);
+            setTotalCount(result.totalCount);
+        } catch (error) {
+            console.error('Error loading paginated suppliers:', error);
+        } finally {
+            setLoadingSuppliers(false);
+        }
+    };
+    
+    // Load paginated suppliers when filters or pagination change
+    useEffect(() => {
+        refetchSuppliers();
+    }, [searchTerm, currentPage, pageSize]);
 
     const calculateOwedForMonth = (supplierId: string) => {
         const now = new Date();
@@ -310,20 +340,8 @@ const SuppliersPage: React.FC<SuppliersPageProps> = ({ suppliers, setSuppliers, 
         return totalOwed;
     };
 
-    const filteredSuppliers = useMemo(() => {
-        if (!searchTerm) {
-            return suppliers;
-        }
-        const lowercasedTerm = searchTerm.toLowerCase();
-        return suppliers.filter(supplier =>
-            supplier.name.toLowerCase().includes(lowercasedTerm) ||
-            supplier.contacts.some(c => 
-                c.name.toLowerCase().includes(lowercasedTerm) ||
-                c.email.toLowerCase().includes(lowercasedTerm) ||
-                c.phone.includes(lowercasedTerm)
-            )
-        );
-    }, [suppliers, searchTerm]);
+    // Use paginated suppliers instead of client-side filtering
+    const filteredSuppliers = paginatedSuppliers;
 
     const handleAddSupplier = () => {
         setEditingSupplier(null);
@@ -344,7 +362,7 @@ const SuppliersPage: React.FC<SuppliersPageProps> = ({ suppliers, setSuppliers, 
     //     }
     // };
 
-    const performMerge = (veteranId: string, victimId: string) => {
+    const performMerge = async (veteranId: string, victimId: string) => {
         const victim = suppliers.find(s => s.id === victimId);
         const veteran = suppliers.find(s => s.id === veteranId);
         if (!victim || !veteran) return;
@@ -399,17 +417,23 @@ const SuppliersPage: React.FC<SuppliersPageProps> = ({ suppliers, setSuppliers, 
         setPendingNewSupplier(null);
         setIsMergeModalOpen(false);
         setIsModalOpen(false);
+        // Refresh paginated suppliers after merge
+        await refetchSuppliers();
     };
 
-    const handleSaveSupplier = (supplier: Supplier) => {
+    const handleSaveSupplier = async (supplier: Supplier) => {
         if (editingSupplier) {
             setSuppliers(prev => prev.map(s => s.id === supplier.id ? supplier : s));
             addActivity(`ספק עודכן: ${supplier.name}`);
             setIsModalOpen(false);
             setEditingSupplier(null);
+            // Refresh paginated suppliers after update
+            await refetchSuppliers();
         } else {
-            // Duplicate Check on Create
-            const duplicate = findDuplicateSupplier(suppliers, supplier.name, supplier.contacts);
+            // Duplicate Check on Create - need to check all suppliers (not just paginated)
+            // So we'll fetch all suppliers for duplicate check
+            const allSuppliers = await mongoService.getSuppliers();
+            const duplicate = findDuplicateSupplier(allSuppliers, supplier.name, supplier.contacts);
             if (duplicate) {
                 setDuplicateFound(duplicate);
                 setPendingNewSupplier(supplier);
@@ -418,6 +442,9 @@ const SuppliersPage: React.FC<SuppliersPageProps> = ({ suppliers, setSuppliers, 
                 setSuppliers(prev => [...prev, supplier]);
                 addActivity(`ספק חדש נוסף: ${supplier.name}`);
                 setIsModalOpen(false);
+                setEditingSupplier(null);
+                // Refresh paginated suppliers after create
+                await refetchSuppliers();
             }
         }
     };
@@ -430,7 +457,10 @@ const SuppliersPage: React.FC<SuppliersPageProps> = ({ suppliers, setSuppliers, 
                         type="text"
                         placeholder="חיפוש לפי שם ספק, איש קשר, טלפון או אימייל..."
                         value={searchTerm}
-                        onChange={(e) => setSearchTerm(e.target.value)}
+                        onChange={(e) => {
+                            setSearchTerm(e.target.value);
+                            setCurrentPage(1); // Reset to first page on search
+                        }}
                         className="w-full px-4 py-2 border border-slate-300 rounded-lg shadow-sm focus:ring-primary focus:border-primary transition"
                         aria-label="חיפוש ספקים"
                     />
@@ -487,11 +517,75 @@ const SuppliersPage: React.FC<SuppliersPageProps> = ({ suppliers, setSuppliers, 
                         ))}
                     </tbody>
                 </table>
-                {filteredSuppliers.length === 0 && (
+                {filteredSuppliers.length === 0 && !loadingSuppliers && (
                     <div className="text-center py-12 text-slate-500">
                         <p className="font-semibold text-lg">לא נמצאו ספקים</p>
                         <p>נסה מונח חיפוש אחר או הוסף ספק חדש.</p>
                     </div>
+                )}
+                
+                {/* Pagination Controls */}
+                {totalCount > 0 && (
+                    <div className="mt-4 flex items-center justify-between bg-white px-4 py-3 border-t border-slate-200">
+                        <div className="flex items-center gap-4">
+                            <div className="text-sm text-slate-600">
+                                מציג {((currentPage - 1) * pageSize) + 1} - {Math.min(currentPage * pageSize, totalCount)} מתוך {totalCount} ספקים
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <label className="text-sm text-slate-600">שורות לעמוד:</label>
+                                <select 
+                                    value={pageSize} 
+                                    onChange={(e) => {
+                                        setPageSize(parseInt(e.target.value));
+                                        setCurrentPage(1);
+                                    }}
+                                    className="text-sm border border-slate-300 rounded px-2 py-1 focus:ring-primary focus:border-primary"
+                                >
+                                    <option value={25}>25</option>
+                                    <option value={50}>50</option>
+                                    <option value={100}>100</option>
+                                    <option value={200}>200</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <button
+                                onClick={() => setCurrentPage(1)}
+                                disabled={currentPage === 1 || loadingSuppliers}
+                                className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                ראשון
+                            </button>
+                            <button
+                                onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
+                                disabled={currentPage === 1 || loadingSuppliers}
+                                className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                קודם
+                            </button>
+                            <span className="px-3 py-1 text-sm text-slate-600">
+                                עמוד {currentPage} מתוך {Math.ceil(totalCount / pageSize) || 1}
+                            </span>
+                            <button
+                                onClick={() => setCurrentPage(prev => Math.min(Math.ceil(totalCount / pageSize) || 1, prev + 1))}
+                                disabled={currentPage >= Math.ceil(totalCount / pageSize) || loadingSuppliers}
+                                className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                הבא
+                            </button>
+                            <button
+                                onClick={() => setCurrentPage(Math.ceil(totalCount / pageSize) || 1)}
+                                disabled={currentPage >= Math.ceil(totalCount / pageSize) || loadingSuppliers}
+                                className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                אחרון
+                            </button>
+                        </div>
+                    </div>
+                )}
+                
+                {loadingSuppliers && (
+                    <div className="mt-4 text-center text-slate-500 text-sm">טוען...</div>
                 )}
             </div>
             
@@ -511,7 +605,9 @@ const SuppliersPage: React.FC<SuppliersPageProps> = ({ suppliers, setSuppliers, 
                     targetSupplier={editingSupplier}
                     allSuppliers={suppliers}
                     onClose={() => setIsMergeModalOpen(false)}
-                    onConfirm={(victimId) => performMerge(editingSupplier.id, victimId)}
+                    onConfirm={async (victimId) => {
+                        await performMerge(editingSupplier.id, victimId);
+                    }}
                 />
             )}
 

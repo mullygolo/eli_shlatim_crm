@@ -368,6 +368,56 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
         return () => clearInterval(timer);
     }, []);
     
+    // Pagination state for monthly records
+    const [paginatedRecords, setPaginatedRecords] = useState<AttendanceRecord[]>([]);
+    const [currentPage, setCurrentPage] = useState(1);
+    const [pageSize, setPageSize] = useState(50);
+    const [totalCount, setTotalCount] = useState(0);
+    const [loadingRecords, setLoadingRecords] = useState(false);
+    
+    // Refetch function for paginated records
+    const refetchRecords = async () => {
+        try {
+            setLoadingRecords(true);
+            const filters: any = {
+                employeeId: currentEmployeeId,
+                month: selectedMonth,
+                year: selectedYear
+            };
+            
+            const result = await mongoService.getAttendanceRecordsPaginated(filters, currentPage, pageSize);
+            setPaginatedRecords(result.records);
+            setTotalCount(result.totalCount);
+        } catch (error) {
+            console.error('Error loading paginated records:', error);
+        } finally {
+            setLoadingRecords(false);
+        }
+    };
+    
+    // Load paginated records when filters or pagination change
+    useEffect(() => {
+        const loadRecords = async () => {
+            try {
+                setLoadingRecords(true);
+                const filters: any = {
+                    employeeId: currentEmployeeId,
+                    month: selectedMonth,
+                    year: selectedYear
+                };
+                
+                const result = await mongoService.getAttendanceRecordsPaginated(filters, currentPage, pageSize);
+                setPaginatedRecords(result.records);
+                setTotalCount(result.totalCount);
+            } catch (error) {
+                console.error('Error loading paginated records:', error);
+            } finally {
+                setLoadingRecords(false);
+            }
+        };
+        loadRecords();
+    }, [currentEmployeeId, selectedMonth, selectedYear, currentPage, pageSize]);
+    
     // Auto-close old records on component mount and periodically
     useEffect(() => {
         const checkAndCloseOldRecords = async () => {
@@ -375,6 +425,8 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
                 // Refresh records from server (this will trigger auto-close on server side)
                 const updatedRecords = await mongoService.getAttendanceRecords();
                 setRecords(updatedRecords);
+                // Also refresh paginated records
+                refetchRecords();
             } catch (error) {
                 console.error('Error refreshing records to close old ones:', error);
             }
@@ -801,6 +853,8 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
             };
             setRecords(prev => [...prev, newRecord]);
         }
+        // Refresh paginated records after correction
+        refetchRecords();
         setCorrectionModalOpen(false);
     };
 
@@ -808,7 +862,12 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
         const emp = employees.find(e => e.id === empId);
         if (!emp) return { totalHours: 0, baseSalary: 0, bonus: 0, totalGross: 0, workDays: 0, isGlobal: false, vacationDays: 0, sickDays: 0, sickCertificates: [], employerCost: 0 };
 
-        const empRecords = records.filter(r => {
+        // Use paginatedRecords if viewing current employee and month/year match, otherwise use all records
+        const recordsToUse = (empId === currentEmployeeId && month === selectedMonth && year === selectedYear) 
+            ? paginatedRecords 
+            : records;
+        
+        const empRecords = recordsToUse.filter(r => {
             const d = new Date(r.date);
             return r.employeeId === empId && d.getMonth() + 1 === month && d.getFullYear() === year;
         });
@@ -921,12 +980,20 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
         });
     };
 
-    const handleExportExcel = () => {
+    const handleExportExcel = async () => {
         const emp = currentEmployee;
         if (!emp) return;
         
         const stats = getMonthlyStats(currentEmployeeId, selectedMonth, selectedYear);
         const daysInMonth = getDaysInMonth(selectedMonth, selectedYear);
+        
+        // For export, we need all records of the month, not just paginated
+        // So we'll fetch all records for the month
+        const allMonthRecords = await mongoService.getAttendanceRecordsPaginated(
+            { employeeId: currentEmployeeId, month: selectedMonth, year: selectedYear },
+            1,
+            10000 // Large limit to get all records
+        );
         
         const summaryRows = [
             ["סיכום דוח נוכחות ושכר"],
@@ -955,7 +1022,7 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
         
         const dataRows = daysInMonth.map(date => {
             const dateKey = getDateStringForComparison(date);
-            const dayRecords = records.filter(r => 
+            const dayRecords = allMonthRecords.records.filter(r => 
                 r.employeeId === currentEmployeeId && 
                 getDateStringForComparison(r.date) === dateKey
             );
@@ -1288,7 +1355,7 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
                                 {daysInMonth.map((date) => {
                                     const dateKey = getDateStringForComparison(date);
                                     const holiday = getJewishHoliday(date);
-                                    const dayRecords = records
+                                    const dayRecords = paginatedRecords
                                         .filter(r => r.employeeId === currentEmployeeId && getDateStringForComparison(r.date) === dateKey)
                                         .sort((a, b) => new Date(a.clockIn || 0).getTime() - new Date(b.clockIn || 0).getTime());
                                     const isWeekend = date.getDay() === 5 || date.getDay() === 6;

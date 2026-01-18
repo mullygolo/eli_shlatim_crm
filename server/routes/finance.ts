@@ -3,8 +3,8 @@ import {
     getFixedExpenses, createFixedExpense, updateFixedExpense, deleteFixedExpense,
     getVariableExpenses, createVariableExpense, updateVariableExpense, deleteVariableExpense,
     getLoans, createLoan, updateLoan, deleteLoan,
-    getDebts, createDebt, updateDebt, deleteDebt,
-    getReceivables, createReceivable, updateReceivable, deleteReceivable,
+    getDebts, getDebtsPaginated, createDebt, updateDebt, deleteDebt,
+    getReceivables, getReceivablesPaginated, createReceivable, updateReceivable, deleteReceivable,
     getEquity, createEquity, updateEquity, deleteEquity
 } from '../services/mongoService.js';
 
@@ -131,6 +131,23 @@ router.get('/debts', async (req, res) => {
     }
 });
 
+router.get('/debts/paginated', async (req, res) => {
+    try {
+        const page = parseInt(req.query.page as string) || 1;
+        const limit = parseInt(req.query.limit as string) || 50;
+        const vatRate = parseFloat(req.query.vatRate as string) || 0;
+        const filters: any = {};
+        
+        if (req.query.searchTerm) filters.searchTerm = req.query.searchTerm as string;
+        if (req.query.statusFilter) filters.statusFilter = req.query.statusFilter as 'ALL' | 'OPEN' | 'OVERDUE' | 'PAID';
+        
+        const result = await getDebtsPaginated(filters, page, limit, vatRate);
+        res.json(result);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch paginated debts' });
+    }
+});
+
 router.post('/debts', async (req, res) => {
     try {
         const debt = await createDebt(req.body);
@@ -165,6 +182,23 @@ router.get('/receivables', async (req, res) => {
         res.json(receivables);
     } catch (error) {
         res.status(500).json({ error: 'Failed to fetch receivables' });
+    }
+});
+
+router.get('/receivables/paginated', async (req, res) => {
+    try {
+        const page = parseInt(req.query.page as string) || 1;
+        const limit = parseInt(req.query.limit as string) || 50;
+        const vatRate = parseFloat(req.query.vatRate as string) || 0;
+        const filters: any = {};
+        
+        if (req.query.searchTerm) filters.searchTerm = req.query.searchTerm as string;
+        if (req.query.statusFilter) filters.statusFilter = req.query.statusFilter as 'ALL' | 'OPEN' | 'OVERDUE' | 'PAID';
+        
+        const result = await getReceivablesPaginated(filters, page, limit, vatRate);
+        res.json(result);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch paginated receivables' });
     }
 });
 

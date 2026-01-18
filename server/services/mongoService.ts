@@ -4,10 +4,12 @@ import {
     Customer, Order, Supplier, Employee, Activity, OrderStatusConfiguration,
     FixedExpense, VariableExpense, Loan, Debt, Receivable, EquityInvestment,
     AttendanceRecord, ManualEvent, EmployeeStatus, EmployeeRole,
-    PriceListProduct, SalesHistoryEntry, AdHocProduct
+    PriceListProduct, SalesHistoryEntry, AdHocProduct,
+    LineItem, AdditionalService, SupplierPayment, TransactionStatus
 } from '../types';
 import { hashPassword } from '../utils/password.js';
 import { getTodayRangeIsrael, getDateStringIsrael } from '../utils/timezone.js';
+import { calculateOrderTotals, calculateDueDate } from '../utils/calculations.js';
 
 // MongoDB Connection Configuration
 const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://daniel_db_user:danny123@elishlatim.geyfv2c.mongodb.net/elishlatim?retryWrites=true&w=majority&appName=Compass';
@@ -119,6 +121,90 @@ export async function deleteCustomer(customerId: string): Promise<void> {
     }
 }
 
+// Get customers with server-side filtering, pagination, and debt calculation
+export async function getCustomersPaginated(
+    filters: { searchTerm?: string },
+    page: number = 1,
+    limit: number = 50,
+    vatRate: number = 0
+): Promise<{ customers: (Customer & { debt: number })[], totalCount: number, page: number, limit: number, totalPages: number }> {
+    try {
+        const database = await getDb();
+        const customersCollection = database.collection<Customer>('customers');
+        const ordersCollection = database.collection<Order>('orders');
+        
+        // Load statusConfigs for active deal filtering
+        const statusConfigs = await getStatusConfigs();
+        
+        // Load all customers (we'll filter after to match searchTerm logic)
+        let allCustomers = await customersCollection.find({}).toArray();
+        allCustomers = allCustomers.map(deserializeDates) as Customer[];
+        
+        // Apply search filter (matching client-side logic)
+        if (filters.searchTerm) {
+            const lowercasedTerm = filters.searchTerm.toLowerCase();
+            allCustomers = allCustomers.filter(customer => {
+                const nameMatch = customer.name.toLowerCase().includes(lowercasedTerm);
+                const hpMatch = customer.businessId?.toLowerCase().includes(lowercasedTerm);
+                if (nameMatch || hpMatch) return true;
+                
+                return customer.contacts.some(contact => 
+                    contact.name.toLowerCase().includes(lowercasedTerm) ||
+                    contact.email.toLowerCase().includes(lowercasedTerm) ||
+                    contact.phone.toLowerCase().includes(lowercasedTerm)
+                );
+            });
+        }
+        
+        // Load all orders once for debt calculation
+        const allOrdersDocs = await ordersCollection.find({}).toArray();
+        const allOrders = allOrdersDocs.map(deserializeDates) as Order[];
+        
+        // Calculate debt for each customer
+        const customersWithDebt = allCustomers.map(customer => {
+            // Filter orders for this customer (active deals only)
+            const customerOrders = allOrders.filter(o => {
+                if (o.customerId !== customer.id) return false;
+                const config = statusConfigs.find(c => c.label === o.orderStatus);
+                return config?.isActiveDeal === true;
+            });
+            
+            // Calculate total debt
+            const debt = customerOrders.reduce((sum, order) => {
+                const { totalAmount, totalPaid } = calculateOrderTotals(order);
+                const currentOrderVat = order.vatRate ?? vatRate;
+                const gross = totalAmount * (1 + currentOrderVat / 100);
+                const remaining = Math.max(0, gross - totalPaid);
+                return sum + remaining;
+            }, 0);
+            
+            return {
+                ...customer,
+                debt: Number(debt.toFixed(2))
+            };
+        });
+        
+        // Sort customers (by name by default)
+        customersWithDebt.sort((a, b) => a.name.localeCompare(b.name, 'he'));
+        
+        // Paginate
+        const totalCount = customersWithDebt.length;
+        const skip = (page - 1) * limit;
+        const paginatedCustomers = customersWithDebt.slice(skip, skip + limit);
+        
+        return {
+            customers: paginatedCustomers,
+            totalCount,
+            page,
+            limit,
+            totalPages: Math.ceil(totalCount / limit)
+        };
+    } catch (error) {
+        console.error('Error fetching paginated customers:', error);
+        throw error;
+    }
+}
+
 // ==================== ORDERS ====================
 export async function getOrders(): Promise<Order[]> {
     try {
@@ -159,6 +245,31 @@ export async function getOrders(): Promise<Order[]> {
         return orders;
     } catch (error) {
         console.error('Error fetching orders:', error);
+        throw error;
+    }
+}
+
+export async function getOrderById(orderId: string): Promise<Order | null> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<Order>('orders');
+        const doc = await collection.findOne({ id: orderId });
+        if (!doc) return null;
+        return deserializeDates(doc) as Order;
+    } catch (error) {
+        console.error('Error fetching order by ID:', error);
+        throw error;
+    }
+}
+
+export async function getOrdersByParentId(parentOrderId: string): Promise<Order[]> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<Order>('orders');
+        const docs = await collection.find({ parentOrderId }).toArray();
+        return docs.map(deserializeDates) as Order[];
+    } catch (error) {
+        console.error('Error fetching orders by parent ID:', error);
         throw error;
     }
 }
@@ -204,6 +315,473 @@ export async function deleteOrder(orderId: string): Promise<void> {
     }
 }
 
+// Get orders with server-side filtering and pagination (IMPROVED VERSION)
+export async function getOrdersPaginated(filters: any, page: number = 1, limit: number = 50, vatRate: number = 0): Promise<any> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<Order>('orders');
+        
+        // Load statusConfigs and customers for filtering
+        const [statusConfigs, customers] = await Promise.all([
+            getStatusConfigs(),
+            getCustomers()
+        ]);
+        
+        // Build MongoDB query from filters
+        const query: any = {};
+        
+        // Collection mode filter (must be applied first)
+        const isCollectionMode = filters.isCollectionMode === true;
+        if (isCollectionMode) {
+            // Only active deals that are not paid
+            query.paymentStatus = { $ne: 'שולם' };
+            // We'll filter by isActiveDeal after fetching (requires statusConfigs)
+        }
+        
+        // Payment status filter (only if not in collection mode)
+        if (!isCollectionMode && filters.paymentStatusFilter && filters.paymentStatusFilter.length > 0) {
+            query.paymentStatus = { $in: filters.paymentStatusFilter };
+        }
+        
+        // Order status filter
+        if (filters.orderStatusFilter && filters.orderStatusFilter.length > 0) {
+            query.orderStatus = { $in: filters.orderStatusFilter };
+        }
+        
+        // Customer filter
+        if (filters.customerFilter && filters.customerFilter.length > 0) {
+            query.customerId = { $in: filters.customerFilter };
+        }
+        
+        // Employee filter
+        if (filters.employeeFilter && filters.employeeFilter.length > 0) {
+            query.employeeId = { $in: filters.employeeFilter };
+        }
+        
+        // Supplier filter (check in lineItems and additionalServices)
+        if (filters.supplierFilter && filters.supplierFilter.length > 0) {
+            query.$or = [
+                { supplierId: { $in: filters.supplierFilter } },
+                { 'lineItems.supplierId': { $in: filters.supplierFilter } },
+                { 'additionalServices.supplierId': { $in: filters.supplierFilter } }
+            ];
+        }
+        
+        // Date filters
+        const dateFilterType = filters.dateFilterType || 'ORDER_DATE';
+        const dateField = dateFilterType === 'DEAL_DATE' ? 'dealStartDate' : 'date';
+        
+        if (filters.startDateFilter || filters.endDateFilter) {
+            query[dateField] = {};
+            if (filters.startDateFilter) {
+                query[dateField].$gte = new Date(filters.startDateFilter);
+            }
+            if (filters.endDateFilter) {
+                query[dateField].$lte = new Date(filters.endDateFilter);
+            }
+        } else if (filters.monthFilter && filters.monthFilter !== 'all') {
+            // Month/Year filter
+            const month = parseInt(filters.monthFilter);
+            const year = filters.yearFilter && filters.yearFilter !== 'all' ? parseInt(filters.yearFilter) : new Date().getFullYear();
+            const startDate = new Date(year, month - 1, 1);
+            const endDate = new Date(year, month, 0, 23, 59, 59, 999);
+            query[dateField] = { $gte: startDate, $lte: endDate };
+        } else if (filters.yearFilter && filters.yearFilter !== 'all') {
+            // Year filter only
+            const year = parseInt(filters.yearFilter);
+            const startDate = new Date(year, 0, 1);
+            const endDate = new Date(year, 11, 31, 23, 59, 59, 999);
+            query[dateField] = { $gte: startDate, $lte: endDate };
+        }
+        
+        // Search term (orderNumber, description, customer name, parent order)
+        if (filters.searchTerm) {
+            const lowercasedTerm = filters.searchTerm.toLowerCase();
+            const searchConditions: any[] = [
+                { orderNumber: { $regex: lowercasedTerm, $options: 'i' } },
+                { description: { $regex: lowercasedTerm, $options: 'i' } }
+            ];
+            
+            // Search by customer name
+            const matchingCustomerIds = customers
+                .filter(c => c.name.toLowerCase().includes(lowercasedTerm))
+                .map(c => c.id);
+            if (matchingCustomerIds.length > 0) {
+                searchConditions.push({ customerId: { $in: matchingCustomerIds } });
+            }
+            
+            // Search by parent order (service calls)
+            if (lowercasedTerm.includes('שירות') || lowercasedTerm.includes('תיקון') || lowercasedTerm.includes('service')) {
+                searchConditions.push({ type: 'קריאת שירות' });
+            }
+            
+            query.$and = query.$and || [];
+            query.$and.push({ $or: searchConditions });
+            
+            // Parent order search (requires loading parent orders - simplified for now)
+            // This is a bit complex, so we'll do it post-query for now
+        }
+        
+        // Fetch all orders matching the query (for filtering and summary calculation)
+        let allMatchingDocs = await collection.find(query).toArray();
+        let allMatchingOrders = allMatchingDocs.map(deserializeDates) as Order[];
+        
+        // Apply post-query filters that require statusConfigs or other complex logic
+        if (isCollectionMode) {
+            allMatchingOrders = allMatchingOrders.filter(order => {
+                const config = statusConfigs.find(c => c.label === order.orderStatus);
+                const isActive = config ? config.isActiveDeal : false;
+                return isActive;
+            });
+        }
+        
+        if (!filters.showCompletedOrders && !isCollectionMode) {
+            allMatchingOrders = allMatchingOrders.filter(order => {
+                const config = statusConfigs.find(c => c.label === order.orderStatus);
+                return !config?.isCompleted;
+            });
+        }
+        
+        // Filter by parent order search term (if applicable)
+        if (filters.searchTerm && filters.searchTerm.trim()) {
+            const lowercasedTerm = filters.searchTerm.toLowerCase();
+            // We need to check parent orders - for simplicity, we'll load parent orders here
+            const parentOrderNumbers = new Set<string>();
+            allMatchingOrders.forEach(order => {
+                if (order.parentOrderId) {
+                    // Find parent order
+                    const parentDoc = allMatchingDocs.find((d: any) => d.id === order.parentOrderId);
+                    if (parentDoc && parentDoc.orderNumber?.toLowerCase().includes(lowercasedTerm)) {
+                        parentOrderNumbers.add(order.id);
+                    }
+                }
+            });
+            
+            allMatchingOrders = allMatchingOrders.filter(order => {
+                if (parentOrderNumbers.has(order.id)) return true;
+                // Other search conditions already handled in MongoDB query
+                return true;
+            });
+        }
+        
+        // Calculate summary totals on ALL filtered orders (not just current page)
+        const summaryTotals = allMatchingOrders.reduce((acc, order) => {
+            const { totalAmount, profit, totalCost } = calculateOrderTotals(order);
+            const currentOrderVat = order.vatRate ?? vatRate;
+            acc.totalAmount += totalAmount;
+            acc.totalProfit += profit;
+            acc.totalCost += totalCost;
+            acc.totalAmountInclVat += totalAmount * (1 + currentOrderVat / 100);
+            
+            const statusConfig = statusConfigs.find(c => c.label === order.orderStatus);
+            const isActiveDeal = statusConfig ? statusConfig.isActiveDeal : true;
+            if (isActiveDeal) {
+                const balance = order.paymentStatus === 'שולם' ? 0 : totalAmount;
+                acc.totalBalance += balance;
+                acc.totalBalanceInclVat += balance * (1 + currentOrderVat / 100);
+            }
+            return acc;
+        }, { 
+            totalAmount: 0, 
+            totalProfit: 0, 
+            totalBalance: 0, 
+            totalCost: 0, 
+            totalAmountInclVat: 0, 
+            totalBalanceInclVat: 0 
+        });
+        
+        // Sort orders
+        if (isCollectionMode) {
+            allMatchingOrders.sort((a, b) => {
+                const dateA = calculateDueDate(a.dealStartDate || a.date, a.paymentTerms);
+                const dateB = calculateDueDate(b.dealStartDate || b.date, b.paymentTerms);
+                return dateA.getTime() - dateB.getTime();
+            });
+        } else {
+            const dateKey = dateFilterType === 'ORDER_DATE' ? 'date' : 'dealStartDate';
+            allMatchingOrders.sort((a, b) => {
+                const dA = a[dateKey] ? new Date(a[dateKey]!).getTime() : 0;
+                const dB = b[dateKey] ? new Date(b[dateKey]!).getTime() : 0;
+                return dB - dA;
+            });
+        }
+        
+        // Paginate
+        const totalCount = allMatchingOrders.length;
+        const skip = (page - 1) * limit;
+        const paginatedOrders = allMatchingOrders.slice(skip, skip + limit);
+        
+        return {
+            orders: paginatedOrders,
+            totalCount,
+            page,
+            limit,
+            totalPages: Math.ceil(totalCount / limit),
+            summaryTotals
+        };
+    } catch (error) {
+        console.error('Error fetching paginated orders:', error);
+        throw error;
+    }
+}
+
+// PayableItem interface for supplier payments report
+interface PayableItem {
+    uniqueId: string;
+    supplierId: string;
+    supplierName: string;
+    orderId: string;
+    orderNumber: string;
+    orderDescription: string;
+    itemDescription: string;
+    cost: number; // Net Cost
+    costGross: number; // Cost + VAT
+    paidAmount: number;
+    remainingAmount: number;
+    orderDate: Date;
+    dueDate: Date;
+    isCustomDueDate: boolean;
+    status: 'שולם' | 'שולם חלקית' | 'איחור' | 'לתשלום החודש' | 'צפוי' | 'ממתין לסיום';
+    timeStatus: 'איחור' | 'לתשלום החודש' | 'צפוי' | 'ממתין לסיום';
+    payments: SupplierPayment[];
+    itemType: 'lineItem' | 'additionalService';
+    itemIndex: number;
+}
+
+// Get payable items for supplier payments report with filtering, pagination, and summary stats
+export async function getPayableItems(
+    filters: {
+        supplierFilterId?: string;
+        dateStart?: string;
+        dateEnd?: string;
+        showPaid?: boolean;
+        viewMode?: 'forecast' | 'purchase_history' | 'payment_log';
+    } = {},
+    page: number = 1,
+    limit: number = 1000 // Default high limit for reports, can be paginated if needed
+): Promise<{
+    items: PayableItem[];
+    totalCount: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+    summaryStats: {
+        totalDebt: number;
+        overdueDebt: number;
+        thisMonthDue: number;
+        unassignedCount: number;
+    };
+}> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<Order>('orders');
+        
+        // Load all required data
+        const [orders, suppliers, statusConfigs, settings] = await Promise.all([
+            collection.find({}).toArray(),
+            getSuppliers(),
+            getStatusConfigs(),
+            getSettings()
+        ]);
+        
+        const allOrders = orders.map(deserializeDates) as Order[];
+        const supplierMap = new Map<string, Supplier>(suppliers.map(s => [s.id, s]));
+        const vatRate = settings.vatRate;
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        
+        // Helper to ensure date is a Date object
+        const ensureDate = (date: Date | string): Date => {
+            if (date instanceof Date) return date;
+            if (typeof date === 'string') return new Date(date);
+            return new Date();
+        };
+        
+        // Filter out non-deal orders based on dynamic status configuration
+        const activeOrders = allOrders.filter(order => {
+            const statusConfig = statusConfigs.find(c => c.label === order.orderStatus);
+            return statusConfig ? statusConfig.isActiveDeal : true;
+        });
+        
+        const items: PayableItem[] = [];
+        
+        activeOrders.forEach(order => {
+            const currentOrderVat = order.vatRate ?? vatRate;
+            const vatMultiplier = 1 + (currentOrderVat / 100);
+            
+            const process = (costItem: LineItem | AdditionalService, type: 'lineItem' | 'additionalService', index: number) => {
+                if (!costItem.cost || costItem.cost <= 0) return;
+                
+                // CRITICAL LOGIC: Do not inherit order.supplierId if item supplier is empty
+                const supplierId = costItem.supplierId;
+                const supplier = supplierId ? supplierMap.get(supplierId) : null;
+                
+                const calculationBaseDate = order.dealStartDate || order.date;
+                let effectivePaymentTerms = supplier ? supplier.paymentTerms : 'תשלום מיידי';
+                const dueDate = calculateDueDate(
+                    ensureDate(calculationBaseDate), 
+                    effectivePaymentTerms, 
+                    costItem.customDueDate
+                );
+                
+                let totalItemCost = costItem.cost;
+                if (type === 'lineItem') {
+                    const li = costItem as LineItem;
+                    totalItemCost = li.cost * (li.quantity || 1);
+                }
+                
+                // Calculate Gross (Including VAT)
+                const costGross = totalItemCost * vatMultiplier;
+                
+                const payments = costItem.supplierPayments || [];
+                
+                // IMPORTANT: Calculate paid amount EXCLUDING canceled/bounced checks
+                const paidAmount = payments.reduce((sum, p) => {
+                    const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
+                    if (p.status && invalidStatuses.includes(p.status)) {
+                        return sum;
+                    }
+                    return sum + p.amount;
+                }, 0);
+                
+                // Balance calculation is based on Gross Amount
+                const remainingAmount = costGross - paidAmount;
+                
+                // Determine Time-based Status (ignoring payments)
+                let timeStatus: PayableItem['timeStatus'] = 'צפוי';
+                
+                if (effectivePaymentTerms === 'עם סיום העבודה') {
+                    const config = statusConfigs.find(c => c.label === order.orderStatus);
+                    if (!config?.isCompleted) {
+                        timeStatus = 'ממתין לסיום';
+                    } else {
+                        const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+                        const endOfMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+                        
+                        if (dueDate < today) {
+                            timeStatus = 'איחור';
+                        } else if (dueDate >= startOfMonth && dueDate <= endOfMonth) {
+                            timeStatus = 'לתשלום החודש';
+                        }
+                    }
+                } else {
+                    const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+                    const endOfMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+                    
+                    if (dueDate < today) {
+                        timeStatus = 'איחור';
+                    } else if (dueDate >= startOfMonth && dueDate <= endOfMonth) {
+                        timeStatus = 'לתשלום החודש';
+                    }
+                }
+                
+                // Determine Display Status (Includes payment state)
+                let status: PayableItem['status'] = timeStatus;
+                
+                if (remainingAmount <= 0.1) {
+                    status = 'שולם';
+                } else if (paidAmount > 0) {
+                    status = 'שולם חלקית';
+                }
+                
+                items.push({
+                    uniqueId: `${order.id}_${type}_${index}`,
+                    supplierId: supplierId || 'unassigned',
+                    supplierName: supplier ? supplier.name : '⚠️ פריטים ללא ספק משויך',
+                    orderId: order.id,
+                    orderNumber: order.orderNumber,
+                    orderDescription: order.description,
+                    itemDescription: costItem.description,
+                    cost: totalItemCost, // Net
+                    costGross: costGross, // Gross
+                    paidAmount,
+                    remainingAmount: Math.max(0, remainingAmount),
+                    orderDate: ensureDate(order.date),
+                    dueDate,
+                    isCustomDueDate: !!costItem.customDueDate,
+                    status,
+                    timeStatus,
+                    payments,
+                    itemType: type,
+                    itemIndex: index,
+                });
+            };
+            
+            order.lineItems.forEach((li, idx) => process(li, 'lineItem', idx));
+            order.additionalServices.forEach((as, idx) => process(as, 'additionalService', idx));
+        });
+        
+        // Apply filters
+        let filteredItems = items;
+        
+        // 1. Supplier Filter
+        if (filters.supplierFilterId && filters.supplierFilterId !== 'all') {
+            filteredItems = filteredItems.filter(i => i.supplierId === filters.supplierFilterId);
+        }
+        
+        // 2. Paid Filter (Hide fully paid if toggle off)
+        if (filters.showPaid === false) {
+            filteredItems = filteredItems.filter(i => i.status !== 'שולם');
+        }
+        
+        // 3. Date Range Filter (BUT keep overdue items visible!)
+        const viewMode = filters.viewMode || 'forecast';
+        if (filters.dateStart || filters.dateEnd) {
+            const start = filters.dateStart ? new Date(filters.dateStart) : null;
+            const end = filters.dateEnd ? new Date(filters.dateEnd) : null;
+            
+            if (start) start.setHours(0, 0, 0, 0);
+            if (end) end.setHours(23, 59, 59, 999);
+            
+            filteredItems = filteredItems.filter(item => {
+                // Always show overdue unpaid items regardless of date filter
+                if (item.timeStatus === 'איחור' && item.remainingAmount > 1) return true;
+                
+                const dateToCheck = viewMode === 'forecast' ? item.dueDate : item.orderDate;
+                if (start && dateToCheck < start) return false;
+                if (end && dateToCheck > end) return false;
+                return true;
+            });
+        }
+        
+        // Sort items by date (matching client-side logic)
+        filteredItems.sort((a, b) => {
+            const dateA = viewMode === 'forecast' ? a.dueDate : a.orderDate;
+            const dateB = viewMode === 'forecast' ? b.dueDate : b.orderDate;
+            return dateA.getTime() - dateB.getTime();
+        });
+        
+        // Calculate summary stats on ALL filtered items (not just current page)
+        const summaryStats = {
+            totalDebt: filteredItems.reduce((sum, item) => sum + item.remainingAmount, 0),
+            overdueDebt: filteredItems
+                .filter(i => i.remainingAmount > 0.1 && i.timeStatus === 'איחור')
+                .reduce((sum, item) => sum + item.remainingAmount, 0),
+            thisMonthDue: filteredItems
+                .filter(i => i.remainingAmount > 0.1 && i.timeStatus === 'לתשלום החודש')
+                .reduce((sum, item) => sum + item.remainingAmount, 0),
+            unassignedCount: filteredItems.filter(i => i.supplierId === 'unassigned' && i.remainingAmount > 0.1).length
+        };
+        
+        // Paginate
+        const totalCount = filteredItems.length;
+        const skip = (page - 1) * limit;
+        const paginatedItems = filteredItems.slice(skip, skip + limit);
+        
+        return {
+            items: paginatedItems,
+            totalCount,
+            page,
+            limit,
+            totalPages: Math.ceil(totalCount / limit),
+            summaryStats
+        };
+    } catch (error) {
+        console.error('Error fetching payable items:', error);
+        throw error;
+    }
+}
+
 // ==================== SUPPLIERS ====================
 export async function getSuppliers(): Promise<Supplier[]> {
     try {
@@ -213,6 +791,67 @@ export async function getSuppliers(): Promise<Supplier[]> {
         return docs.map(deserializeDates) as Supplier[];
     } catch (error) {
         console.error('Error fetching suppliers:', error);
+        throw error;
+    }
+}
+
+// Get suppliers with server-side filtering and pagination
+export async function getSuppliersPaginated(
+    filters: {
+        searchTerm?: string;
+    } = {},
+    page: number = 1,
+    limit: number = 50
+): Promise<{
+    suppliers: Supplier[];
+    totalCount: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+}> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<Supplier>('suppliers');
+        
+        // Build MongoDB query from filters
+        const query: any = {};
+        
+        // Search query (name, contacts name/email/phone)
+        if (filters.searchTerm) {
+            const lowercasedTerm = filters.searchTerm.toLowerCase();
+            query.$or = [
+                { name: { $regex: lowercasedTerm, $options: 'i' } },
+                { 'contacts.name': { $regex: lowercasedTerm, $options: 'i' } },
+                { 'contacts.email': { $regex: lowercasedTerm, $options: 'i' } },
+                { 'contacts.phone': { $regex: lowercasedTerm, $options: 'i' } }
+            ];
+        }
+        
+        // Get total count of matching suppliers
+        const totalCount = await collection.countDocuments(query);
+        
+        // Calculate pagination
+        const skip = (page - 1) * limit;
+        
+        // Fetch paginated suppliers
+        const docs = await collection
+            .find(query)
+            .sort({ name: 1 }) // Sort by name
+            .skip(skip)
+            .limit(limit)
+            .toArray();
+        
+        const suppliers = docs.map(deserializeDates) as Supplier[];
+        
+        return {
+            suppliers,
+            totalCount,
+            page,
+            limit,
+            totalPages: Math.ceil(totalCount / limit)
+        };
+    } catch (error) {
+        console.error('Error fetching paginated suppliers:', error);
         throw error;
     }
 }
@@ -745,6 +1384,108 @@ export async function deleteDebt(debtId: string): Promise<void> {
     }
 }
 
+// Get debts with server-side filtering and pagination
+export async function getDebtsPaginated(
+    filters: {
+        searchTerm?: string;
+        statusFilter?: 'ALL' | 'OPEN' | 'OVERDUE' | 'PAID';
+    } = {},
+    page: number = 1,
+    limit: number = 50,
+    vatRate: number = 0
+): Promise<{
+    debts: (Debt & { gross: number; paid: number; remaining: number; isFullyPaid: boolean; isOverdue: boolean })[];
+    totalCount: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+}> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<Debt>('debts');
+        
+        // Build MongoDB query from filters
+        const query: any = {};
+        
+        // Search query (name, description)
+        if (filters.searchTerm) {
+            const lowercasedTerm = filters.searchTerm.toLowerCase();
+            query.$or = [
+                { name: { $regex: lowercasedTerm, $options: 'i' } },
+                { description: { $regex: lowercasedTerm, $options: 'i' } }
+            ];
+        }
+        
+        // Fetch all matching debts for calculation
+        const allDocs = await collection.find(query).toArray();
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        
+        // Calculate enriched fields for all debts
+        const enrichedDebts = allDocs.map(doc => {
+            const debt = deserializeDates(doc) as Debt;
+            const amount = debt.amount || 0;
+            const gross = debt.isVatExempt ? amount : (debt.includesVat ? amount : amount * (1 + vatRate / 100));
+            const paid = (debt.payments || []).reduce((sum: number, p) => {
+                const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
+                if (p.status && invalidStatuses.includes(p.status)) return sum;
+                return sum + p.amount;
+            }, 0);
+            const remaining = Math.max(0, gross - paid);
+            const isFullyPaid = remaining <= 0.1;
+            const dueDate = new Date(debt.dueDate);
+            dueDate.setHours(0, 0, 0, 0);
+            const isOverdue = !isFullyPaid && dueDate < today;
+            
+            return {
+                ...debt,
+                gross,
+                paid,
+                remaining,
+                isFullyPaid,
+                isOverdue
+            };
+        });
+        
+        // Apply status filter
+        let filtered = enrichedDebts;
+        if (filters.statusFilter === 'OPEN') {
+            filtered = filtered.filter(d => !d.isFullyPaid);
+        } else if (filters.statusFilter === 'OVERDUE') {
+            filtered = filtered.filter(d => d.isOverdue);
+        } else if (filters.statusFilter === 'PAID') {
+            filtered = filtered.filter(d => d.isFullyPaid);
+        }
+        
+        // Sort: overdue first, then unpaid, then by due date
+        filtered.sort((a, b) => {
+            if (a.isOverdue && !b.isOverdue) return -1;
+            if (!a.isOverdue && b.isOverdue) return 1;
+            if (a.isFullyPaid && !b.isFullyPaid) return 1;
+            if (!a.isFullyPaid && b.isFullyPaid) return -1;
+            return new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime();
+        });
+        
+        // Get total count after filtering
+        const totalCount = filtered.length;
+        
+        // Apply pagination
+        const skip = (page - 1) * limit;
+        const paginatedDebts = filtered.slice(skip, skip + limit);
+        
+        return {
+            debts: paginatedDebts,
+            totalCount,
+            page,
+            limit,
+            totalPages: Math.ceil(totalCount / limit)
+        };
+    } catch (error) {
+        console.error('Error fetching paginated debts:', error);
+        throw error;
+    }
+}
+
 // ==================== RECEIVABLES ====================
 export async function getReceivables(): Promise<Receivable[]> {
     try {
@@ -795,6 +1536,108 @@ export async function deleteReceivable(receivableId: string): Promise<void> {
         await collection.deleteOne({ id: receivableId });
     } catch (error) {
         console.error('Error deleting receivable:', error);
+        throw error;
+    }
+}
+
+// Get receivables with server-side filtering and pagination
+export async function getReceivablesPaginated(
+    filters: {
+        searchTerm?: string;
+        statusFilter?: 'ALL' | 'OPEN' | 'OVERDUE' | 'PAID';
+    } = {},
+    page: number = 1,
+    limit: number = 50,
+    vatRate: number = 0
+): Promise<{
+    receivables: (Receivable & { gross: number; collected: number; remaining: number; isFullyPaid: boolean; isOverdue: boolean })[];
+    totalCount: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+}> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<Receivable>('receivables');
+        
+        // Build MongoDB query from filters
+        const query: any = {};
+        
+        // Search query (name, description)
+        if (filters.searchTerm) {
+            const lowercasedTerm = filters.searchTerm.toLowerCase();
+            query.$or = [
+                { name: { $regex: lowercasedTerm, $options: 'i' } },
+                { description: { $regex: lowercasedTerm, $options: 'i' } }
+            ];
+        }
+        
+        // Fetch all matching receivables for calculation
+        const allDocs = await collection.find(query).toArray();
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        
+        // Calculate enriched fields for all receivables
+        const enrichedReceivables = allDocs.map(doc => {
+            const receivable = deserializeDates(doc) as Receivable;
+            const amount = receivable.amount || 0;
+            const gross = receivable.isVatExempt ? amount : (receivable.includesVat ? amount : amount * (1 + vatRate / 100));
+            const collected = (receivable.payments || []).reduce((sum: number, p) => {
+                const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
+                if (p.status && invalidStatuses.includes(p.status)) return sum;
+                return sum + p.amount;
+            }, 0);
+            const remaining = Math.max(0, gross - collected);
+            const isFullyPaid = remaining <= 0.1;
+            const dueDate = new Date(receivable.dueDate);
+            dueDate.setHours(0, 0, 0, 0);
+            const isOverdue = !isFullyPaid && dueDate < today;
+            
+            return {
+                ...receivable,
+                gross,
+                collected,
+                remaining,
+                isFullyPaid,
+                isOverdue
+            };
+        });
+        
+        // Apply status filter
+        let filtered = enrichedReceivables;
+        if (filters.statusFilter === 'OPEN') {
+            filtered = filtered.filter(r => !r.isFullyPaid);
+        } else if (filters.statusFilter === 'OVERDUE') {
+            filtered = filtered.filter(r => r.isOverdue);
+        } else if (filters.statusFilter === 'PAID') {
+            filtered = filtered.filter(r => r.isFullyPaid);
+        }
+        
+        // Sort: overdue first, then unpaid, then by due date
+        filtered.sort((a, b) => {
+            if (a.isOverdue && !b.isOverdue) return -1;
+            if (!a.isOverdue && b.isOverdue) return 1;
+            if (a.isFullyPaid && !b.isFullyPaid) return 1;
+            if (!a.isFullyPaid && b.isFullyPaid) return -1;
+            return new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime();
+        });
+        
+        // Get total count after filtering
+        const totalCount = filtered.length;
+        
+        // Apply pagination
+        const skip = (page - 1) * limit;
+        const paginatedReceivables = filtered.slice(skip, skip + limit);
+        
+        return {
+            receivables: paginatedReceivables,
+            totalCount,
+            page,
+            limit,
+            totalPages: Math.ceil(totalCount / limit)
+        };
+    } catch (error) {
+        console.error('Error fetching paginated receivables:', error);
         throw error;
     }
 }
@@ -869,6 +1712,89 @@ export async function getAttendanceRecords(): Promise<AttendanceRecord[]> {
         return docs.map(deserializeDates) as AttendanceRecord[];
     } catch (error) {
         console.error('Error fetching attendance records:', error);
+        throw error;
+    }
+}
+
+// Get attendance records with server-side filtering and pagination
+export async function getAttendanceRecordsPaginated(
+    filters: {
+        employeeId?: string;
+        month?: number;
+        year?: number;
+        dateStart?: string;
+        dateEnd?: string;
+    } = {},
+    page: number = 1,
+    limit: number = 50
+): Promise<{
+    records: AttendanceRecord[];
+    totalCount: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+}> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<AttendanceRecord>('attendanceRecords');
+        
+        // Auto-close old records before fetching (runs in background, doesn't block)
+        autoCloseOldAttendanceRecords().catch(err => {
+            console.error('Error auto-closing records in background:', err);
+        });
+        
+        // Build MongoDB query from filters
+        const query: any = {};
+        
+        // Employee filter
+        if (filters.employeeId) {
+            query.employeeId = filters.employeeId;
+        }
+        
+        // Date filters
+        if (filters.month && filters.year) {
+            // Month/Year filter
+            const startDate = new Date(filters.year, filters.month - 1, 1);
+            const endDate = new Date(filters.year, filters.month, 0, 23, 59, 59, 999);
+            query.date = { $gte: startDate, $lte: endDate };
+        } else if (filters.dateStart || filters.dateEnd) {
+            // Date range filter
+            query.date = {};
+            if (filters.dateStart) {
+                query.date.$gte = new Date(filters.dateStart);
+            }
+            if (filters.dateEnd) {
+                const endDate = new Date(filters.dateEnd);
+                endDate.setHours(23, 59, 59, 999);
+                query.date.$lte = endDate;
+            }
+        }
+        
+        // Get total count of matching records
+        const totalCount = await collection.countDocuments(query);
+        
+        // Calculate pagination
+        const skip = (page - 1) * limit;
+        
+        // Fetch paginated records
+        const docs = await collection
+            .find(query)
+            .sort({ date: -1 })
+            .skip(skip)
+            .limit(limit)
+            .toArray();
+        
+        const records = docs.map(deserializeDates) as AttendanceRecord[];
+        
+        return {
+            records,
+            totalCount,
+            page,
+            limit,
+            totalPages: Math.ceil(totalCount / limit)
+        };
+    } catch (error) {
+        console.error('Error fetching paginated attendance records:', error);
         throw error;
     }
 }
@@ -1394,6 +2320,84 @@ export async function getPriceListProducts(): Promise<PriceListProduct[]> {
         return docs.map(deserializeDates) as PriceListProduct[];
     } catch (error) {
         console.error('Error fetching price list products:', error);
+        throw error;
+    }
+}
+
+// Get products with server-side filtering and pagination
+export async function getPriceListProductsPaginated(
+    filters: {
+        searchQuery?: string;
+        categoryFilter?: string;
+    } = {},
+    page: number = 1,
+    limit: number = 50
+): Promise<{
+    products: PriceListProduct[];
+    totalCount: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+    categories: string[];
+}> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<PriceListProduct>('priceListProducts');
+        
+        // Build MongoDB query from filters
+        const query: any = {};
+        
+        // Category filter
+        if (filters.categoryFilter) {
+            query.category = filters.categoryFilter;
+        }
+        
+        // Search query (name, category, description)
+        if (filters.searchQuery) {
+            const lowercasedTerm = filters.searchQuery.toLowerCase();
+            query.$or = [
+                { name: { $regex: lowercasedTerm, $options: 'i' } },
+                { category: { $regex: lowercasedTerm, $options: 'i' } },
+                { description: { $regex: lowercasedTerm, $options: 'i' } }
+            ];
+        }
+        
+        // Get total count of matching products
+        const totalCount = await collection.countDocuments(query);
+        
+        // Get all categories from all products (for filter dropdown)
+        const allDocs = await collection.find({}).toArray();
+        const categoriesSet = new Set<string>();
+        allDocs.forEach(doc => {
+            if (doc.category) {
+                categoriesSet.add(doc.category);
+            }
+        });
+        const categories = Array.from(categoriesSet).sort();
+        
+        // Calculate pagination
+        const skip = (page - 1) * limit;
+        
+        // Fetch paginated products
+        const docs = await collection
+            .find(query)
+            .sort({ name: 1 }) // Sort by name
+            .skip(skip)
+            .limit(limit)
+            .toArray();
+        
+        const products = docs.map(deserializeDates) as PriceListProduct[];
+        
+        return {
+            products,
+            totalCount,
+            page,
+            limit,
+            totalPages: Math.ceil(totalCount / limit),
+            categories
+        };
+    } catch (error) {
+        console.error('Error fetching paginated price list products:', error);
         throw error;
     }
 }

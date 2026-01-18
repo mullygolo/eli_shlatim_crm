@@ -4,6 +4,7 @@ import { Order, Supplier, SupplierPayment, PaymentMethod, Attachment, LineItem, 
 import { PlusIcon, EditIcon, DeleteIcon, DownloadIcon } from './icons';
 import Modal from './Modal';
 import { useAuth } from '../contexts/AuthContext';
+import { getPayableItems } from '../services/mongoService';
 
 // --- Helpers & Logic ---
 
@@ -272,7 +273,8 @@ const PaymentManagementModal: React.FC<{
     orders: Order[];
     setOrders: (orders: Order[]) => void;
     onClose: () => void;
-}> = ({ item, selectedItems, orders, setOrders, onClose }) => {
+    onPaymentUpdated?: () => void; // Callback after payment updates
+}> = ({ item, selectedItems, orders, setOrders, onClose, onPaymentUpdated }) => {
     // If selectedItems is present, we are in bulk mode. Otherwise single item mode.
     const isBulk = !!selectedItems && selectedItems.length > 0;
     const itemsToPay = isBulk ? selectedItems! : (item ? [item] : []);
@@ -383,6 +385,9 @@ const PaymentManagementModal: React.FC<{
         });
 
         setOrders(newOrders);
+        if (onPaymentUpdated) {
+            onPaymentUpdated();
+        }
         onClose();
     };
 
@@ -411,6 +416,9 @@ const PaymentManagementModal: React.FC<{
         }
         newOrders[orderIndex] = order;
         setOrders(newOrders);
+        if (onPaymentUpdated) {
+            onPaymentUpdated();
+        }
         alert("תאריך יעד לתשלום עודכן בהצלחה");
     };
 
@@ -632,124 +640,58 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
     const canManagePayments = !!setOrders;
 
     // --- Data Processing ---
-
-    const rawPayables = useMemo((): PayableItem[] => {
-        const items: PayableItem[] = [];
-        const supplierMap = new Map<string, Supplier>(suppliers.map(s => [s.id, s]));
-        const today = new Date();
-        today.setHours(0,0,0,0);
-        
-        // Filter out non-deal orders based on dynamic status configuration
-        const activeOrders = orders.filter(order => {
-            const statusConfig = statusConfigs.find(c => c.label === order.orderStatus);
-            return statusConfig ? statusConfig.isActiveDeal : true;
-        });
-
-        activeOrders.forEach(order => {
-             const currentOrderVat = order.vatRate ?? vatRate;
-             const vatMultiplier = 1 + (currentOrderVat / 100);
-
-             const process = (costItem: LineItem | AdditionalService, type: 'lineItem' | 'additionalService', index: number) => {
-                if (!costItem.cost || costItem.cost <= 0) return;
-                
-                // CRITICAL LOGIC FIX: Do not inherit order.supplierId if item supplier is empty.
-                // This prevents unassigned items from being swallowed into the main supplier report.
-                const supplierId = costItem.supplierId; 
-                
-                const supplier = supplierId ? supplierMap.get(supplierId) : null;
-
-                const calculationBaseDate = order.dealStartDate || order.date;
-                let effectivePaymentTerms = supplier ? supplier.paymentTerms : 'תשלום מיידי';
-                const dueDate = calculateDueDate(ensureDate(calculationBaseDate), effectivePaymentTerms, costItem.customDueDate);
-                
-                let totalItemCost = costItem.cost;
-                if (type === 'lineItem') {
-                     const li = costItem as LineItem;
-                     totalItemCost = li.cost * (li.quantity || 1);
-                }
-
-                // Calculate Gross (Including VAT)
-                const costGross = totalItemCost * vatMultiplier;
-
-                const payments = costItem.supplierPayments || [];
-                
-                // IMPORTANT: Calculate paid amount EXCLUDING canceled/bounced checks
-                const paidAmount = payments.reduce((sum, p) => {
-                    const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
-                    if (p.status && invalidStatuses.includes(p.status)) {
-                        return sum;
-                    }
-                    return sum + p.amount;
-                }, 0);
-                
-                // Balance calculation is based on Gross Amount
-                const remainingAmount = costGross - paidAmount;
-
-                // Determine Time-based Status (ignoring payments) to properly categorize partials
-                let timeStatus: PayableItem['timeStatus'] = 'צפוי';
-                
-                 if (effectivePaymentTerms === 'עם סיום העבודה') {
-                     const config = statusConfigs.find(c => c.label === order.orderStatus);
-                     if (!config?.isCompleted) {
-                         timeStatus = 'ממתין לסיום';
-                     } else {
-                         const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
-                         const endOfMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0);
-                         
-                         if (dueDate < today) {
-                             timeStatus = 'איחור';
-                         } else if (dueDate >= startOfMonth && dueDate <= endOfMonth) {
-                             timeStatus = 'לתשלום החודש';
-                         }
-                     }
-                 } else {
-                     const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
-                     const endOfMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0);
-                     
-                     if (dueDate < today) {
-                         timeStatus = 'איחור';
-                     } else if (dueDate >= startOfMonth && dueDate <= endOfMonth) {
-                         timeStatus = 'לתשלום החודש';
-                     }
-                 }
-
-                // Determine Display Status (Includes payment state)
-                let status: PayableItem['status'] = timeStatus; 
-                
-                if (remainingAmount <= 0.1) {
-                    status = 'שולם';
-                } else if (paidAmount > 0) {
-                    status = 'שולם חלקית';
-                }
-
-                items.push({
-                    uniqueId: `${order.id}_${type}_${index}`,
-                    supplierId: supplierId || 'unassigned',
-                    supplierName: supplier ? supplier.name : '⚠️ פריטים ללא ספק משויך',
-                    orderId: order.id,
-                    orderNumber: order.orderNumber,
-                    orderDescription: order.description,
-                    itemDescription: costItem.description,
-                    cost: totalItemCost, // Net
-                    costGross: costGross, // Gross
-                    paidAmount,
-                    remainingAmount: Math.max(0, remainingAmount),
-                    orderDate: ensureDate(order.date),
-                    dueDate,
-                    isCustomDueDate: !!costItem.customDueDate,
-                    status,
-                    timeStatus, // Added for correct stats calculation
-                    payments,
-                    itemType: type,
-                    itemIndex: index,
-                });
-             };
-
-             order.lineItems.forEach((li, idx) => process(li, 'lineItem', idx));
-             order.additionalServices.forEach((as, idx) => process(as, 'additionalService', idx));
-        });
-        return items;
-    }, [orders, suppliers, statusConfigs, vatRate]);
+    // Load payable items from server-side API with filtering
+    const [rawPayables, setRawPayables] = useState<PayableItem[]>([]);
+    const [loadingPayables, setLoadingPayables] = useState(true);
+    const [summaryStats, setSummaryStats] = useState({
+        totalDebt: 0,
+        overdueDebt: 0,
+        thisMonthDue: 0,
+        unassignedCount: 0
+    });
+    const [currentPage, setCurrentPage] = useState(1);
+    const [pageSize, setPageSize] = useState(50); // Default page size
+    const [totalCount, setTotalCount] = useState(0);
+    
+    // Refetch function to reload payable items after payment updates or filter changes
+    const refetchPayables = async () => {
+        try {
+            setLoadingPayables(true);
+            const filters = {
+                supplierFilterId: supplierFilterId !== 'all' ? supplierFilterId : undefined,
+                dateStart: dateStart || undefined,
+                dateEnd: dateEnd || undefined,
+                showPaid: showPaid || undefined,
+                viewMode
+            };
+            
+            const result = await getPayableItems(filters, currentPage, pageSize);
+            
+            // Convert date strings to Date objects
+            const convertedPayables = result.items.map(item => ({
+                ...item,
+                orderDate: ensureDate(item.orderDate),
+                dueDate: ensureDate(item.dueDate),
+                payments: item.payments.map(p => ({
+                    ...p,
+                    date: ensureDate(p.date)
+                }))
+            }));
+            
+            setRawPayables(convertedPayables);
+            setSummaryStats(result.summaryStats);
+            setTotalCount(result.totalCount);
+        } catch (error) {
+            console.error('Error loading payable items:', error);
+        } finally {
+            setLoadingPayables(false);
+        }
+    };
+    
+    // Load payable items when filters change
+    useEffect(() => {
+        refetchPayables();
+    }, [supplierFilterId, dateStart, dateEnd, showPaid, viewMode, currentPage, pageSize]); // Refetch when filters or pagination change
 
     // --- Payment Log Grouping ---
     const groupedPayments = useMemo(() => {
@@ -836,45 +778,9 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
 
 
     // --- Filtering Logic ---
-    const filteredItems = useMemo(() => {
-        let items = rawPayables;
-
-        // 1. Supplier Filter
-        if (supplierFilterId !== 'all') {
-            items = items.filter(i => i.supplierId === supplierFilterId);
-        }
-
-        // 2. Paid Filter (Hide fully paid if toggle off)
-        if (!showPaid) {
-            items = items.filter(i => i.status !== 'שולם');
-        }
-
-        // 3. Date Range Filter (BUT keep overdue items visible!)
-        const start = dateStart ? new Date(dateStart) : null;
-        const end = dateEnd ? new Date(dateEnd) : null;
-        
-        if (start) start.setHours(0,0,0,0);
-        if (end) end.setHours(23,59,59,999);
-
-        items = items.filter(item => {
-            // Always show overdue unpaid items regardless of date filter
-            // Note: use timeStatus to check if it *should* be paid, even if paid partially
-            if (item.timeStatus === 'איחור' && item.remainingAmount > 1) return true;
-
-            const dateToCheck = viewMode === 'forecast' ? item.dueDate : item.orderDate;
-            if (start && dateToCheck < start) return false;
-            if (end && dateToCheck > end) return false;
-            return true;
-        });
-
-        // Sort items by date (oldest first for payments usually, but visual preference varies)
-        return items.sort((a,b) => {
-             const dateA = viewMode === 'forecast' ? a.dueDate : a.orderDate;
-             const dateB = viewMode === 'forecast' ? b.dueDate : b.orderDate;
-             return dateA.getTime() - dateB.getTime();
-        });
-
-    }, [rawPayables, supplierFilterId, dateStart, dateEnd, showPaid, viewMode]);
+    // Filtering is now done on the server, so filteredItems is just rawPayables
+    // (which are already filtered by the server)
+    const filteredItems = rawPayables;
 
     // --- Grouping Logic ---
     const groupedData = useMemo(() => {
@@ -1117,18 +1023,8 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
     }, [groupedData.length]);
 
     // --- Summary Stats ---
-    const totalDebt = rawPayables.reduce((sum, item) => sum + item.remainingAmount, 0);
-    
-    // Updated calculation: Use timeStatus instead of status to catch partially paid items that are overdue/due this month
-    const overdueDebt = rawPayables
-        .filter(i => i.remainingAmount > 0.1 && i.timeStatus === 'איחור')
-        .reduce((sum, item) => sum + item.remainingAmount, 0);
-        
-    const thisMonthDue = rawPayables
-        .filter(i => i.remainingAmount > 0.1 && i.timeStatus === 'לתשלום החודש')
-        .reduce((sum, item) => sum + item.remainingAmount, 0);
-
-    const unassignedCount = rawPayables.filter(i => i.supplierId === 'unassigned' && i.remainingAmount > 0.1).length;
+    // Summary stats are now calculated on the server and returned with the API response
+    const { totalDebt, overdueDebt, thisMonthDue, unassignedCount } = summaryStats;
 
     const selectedItemsTotal = getSelectedItems().reduce((sum, i) => sum + i.remainingAmount, 0);
 
@@ -1564,6 +1460,71 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
                         ))}
                     </>
                 )}
+                
+                {/* Pagination Controls */}
+                {totalCount > 0 && (
+                    <div className="mt-4 flex items-center justify-between bg-white px-4 py-3 border-t border-slate-200 rounded-b-lg">
+                        <div className="flex items-center gap-4">
+                            <div className="text-sm text-slate-600">
+                                מציג {((currentPage - 1) * pageSize) + 1} - {Math.min(currentPage * pageSize, totalCount)} מתוך {totalCount} פריטים
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <label className="text-sm text-slate-600">שורות לעמוד:</label>
+                                <select 
+                                    value={pageSize} 
+                                    onChange={(e) => {
+                                        setPageSize(parseInt(e.target.value));
+                                        setCurrentPage(1);
+                                    }}
+                                    className="text-sm border border-slate-300 rounded px-2 py-1 focus:ring-primary focus:border-primary"
+                                >
+                                    <option value={25}>25</option>
+                                    <option value={50}>50</option>
+                                    <option value={100}>100</option>
+                                    <option value={200}>200</option>
+                                    <option value={500}>500</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <button
+                                onClick={() => setCurrentPage(1)}
+                                disabled={currentPage === 1 || loadingPayables}
+                                className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                ראשון
+                            </button>
+                            <button
+                                onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
+                                disabled={currentPage === 1 || loadingPayables}
+                                className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                קודם
+                            </button>
+                            <span className="px-3 py-1 text-sm text-slate-600">
+                                עמוד {currentPage} מתוך {Math.ceil(totalCount / pageSize) || 1}
+                            </span>
+                            <button
+                                onClick={() => setCurrentPage(prev => Math.min(Math.ceil(totalCount / pageSize) || 1, prev + 1))}
+                                disabled={currentPage >= Math.ceil(totalCount / pageSize) || loadingPayables}
+                                className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                הבא
+                            </button>
+                            <button
+                                onClick={() => setCurrentPage(Math.ceil(totalCount / pageSize) || 1)}
+                                disabled={currentPage >= Math.ceil(totalCount / pageSize) || loadingPayables}
+                                className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                אחרון
+                            </button>
+                        </div>
+                    </div>
+                )}
+                
+                {loadingPayables && (
+                    <div className="mt-4 text-center text-slate-500 text-sm">טוען...</div>
+                )}
             </div>
 
             {/* Sticky Bulk Action Bar */}
@@ -1590,7 +1551,8 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
                     item={selectedItemForPayment} 
                     orders={orders} 
                     setOrders={setOrders!} 
-                    onClose={() => setSelectedItemForPayment(null)} 
+                    onClose={() => setSelectedItemForPayment(null)}
+                    onPaymentUpdated={refetchPayables}
                 />
             )}
 
@@ -1601,6 +1563,7 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
                     orders={orders}
                     setOrders={setOrders!}
                     onClose={() => setIsBulkPaymentModalOpen(false)}
+                    onPaymentUpdated={refetchPayables}
                 />
             )}
         </div>

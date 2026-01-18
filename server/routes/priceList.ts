@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import {
     getPriceListProducts,
+    getPriceListProductsPaginated,
     getPriceListProduct,
     createPriceListProduct,
     updatePriceListProduct,
@@ -28,6 +29,23 @@ router.get('/products', async (req, res) => {
     } catch (error) {
         console.error('Error fetching products:', error);
         res.status(500).json({ error: 'Failed to fetch products' });
+    }
+});
+
+router.get('/products/paginated', async (req, res) => {
+    try {
+        const page = parseInt(req.query.page as string) || 1;
+        const limit = parseInt(req.query.limit as string) || 50;
+        const filters: any = {};
+        
+        if (req.query.searchQuery) filters.searchQuery = req.query.searchQuery as string;
+        if (req.query.categoryFilter) filters.categoryFilter = req.query.categoryFilter as string;
+        
+        const result = await getPriceListProductsPaginated(filters, page, limit);
+        res.json(result);
+    } catch (error) {
+        console.error('Error fetching paginated products:', error);
+        res.status(500).json({ error: 'Failed to fetch paginated products' });
     }
 });
 

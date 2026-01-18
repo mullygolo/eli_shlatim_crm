@@ -1739,7 +1739,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
 
     // --- Debts Logic with Filtering and Sorting ---
     // Use paginated debts instead of client-side filtering when DEBTS tab is active
-    const filteredDebts = activeTab === 'DEBTS' ? paginatedDebts : (useMemo(() => {
+    const filteredDebtsClientSide = useMemo(() => {
         let result = debts.map(d => {
             const amount = d.amount || 0;
             const gross = d.isVatExempt ? amount : (d.includesVat ? amount : amount * (1 + vatRate / 100));
@@ -1775,9 +1775,11 @@ const FinancePage: React.FC<FinancePageProps> = ({
             return new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime();
         });
     }, [debts, debtSearch, debtStatusFilter, vatRate]);
+    
+    const filteredDebts = activeTab === 'DEBTS' ? paginatedDebts : filteredDebtsClientSide;
 
     // --- Receivables Logic ---
-    const filteredReceivables = useMemo(() => {
+    const filteredReceivablesClientSide = useMemo(() => {
         let result = receivables.map(r => {
             const amount = r.amount || 0;
             const gross = r.isVatExempt ? amount : (r.includesVat ? amount : amount * (1 + vatRate / 100));
@@ -1809,11 +1811,12 @@ const FinancePage: React.FC<FinancePageProps> = ({
             if (a.isOverdue && !b.isOverdue) return -1;
             if (!a.isOverdue && b.isOverdue) return 1;
             if (a.isFullyPaid && !b.isFullyPaid) return 1;
-            if (!a.isFullyPaid && b.isFullyPaid) return 1;
             if (!a.isFullyPaid && b.isFullyPaid) return -1;
             return new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime();
         });
-    }, [receivables, receivableSearch, receivableStatusFilter, vatRate]) : []);
+    }, [receivables, receivableSearch, receivableStatusFilter, vatRate]);
+    
+    const filteredReceivables = activeTab === 'RECEIVABLES' ? paginatedReceivables : filteredReceivablesClientSide;
 
     const handleAdd = (type: string) => {
         setEditingId(null);

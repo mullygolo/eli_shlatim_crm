@@ -2451,26 +2451,20 @@ export async function deleteAttendanceRecord(recordId: string): Promise<void> {
     }
 }
 
-// Initialize unique index for attendance records to prevent duplicates
-// This should be called once on server startup
+// Initialize index for attendance records (query performance).
+// Duplicate active clock-ins are prevented in application logic (clockInAttendance).
+// We do not create a unique index: legacy data has dateString null / duplicates, and
+// partial index ($exists, $ne) triggers "Expression not supported: $not" on MongoDB.
 export async function initializeAttendanceIndexes(): Promise<void> {
     try {
         const database = await getDb();
         const collection = database.collection<AttendanceRecord>('attendanceRecords');
-        
-        // Unique compound index on (employeeId, dateString). One record per employee per day.
-        // Partial: only index docs with dateString present and non-null (legacy rows with
-        // dateString: null are excluded, avoiding E11000 on (employeeId, null)).
         try {
             await collection.createIndex(
                 { employeeId: 1, dateString: 1 },
-                {
-                    unique: true,
-                    name: 'unique_attendance_employee_date',
-                    partialFilterExpression: { dateString: { $exists: true, $ne: null } }
-                }
+                { name: 'attendance_employee_date' }
             );
-            console.log('Attendance unique index created successfully');
+            console.log('Attendance index created successfully');
         } catch (error: any) {
             if (error.code !== 85 && error.codeName !== 'IndexOptionsConflict') {
                 console.warn('Could not create attendance index (might already exist):', error.message);

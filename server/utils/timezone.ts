@@ -5,10 +5,12 @@
 /**
  * Get date string in Israel timezone (YYYY-MM-DD)
  * This is the main function to use for date comparisons
+ * If date is invalid (null, undefined, NaN), uses today.
  */
 export function getDateStringIsrael(date?: Date): string {
-    const targetDate = date || new Date();
-    return new Intl.DateTimeFormat('en-CA', { 
+    const targetDate =
+        date instanceof Date && !isNaN(date.getTime()) ? date : new Date();
+    return new Intl.DateTimeFormat('en-CA', {
         timeZone: 'Asia/Jerusalem',
         year: 'numeric',
         month: '2-digit',

@@ -1,4 +1,4 @@
-import { Order, Customer, CustomerPayment, LineItem, AdditionalService, LineItemUnit } from '../types.js';
+import { Order, Customer, CustomerPayment, LineItem, AdditionalService, LineItemUnit, PaymentStatus } from '../types.js';
 import { CreateInvoiceRequest, GreenInvoiceInvoiceItem, CreateClientRequest } from '../types/greenInvoice.js';
 import { calculateOrderTotals, calculateDueDate } from '../utils/calculations.js';
 import { getDateStringIsrael } from '../utils/timezone.js';
@@ -72,7 +72,7 @@ export function mapOrderToInvoiceRequest(
     
     // Determine payment status
     const paymentStatus: 'Paid' | 'Not Paid' = 
-        order.paymentStatus === 'PAID' || totalPaid >= totalAmount - 0.01 
+        order.paymentStatus === PaymentStatus.PAID || totalPaid >= totalAmount - 0.01 
             ? 'Paid' 
             : 'Not Paid';
     
@@ -191,6 +191,7 @@ export function mapOrderToDocumentRequest(
     const today = new Date(todayStr + 'T00:00:00+02:00'); // יצירת Date עבור היום בישראל
     const orderDateStr = getDateStringIsrael(order.date); // תאריך ההזמנה בישראל
     const orderDate = new Date(orderDateStr + 'T00:00:00+02:00'); // יצירת Date עבור תאריך ההזמנה בישראל
+    const maxPastYears = 2;
     
     // #region agent log
     fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'greenInvoiceMapper.ts:164',message:'Date calculation - before draft check',data:{draft,draftType:typeof draft,todayStr,todayISO:today.toISOString().split('T')[0],orderDateStr,orderDateISO:orderDate.toISOString().split('T')[0]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
@@ -209,7 +210,6 @@ export function mapOrderToDocumentRequest(
         // #endregion
     } else {
         // בדיקה: חשבונית ירוקה לא מאפשרת תאריכים עתידיים (אפילו יום אחד) או ישנים מדי
-        const maxPastYears = 2;
         const maxPastDate = new Date(today);
         maxPastDate.setFullYear(maxPastDate.getFullYear() - maxPastYears);
         
@@ -312,7 +312,7 @@ export function mapOrderToDocumentRequest(
             const ref = (pay.reference && String(pay.reference).trim()) || '';
             payment.push(buildPayItem(pay.amount, pay.date, pay.method, ref, false));
         });
-    } else if (order.paymentStatus === 'PAID' || totalPaid >= totalAmount - 0.01) {
+    } else if (order.paymentStatus === PaymentStatus.PAID || totalPaid >= totalAmount - 0.01) {
         order.payments?.forEach((pay) => {
             const payDateStr = getDateStringIsrael(pay.date);
             const ref = (pay.reference && String(pay.reference).trim()) || '';

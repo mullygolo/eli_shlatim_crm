@@ -66,8 +66,9 @@ async function authenticate(): Promise<string> {
                     console.log(`Authentication successful with endpoint: ${endpoint}`);
                     break; // Success, exit loop
                 } else {
-                    const errorText = await response.text().catch(() => response.statusText);
-                    lastError = new Error(`Authentication failed (${endpoint}): ${errorText || response.statusText}`);
+                    const errRes = response;
+                    const errorText = await errRes.text().catch(() => errRes.statusText);
+                    lastError = new Error(`Authentication failed (${endpoint}): ${errorText || errRes.statusText}`);
                     console.log(`Authentication endpoint ${endpoint} failed:`, lastError.message);
                     response = null;
                 }
@@ -173,7 +174,7 @@ async function apiRequest<T>(
         throw new Error(error.message || (error as any).error || (error as any).errorMessage || `API request failed (${response.status}): ${response.statusText}`);
     }
 
-    return response.json();
+    return response.json() as Promise<T>;
 }
 
 /**
@@ -599,7 +600,7 @@ export async function createInvoice(invoiceData: CreateInvoiceRequest | any, doc
                             throw new Error(`API request failed (${response.status}): ${rawText || response.statusText}`);
                         }
                         
-                        const result = await response.json();
+                        const result = (await response.json()) as Record<string, any>;
                         
                         // Log the response to check if document was created as signed or draft
                         console.log(`[CREATE DOCUMENT] API Response - signed field: ${result.signed}, type: ${typeof result.signed}`);
@@ -880,7 +881,7 @@ export async function searchDocumentsByOrderNumber(orderNumber: string): Promise
                 });
                 
                 if (response.ok) {
-                    const data = await response.json();
+                    const data = (await response.json()) as Record<string, any>;
                     let documents: any[] = [];
                     
                     // Handle different response formats
@@ -939,7 +940,7 @@ export async function searchDocumentsByOrderNumber(orderNumber: string): Promise
                     });
                     
                     if (response.ok) {
-                        const data = await response.json();
+                        const data = (await response.json()) as Record<string, any>;
                         let documents: any[] = [];
                         
                         if (Array.isArray(data)) {
@@ -1214,14 +1215,13 @@ export async function downloadDocumentPDF(documentId: string, documentType: 'inv
         }
 
         if (contentType.includes('application/json')) {
-            const json = await response.json();
-            const pdfUrl = (typeof json === 'object' && json !== null)
-                ? (json.he || json.url || json.link || json.en)
-                : null;
+            const json = (await response.json()) as Record<string, unknown> | null;
+            const o = (typeof json === 'object' && json !== null) ? json : null;
+            const pdfUrl = o ? (o.he || o.url || o.link || o.en) : null;
             const urlStr = typeof pdfUrl === 'string' ? pdfUrl.trim() : '';
 
             if (!urlStr || !urlStr.startsWith('http')) {
-                console.error('[downloadDocumentPDF] JSON response has no PDF URL. Keys:', json ? Object.keys(json) : 'null');
+                console.error('[downloadDocumentPDF] JSON response has no PDF URL. Keys:', o ? Object.keys(o) : 'null');
                 throw new Error('תגובת API לא הכילה קישור ל-PDF');
             }
 

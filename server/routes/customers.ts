@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import type { Customer, Contact } from '../types.js';
 import { getCustomers, createCustomer, updateCustomer, deleteCustomer, getCustomersPaginated, getSettings } from '../services/mongoService.js';
 import { createOrGetClient, updateClient } from '../services/greenInvoiceService.js';
 import { mapCustomerToClient } from '../services/greenInvoiceMapper.js';
@@ -233,7 +234,7 @@ router.post('/sync-from-greeninvoice', async (req, res) => {
                     
                     // Update primary contact if we have better data
                     if (giClient.contactPerson || giClientEmail(giClient) || giClientPhone(giClient)) {
-                        const primaryContact = updatedCustomerData.contacts?.find(c => c.isDefault) || updatedCustomerData.contacts?.[0];
+                        const primaryContact = updatedCustomerData.contacts?.find((c: Contact) => c.isDefault) || updatedCustomerData.contacts?.[0];
                         if (primaryContact) {
                             primaryContact.name = giClient.contactPerson || primaryContact.name || displayName;
                             primaryContact.email = giClientEmail(giClient) || primaryContact.email || '';

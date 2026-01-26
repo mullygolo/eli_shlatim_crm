@@ -1,5 +1,5 @@
 import nodemailer from 'nodemailer';
-import { Order, Supplier, LineItem, AdditionalService, PriceListProduct } from '../types';
+import { Order, Supplier, LineItem, AdditionalService, PriceListProduct } from '../types.js';
 import * as mongoService from './mongoService.js';
 
 // Create transporter for Gmail

@@ -7,7 +7,7 @@ import {
     PriceListProduct, SalesHistoryEntry, AdHocProduct,
     LineItem, AdditionalService, SupplierPayment, TransactionStatus,
     PaymentMethod, CustomerPayment, ReceivablePayment, DebtPayment
-} from '../types';
+} from '../types.js';
 import { hashPassword } from '../utils/password.js';
 import { getTodayRangeIsrael, getDateStringIsrael } from '../utils/timezone.js';
 import { calculateOrderTotals, calculateDueDate } from '../utils/calculations.js';

@@ -17,7 +17,7 @@ import {
     getOrders
 } from '../services/mongoService.js';
 import { sendPriceListEmail, sendQuoteRequest } from '../services/emailService.js';
-import { Order } from '../types';
+import { Order } from '../types.js';
 
 const router = Router();
 

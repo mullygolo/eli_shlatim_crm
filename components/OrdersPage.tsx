@@ -14,6 +14,7 @@ import * as mongoService from '../services/mongoService';
 import { getProducts } from '../services/priceListService';
 import { addSalesHistoryEntry, createAdHocProduct, sendQuoteRequests } from '../services/priceListService';
 import { calculateProductPrice } from '../utils/priceCalculations';
+import { useAsyncAction } from '../hooks/useAsyncAction';
 
 interface OrdersPageProps {
     orders: Order[];
@@ -687,148 +688,148 @@ const OrderForm: React.FC<{
     const [isCreateDocumentModalOpen, setIsCreateDocumentModalOpen] = useState(false);
     const [createDocumentModalMode, setCreateDocumentModalMode] = useState<'full' | 'from-document'>('full');
     const [createDocumentModalFromType, setCreateDocumentModalFromType] = useState<'invoice' | 'receipt' | 'credit' | 'estimate' | undefined>(undefined);
-    const [isCreatingDocument, setIsCreatingDocument] = useState(false);
     const [invoiceSummary, setInvoiceSummary] = useState<{ invoicedAmount: number; creditsAmount: number; netInvoiced: number; hasInvoices: boolean; hasReceipts: boolean } | null>(null);
 
     // GreenInvoice document creation handlers
-    const handleCreateDocument = async (
+    const handleCreateDocumentInternal = async (
         documentType: 'invoice' | 'receipt' | 'invoice_receipt' | 'credit_invoice' | 'estimate' | 'work_order' | 'delivery_note' | 'transaction_account',
         method: 'api' | 'window',
         paymentsOverride?: Array<{ id: string; amount: number; date: Date; method: string; reference?: string; repaymentDate?: Date }>
     ) => {
         const documentTypeForApi = documentType;
         if (!order || !order.id) {
-            alert('שגיאה: לא נמצאה הזמנה');
-            return;
+            throw new Error('שגיאה: לא נמצאה הזמנה');
         }
 
         const selectedCustomer = customers.find(c => c.id === formData.customerId);
         if (!selectedCustomer) {
-            alert('שגיאה: לא נמצא לקוח');
-            return;
+            throw new Error('שגיאה: לא נמצא לקוח');
         }
 
-        setIsCreatingDocument(true);
-        try {
-            if (method === 'api') {
-                const body: Record<string, unknown> = {
+        if (method === 'api') {
+            const body: Record<string, unknown> = {
+                orderId: order.id,
+                documentType: documentTypeForApi,
+                customerId: selectedCustomer.id
+            };
+            if (paymentsOverride && (documentTypeForApi === 'receipt' || documentTypeForApi === 'invoice_receipt')) {
+                body.paymentsOverride = paymentsOverride.map((p) => ({
+                    amount: p.amount,
+                    date: typeof p.date === 'string' ? p.date : (p.date as Date).toISOString().split('T')[0],
+                    method: p.method,
+                    reference: p.reference,
+                    repaymentDate: p.repaymentDate ? (typeof p.repaymentDate === 'string' ? p.repaymentDate : (p.repaymentDate as Date).toISOString().split('T')[0]) : undefined
+                }));
+            }
+            const response = await fetch('/api/green-invoice/orders/create-document', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${localStorage.getItem('authToken')}`
+                },
+                body: JSON.stringify(body)
+            });
+
+            if (!response.ok) {
+                let errorMessage = 'שגיאה ביצירת מסמך';
+                try {
+                    const error = await response.json();
+                    errorMessage = error.error || error.message || error.detail || errorMessage;
+                } catch (e) {
+                    errorMessage = `שגיאה ${response.status}: ${response.statusText}`;
+                }
+                throw new Error(errorMessage);
+            }
+
+            const result = await response.json();
+            
+            // Update order with document IDs
+            const updatedOrder: Order = {
+                ...order,
+                ...result.orderUpdates
+            };
+
+            await onSave(updatedOrder, true);
+            addActivity(`נוצר מסמך ${getDocumentTypeLabel(documentType)} בחשבונית ירוקה`);
+            setIsCreateDocumentModalOpen(false);
+            alert('המסמך נוצר בהצלחה בחשבונית ירוקה!');
+        } else {
+            // פתיחת חלון לעריכה: יוצרים טיוטה ממולאת (פריטים, לקוח, פרטי הזמנה) ב-API, פותחים לעריכה בחשבונית ירוקה — המשתמש לוחץ "הפקת מסמך" כשמוכן
+            const response = await fetch('/api/green-invoice/orders/create-document', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${localStorage.getItem('authToken')}`
+                },
+                body: JSON.stringify({
                     orderId: order.id,
                     documentType: documentTypeForApi,
-                    customerId: selectedCustomer.id
-                };
-                if (paymentsOverride && (documentTypeForApi === 'receipt' || documentTypeForApi === 'invoice_receipt')) {
-                    body.paymentsOverride = paymentsOverride.map((p) => ({
-                        amount: p.amount,
-                        date: typeof p.date === 'string' ? p.date : (p.date as Date).toISOString().split('T')[0],
-                        method: p.method,
-                        reference: p.reference,
-                        repaymentDate: p.repaymentDate ? (typeof p.repaymentDate === 'string' ? p.repaymentDate : (p.repaymentDate as Date).toISOString().split('T')[0]) : undefined
-                    }));
-                }
-                const response = await fetch('/api/green-invoice/orders/create-document', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${localStorage.getItem('authToken')}`
-                    },
-                    body: JSON.stringify(body)
-                });
+                    customerId: selectedCustomer.id,
+                    draft: true
+                })
+            });
 
-                if (!response.ok) {
-                    let errorMessage = 'שגיאה ביצירת מסמך';
-                    try {
-                        const error = await response.json();
-                        errorMessage = error.error || error.message || error.detail || errorMessage;
-                    } catch (e) {
-                        errorMessage = `שגיאה ${response.status}: ${response.statusText}`;
-                    }
-                    throw new Error(errorMessage);
-                }
-
-                const result = await response.json();
-                
-                // Update order with document IDs
-                const updatedOrder: Order = {
-                    ...order,
-                    ...result.orderUpdates
-                };
-
-                await onSave(updatedOrder, true);
-                addActivity(`נוצר מסמך ${getDocumentTypeLabel(documentType)} בחשבונית ירוקה`);
-                setIsCreateDocumentModalOpen(false);
-                alert('המסמך נוצר בהצלחה בחשבונית ירוקה!');
-            } else {
-                // פתיחת חלון לעריכה: יוצרים טיוטה ממולאת (פריטים, לקוח, פרטי הזמנה) ב-API, פותחים לעריכה בחשבונית ירוקה — המשתמש לוחץ "הפקת מסמך" כשמוכן
-                const response = await fetch('/api/green-invoice/orders/create-document', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${localStorage.getItem('authToken')}`
-                    },
-                    body: JSON.stringify({
-                        orderId: order.id,
-                        documentType: documentTypeForApi,
-                        customerId: selectedCustomer.id,
-                        draft: true
-                    })
-                });
-
-                if (!response.ok) {
-                    let errMsg = 'שגיאה ביצירת טיוטה';
-                    try {
-                        const err = await response.json();
-                        errMsg = err.error || err.message || err.detail || errMsg;
-                    } catch (_) {}
-                    throw new Error(errMsg);
-                }
-
-                const result = await response.json();
-                const updatedOrder: Order = { ...order, ...result.orderUpdates };
-                await onSave(updatedOrder, true);
-
-                if (result.editUrl) {
-                    console.log('[DRAFT] Opening GreenInvoice document for editing:', result.editUrl);
-                    console.log('[DRAFT] Document ID:', result.invoice?.id);
-                    console.log('[DRAFT] Document should be a draft (not issued) - user will click "הפקת מסמך" when ready');
-                    
-                    // Open in new window and keep it focused
-                    // Use a unique window name to prevent multiple windows from opening
-                    const windowName = `greeninvoice_draft_${result.invoice?.id || Date.now()}`;
-                    const newWindow = window.open(result.editUrl, windowName, 'width=1200,height=800,scrollbars=yes,resizable=yes,location=yes,menubar=yes,toolbar=yes');
-                    
-                    if (newWindow) {
-                        // Focus the new window and keep it open
-                        newWindow.focus();
-                        
-                        // Add a small delay to ensure window is fully loaded
-                        setTimeout(() => {
-                            if (newWindow.closed) {
-                                console.warn('[DRAFT] Window was closed, user may need to allow popups');
-                            } else {
-                                console.log('[DRAFT] Window is open and ready for editing');
-                            }
-                        }, 1000);
-                        
-                        addActivity(`נוצרה טיוטה ממולאת (פריטים + לקוח) ונפתחה בחשבונית ירוקה לעריכה — הזמנה ${order.orderNumber}. לחץ על "הפקת מסמך" בחשבונית ירוקה כשמוכן.`);
-                    } else {
-                        // If popup was blocked, show alert with URL and instructions
-                        const message = `טיוטה נוצרה בהצלחה!\n\nהחלון נחסם על ידי הדפדפן. לחץ על הקישור כדי לפתוח בחשבונית ירוקה:\n${result.editUrl}\n\nבחשבונית ירוקה תראה את המסמך עם הכפתורים:\n- "הפקת מסמך" (כשמוכן)\n- "שמירת טיוטה"\n- "תצוגה מקדימה"`;
-                        alert(message);
-                        addActivity(`נוצרה טיוטה ממולאת (פריטים + לקוח) — הזמנה ${order.orderNumber}. פתח את הקישור בחשבונית ירוקה לעריכה.`);
-                    }
-                } else {
-                    alert('טיוטה נוצרה בהצלחה, אבל לא נמצא URL לעריכה. אנא פתח את המסמך ידנית בחשבונית ירוקה.');
-                    addActivity(`נוצרה טיוטה ממולאת (פריטים + לקוח) — הזמנה ${order.orderNumber}`);
-                }
-                setIsCreateDocumentModalOpen(false);
+            if (!response.ok) {
+                let errMsg = 'שגיאה ביצירת טיוטה';
+                try {
+                    const err = await response.json();
+                    errMsg = err.error || err.message || err.detail || errMsg;
+                } catch (_) {}
+                throw new Error(errMsg);
             }
-        } catch (error: any) {
-            console.error('Error creating document:', error);
-            alert(`שגיאה ביצירת מסמך: ${error.message || 'שגיאה לא ידועה'}`);
-        } finally {
-            setIsCreatingDocument(false);
+
+            const result = await response.json();
+            const updatedOrder: Order = { ...order, ...result.orderUpdates };
+            await onSave(updatedOrder, true);
+
+            if (result.editUrl) {
+                console.log('[DRAFT] Opening GreenInvoice document for editing:', result.editUrl);
+                console.log('[DRAFT] Document ID:', result.invoice?.id);
+                console.log('[DRAFT] Document should be a draft (not issued) - user will click "הפקת מסמך" when ready');
+                
+                // Open in new window and keep it focused
+                // Use a unique window name to prevent multiple windows from opening
+                const windowName = `greeninvoice_draft_${result.invoice?.id || Date.now()}`;
+                const newWindow = window.open(result.editUrl, windowName, 'width=1200,height=800,scrollbars=yes,resizable=yes,location=yes,menubar=yes,toolbar=yes');
+                
+                if (newWindow) {
+                    // Focus the new window and keep it open
+                    newWindow.focus();
+                    
+                    // Add a small delay to ensure window is fully loaded
+                    setTimeout(() => {
+                        if (newWindow.closed) {
+                            console.warn('[DRAFT] Window was closed, user may need to allow popups');
+                        } else {
+                            console.log('[DRAFT] Window is open and ready for editing');
+                        }
+                    }, 1000);
+                    
+                    addActivity(`נוצרה טיוטה ממולאת (פריטים + לקוח) ונפתחה בחשבונית ירוקה לעריכה — הזמנה ${order.orderNumber}. לחץ על "הפקת מסמך" בחשבונית ירוקה כשמוכן.`);
+                } else {
+                    // If popup was blocked, show alert with URL and instructions
+                    const message = `טיוטה נוצרה בהצלחה!\n\nהחלון נחסם על ידי הדפדפן. לחץ על הקישור כדי לפתוח בחשבונית ירוקה:\n${result.editUrl}\n\nבחשבונית ירוקה תראה את המסמך עם הכפתורים:\n- "הפקת מסמך" (כשמוכן)\n- "שמירת טיוטה"\n- "תצוגה מקדימה"`;
+                    alert(message);
+                    addActivity(`נוצרה טיוטה ממולאת (פריטים + לקוח) — הזמנה ${order.orderNumber}. פתח את הקישור בחשבונית ירוקה לעריכה.`);
+                }
+            } else {
+                alert('טיוטה נוצרה בהצלחה, אבל לא נמצא URL לעריכה. אנא פתח את המסמך ידנית בחשבונית ירוקה.');
+                addActivity(`נוצרה טיוטה ממולאת (פריטים + לקוח) — הזמנה ${order.orderNumber}`);
+            }
+            setIsCreateDocumentModalOpen(false);
         }
     };
+
+    const { execute: handleCreateDocument, isLoading: isCreatingDocument } = useAsyncAction(
+        handleCreateDocumentInternal,
+        {
+            preventDoubleClick: true,
+            onError: (error) => {
+                console.error('Error creating document:', error);
+                alert(`שגיאה ביצירת מסמך: ${error.message || 'שגיאה לא ידועה'}`);
+            }
+        }
+    );
 
     const getDocumentTypeLabel = (type: string): string => {
         const labels: Record<string, string> = {
@@ -2111,6 +2112,7 @@ const OrderForm: React.FC<{
                     balanceDue={balanceDue}
                     mode={createDocumentModalMode}
                     fromDocumentType={createDocumentModalFromType}
+                    isLoading={isCreatingDocument}
                 />
             )}
 

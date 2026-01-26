@@ -5,6 +5,7 @@ import { PlusIcon, EditIcon, DeleteIcon, BankIcon, TrendingUpIcon, LogIcon, Cash
 import Modal from './Modal';
 import PnLReport from './PnLReport';
 import * as mongoService from '../services/mongoService';
+import { useAsyncAction } from '../hooks/useAsyncAction';
 
 // Error Boundary Component
 class ErrorBoundary extends Component<
@@ -2402,124 +2403,129 @@ const FinancePage: React.FC<FinancePageProps> = ({
         setVariableForm(prev => ({ ...prev, checks: updatedChecks }));
     };
 
-    const handleSave = async () => {
-        try {
-            if (activeTab === 'FIXED') {
-                const newItem = { ...fixedForm, id: editingId || `fe_${Date.now()}` } as FixedExpense;
-                if (editingId) {
-                    const saved = await mongoService.updateFixedExpense(newItem);
-                    setFixedExpenses(prev => prev.map(item => item.id === editingId ? saved : item));
-                } else {
-                    const saved = await mongoService.createFixedExpense(newItem);
-                    setFixedExpenses(prev => [...prev, saved]);
-                }
-                // Refetch paginated data if FIXED tab is active
-                if (activeTab === 'FIXED') {
-                    refetchFixedActive();
-                    refetchFixedHistorical();
-                }
-            } else if (activeTab === 'VARIABLE') {
-                const newItem = { 
-                    ...variableForm, 
-                    id: editingId || `ve_${Date.now()}`, 
-                    date: new Date(variableForm.date || new Date()),
-                    paymentMethod: variableForm.paymentMethod || PaymentMethod.BANK_TRANSFER,
-                    paymentDetails: variableForm.paymentDetails || '',
-                    checks: variableForm.checks || []
-                } as VariableExpense;
-                if (editingId) {
-                    const saved = await mongoService.updateVariableExpense(newItem);
-                    setVariableExpenses(prev => prev.map(item => item.id === editingId ? saved : item));
-                } else {
-                    const saved = await mongoService.createVariableExpense(newItem);
-                    setVariableExpenses(prev => [...prev, saved]);
-                }
-                // Refetch paginated data if VARIABLE tab is active
-                if (activeTab === 'VARIABLE') {
-                    refetchVariableExpenses();
-                }
-            } else if (activeTab === 'LOANS') {
-                const principal = loanForm.principalAmount || 0;
-                const rate = loanForm.interestRate || 0;
-                const duration = loanForm.durationMonths || 12;
-                const startDate = loanForm.startDate || new Date();
-                const paymentsMadeCount = loanForm.paymentsMade || 0;
-                
-                let schedule = loanForm.schedule || [];
-                const scheduleTotalPrincipal = schedule.reduce((sum, s) => sum + s.principalAmount, 0);
-                const needsSync = schedule.length === 0 || schedule.length !== duration || Math.abs(scheduleTotalPrincipal - principal) > 1.0;
-
-                if (needsSync && principal > 0 && duration > 0) {
-                    schedule = generateSpitzerSchedule(principal, rate, duration, startDate, paymentsMadeCount);
-                }
-
-                const newItem = { 
-                    ...loanForm, 
-                    id: editingId || `ln_${Date.now()}`, 
-                    startDate: new Date(loanForm.startDate || new Date()),
-                    schedule: schedule,
-                    paymentsMade: schedule.filter(s => s.isPaid).length 
-                } as Loan;
-                if (editingId) {
-                    const saved = await mongoService.updateLoan(newItem);
-                    setLoans(prev => prev.map(l => l.id === editingId ? saved : l));
-                } else {
-                    const saved = await mongoService.createLoan(newItem);
-                    setLoans(prev => [...prev, saved]);
-                }
-            } else if (activeTab === 'DEBTS') {
-                const newItem = { 
-                    ...debtForm, 
-                    id: editingId || `db_${Date.now()}`, 
-                    createdAt: new Date(debtForm.createdAt || new Date()), 
-                    dueDate: new Date(debtForm.dueDate || new Date()), 
-                    payments: debtForm.payments || [], 
-                    includesVat: debtForm.includesVat ?? true, 
-                    isVatExempt: debtForm.isVatExempt ?? false 
-                } as Debt;
-                if (editingId) {
-                    const saved = await mongoService.updateDebt(newItem);
-                    setDebts(prev => prev.map(d => d.id === editingId ? saved : d));
-                } else {
-                    const saved = await mongoService.createDebt(newItem);
-                    setDebts(prev => [...prev, saved]);
-                }
-            } else if (activeTab === 'RECEIVABLES') {
-                const newItem = { 
-                    ...receivableForm, 
-                    id: editingId || `rec_${Date.now()}`, 
-                    createdAt: new Date(receivableForm.createdAt || new Date()), 
-                    dueDate: new Date(receivableForm.dueDate || new Date()), 
-                    payments: receivableForm.payments || [], 
-                    includesVat: receivableForm.includesVat ?? true, 
-                    isVatExempt: receivableForm.isVatExempt ?? false 
-                } as Receivable;
-                if (editingId) {
-                    const saved = await mongoService.updateReceivable(newItem);
-                    setReceivables(prev => prev.map(r => r.id === editingId ? saved : r));
-                    await refetchReceivables(); // Refresh paginated receivables after update
-                } else {
-                    const saved = await mongoService.createReceivable(newItem);
-                    setReceivables(prev => [...prev, saved]);
-                    await refetchReceivables(); // Refresh paginated receivables after create
-                }
-            } else if (activeTab === 'EQUITY') {
-                if (!equityForm.investorName || !equityForm.amount) { alert('חסרים שדות חובה'); return; }
-                const newItem = { ...equityForm, id: editingId || `eq_${Date.now()}`, date: new Date(equityForm.date || new Date()) } as EquityInvestment;
-                if (editingId) {
-                    const saved = await mongoService.updateEquity(newItem);
-                    setEquity(prev => prev.map(item => item.id === editingId ? saved : item));
-                } else {
-                    const saved = await mongoService.createEquity(newItem);
-                    setEquity(prev => [...prev, saved]);
-                }
+    const handleSaveInternal = async () => {
+        if (activeTab === 'FIXED') {
+            const newItem = { ...fixedForm, id: editingId || `fe_${Date.now()}` } as FixedExpense;
+            if (editingId) {
+                const saved = await mongoService.updateFixedExpense(newItem);
+                setFixedExpenses(prev => prev.map(item => item.id === editingId ? saved : item));
+            } else {
+                const saved = await mongoService.createFixedExpense(newItem);
+                setFixedExpenses(prev => [...prev, saved]);
             }
-            setIsModalOpen(false);
-        } catch (error) {
-            console.error('Error saving to MongoDB:', error);
-            alert('שגיאה בשמירה למונגו. אנא נסה שוב.');
+            // Refetch paginated data if FIXED tab is active
+            if (activeTab === 'FIXED') {
+                refetchFixedActive();
+                refetchFixedHistorical();
+            }
+        } else if (activeTab === 'VARIABLE') {
+            const newItem = { 
+                ...variableForm, 
+                id: editingId || `ve_${Date.now()}`, 
+                date: new Date(variableForm.date || new Date()),
+                paymentMethod: variableForm.paymentMethod || PaymentMethod.BANK_TRANSFER,
+                paymentDetails: variableForm.paymentDetails || '',
+                checks: variableForm.checks || []
+            } as VariableExpense;
+            if (editingId) {
+                const saved = await mongoService.updateVariableExpense(newItem);
+                setVariableExpenses(prev => prev.map(item => item.id === editingId ? saved : item));
+            } else {
+                const saved = await mongoService.createVariableExpense(newItem);
+                setVariableExpenses(prev => [...prev, saved]);
+            }
+            // Refetch paginated data if VARIABLE tab is active
+            if (activeTab === 'VARIABLE') {
+                refetchVariableExpenses();
+            }
+        } else if (activeTab === 'LOANS') {
+            const principal = loanForm.principalAmount || 0;
+            const rate = loanForm.interestRate || 0;
+            const duration = loanForm.durationMonths || 12;
+            const startDate = loanForm.startDate || new Date();
+            const paymentsMadeCount = loanForm.paymentsMade || 0;
+            
+            let schedule = loanForm.schedule || [];
+            const scheduleTotalPrincipal = schedule.reduce((sum, s) => sum + s.principalAmount, 0);
+            const needsSync = schedule.length === 0 || schedule.length !== duration || Math.abs(scheduleTotalPrincipal - principal) > 1.0;
+
+            if (needsSync && principal > 0 && duration > 0) {
+                schedule = generateSpitzerSchedule(principal, rate, duration, startDate, paymentsMadeCount);
+            }
+
+            const newItem = { 
+                ...loanForm, 
+                id: editingId || `ln_${Date.now()}`, 
+                startDate: new Date(loanForm.startDate || new Date()),
+                schedule: schedule,
+                paymentsMade: schedule.filter(s => s.isPaid).length 
+            } as Loan;
+            if (editingId) {
+                const saved = await mongoService.updateLoan(newItem);
+                setLoans(prev => prev.map(l => l.id === editingId ? saved : l));
+            } else {
+                const saved = await mongoService.createLoan(newItem);
+                setLoans(prev => [...prev, saved]);
+            }
+        } else if (activeTab === 'DEBTS') {
+            const newItem = { 
+                ...debtForm, 
+                id: editingId || `db_${Date.now()}`, 
+                createdAt: new Date(debtForm.createdAt || new Date()), 
+                dueDate: new Date(debtForm.dueDate || new Date()), 
+                payments: debtForm.payments || [], 
+                includesVat: debtForm.includesVat ?? true, 
+                isVatExempt: debtForm.isVatExempt ?? false 
+            } as Debt;
+            if (editingId) {
+                const saved = await mongoService.updateDebt(newItem);
+                setDebts(prev => prev.map(d => d.id === editingId ? saved : d));
+            } else {
+                const saved = await mongoService.createDebt(newItem);
+                setDebts(prev => [...prev, saved]);
+            }
+        } else if (activeTab === 'RECEIVABLES') {
+            const newItem = { 
+                ...receivableForm, 
+                id: editingId || `rec_${Date.now()}`, 
+                createdAt: new Date(receivableForm.createdAt || new Date()), 
+                dueDate: new Date(receivableForm.dueDate || new Date()), 
+                payments: receivableForm.payments || [], 
+                includesVat: receivableForm.includesVat ?? true, 
+                isVatExempt: receivableForm.isVatExempt ?? false 
+            } as Receivable;
+            if (editingId) {
+                const saved = await mongoService.updateReceivable(newItem);
+                setReceivables(prev => prev.map(r => r.id === editingId ? saved : r));
+                await refetchReceivables(); // Refresh paginated receivables after update
+            } else {
+                const saved = await mongoService.createReceivable(newItem);
+                setReceivables(prev => [...prev, saved]);
+                await refetchReceivables(); // Refresh paginated receivables after create
+            }
+        } else if (activeTab === 'EQUITY') {
+            if (!equityForm.investorName || !equityForm.amount) { 
+                throw new Error('חסרים שדות חובה'); 
+            }
+            const newItem = { ...equityForm, id: editingId || `eq_${Date.now()}`, date: new Date(equityForm.date || new Date()) } as EquityInvestment;
+            if (editingId) {
+                const saved = await mongoService.updateEquity(newItem);
+                setEquity(prev => prev.map(item => item.id === editingId ? saved : item));
+            } else {
+                const saved = await mongoService.createEquity(newItem);
+                setEquity(prev => [...prev, saved]);
+            }
         }
+        setIsModalOpen(false);
     };
+
+    const { execute: handleSave, isLoading: isSaving } = useAsyncAction(handleSaveInternal, {
+        preventDoubleClick: true,
+        onError: (error) => {
+            console.error('Error saving to MongoDB:', error);
+            alert(`שגיאה בשמירה למונגו: ${error.message || 'שגיאה לא ידועה'}`);
+        }
+    });
 
     const FixedExpensesTable = ({ items, title, isHistorical = false }: { items: FixedExpense[], title: string, isHistorical?: boolean }) => (
         <div className={isHistorical ? "mt-12 pt-8 border-t border-slate-200 opacity-70" : ""}>
@@ -3629,8 +3635,30 @@ const FinancePage: React.FC<FinancePageProps> = ({
                             </div>
                         )}
                         <div className="flex justify-end pt-6 border-t mt-4 gap-2">
-                            <button onClick={() => setIsModalOpen(false)} className="px-4 py-2 bg-slate-100 text-slate-700 rounded hover:bg-slate-200">ביטול</button>
-                            <button onClick={handleSave} className="px-6 py-2 bg-primary text-white rounded shadow hover:bg-indigo-700 font-bold">שמור שינויים</button>
+                            <button 
+                                onClick={() => setIsModalOpen(false)} 
+                                disabled={isSaving}
+                                className="px-4 py-2 bg-slate-100 text-slate-700 rounded hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                ביטול
+                            </button>
+                            <button 
+                                onClick={() => handleSave()} 
+                                disabled={isSaving}
+                                className="px-6 py-2 bg-primary text-white rounded shadow hover:bg-indigo-700 font-bold disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                            >
+                                {isSaving ? (
+                                    <>
+                                        <svg className="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                        </svg>
+                                        שומר...
+                                    </>
+                                ) : (
+                                    'שמור שינויים'
+                                )}
+                            </button>
                         </div>
                     </div>
                 </Modal>

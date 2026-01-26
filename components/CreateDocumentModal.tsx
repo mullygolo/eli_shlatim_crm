@@ -25,6 +25,8 @@ interface CreateDocumentModalProps {
     mode?: 'full' | 'from-document';
     /** כאשר mode === 'from-document': סוג המסמך שממנו נפתח (estimate → FROM_ESTIMATE, אחרת → FROM_DOCUMENT) */
     fromDocumentType?: 'invoice' | 'receipt' | 'credit' | 'estimate';
+    /** מצב טעינה - משבית את הכפתור בזמן יצירת מסמך */
+    isLoading?: boolean;
 }
 
 const FULL_TYPES: { value: GreenInvoiceDocumentType; label: string; description: string; disabled?: boolean }[] = [
@@ -51,7 +53,7 @@ const FROM_ESTIMATE_TYPES: { value: GreenInvoiceDocumentType; label: string; des
     { value: 'receipt', label: 'קבלה', description: 'הנפקת קבלה' }
 ];
 
-const CreateDocumentModal: React.FC<CreateDocumentModalProps> = ({ order, customer, onClose, onCreate, mode = 'full', fromDocumentType, balanceDue = 0 }) => {
+const CreateDocumentModal: React.FC<CreateDocumentModalProps> = ({ order, customer, onClose, onCreate, mode = 'full', fromDocumentType, balanceDue = 0, isLoading = false }) => {
     const [selectedType, setSelectedType] = useState<GreenInvoiceDocumentType | ''>('');
     const [selectedMethod, setSelectedMethod] = useState<'api' | 'window'>('api');
     const [receiptPayments, setReceiptPayments] = useState<ReceiptPaymentItem[]>([]);
@@ -273,10 +275,20 @@ const CreateDocumentModal: React.FC<CreateDocumentModalProps> = ({ order, custom
                     <button
                         type="button"
                         onClick={handleCreate}
-                        disabled={!selectedType}
-                        className="px-4 py-2 bg-primary text-white rounded-md hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                        disabled={!selectedType || isLoading}
+                        className="px-4 py-2 bg-primary text-white rounded-md hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
                     >
-                        צור מסמך
+                        {isLoading ? (
+                            <>
+                                <svg className="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                </svg>
+                                יוצר...
+                            </>
+                        ) : (
+                            'צור מסמך'
+                        )}
                     </button>
                 </div>
             </div>

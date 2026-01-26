@@ -2459,12 +2459,16 @@ export async function initializeAttendanceIndexes(): Promise<void> {
         const collection = database.collection<AttendanceRecord>('attendanceRecords');
         
         // Unique compound index on (employeeId, dateString). One record per employee per day.
-        // sparse: true skips documents with missing/null dateString (legacy data), avoiding
-        // E11000 duplicate key on (employeeId, null).
+        // Partial: only index docs with dateString present and non-null (legacy rows with
+        // dateString: null are excluded, avoiding E11000 on (employeeId, null)).
         try {
             await collection.createIndex(
                 { employeeId: 1, dateString: 1 },
-                { unique: true, sparse: true, name: 'unique_attendance_employee_date' }
+                {
+                    unique: true,
+                    name: 'unique_attendance_employee_date',
+                    partialFilterExpression: { dateString: { $exists: true, $ne: null } }
+                }
             );
             console.log('Attendance unique index created successfully');
         } catch (error: any) {

@@ -2458,28 +2458,22 @@ export async function initializeAttendanceIndexes(): Promise<void> {
         const database = await getDb();
         const collection = database.collection<AttendanceRecord>('attendanceRecords');
         
-        // Create unique compound index on (employeeId, dateString) for active records only
-        // This prevents duplicate active clock-ins for the same employee on the same day
-        // Note: We'll use a partial index that only applies to records without clockOut
+        // Unique compound index on (employeeId, dateString). One record per employee per day.
+        // Prevents duplicate clock-ins. Partial index with $exists: false is not supported
+        // in all MongoDB environments (ERR $not in partial filter).
         try {
             await collection.createIndex(
                 { employeeId: 1, dateString: 1 },
-                { 
-                    unique: true,
-                    partialFilterExpression: { clockOut: { $exists: false } },
-                    name: 'unique_active_attendance_per_day'
-                }
+                { unique: true, name: 'unique_attendance_employee_date' }
             );
             console.log('Attendance unique index created successfully');
         } catch (error: any) {
-            // Index might already exist, which is fine
             if (error.code !== 85 && error.codeName !== 'IndexOptionsConflict') {
                 console.warn('Could not create attendance index (might already exist):', error.message);
             }
         }
     } catch (error) {
         console.error('Error initializing attendance indexes:', error);
-        // Don't throw - this is not critical for operation
     }
 }
 

@@ -1,9 +1,10 @@
 
-import React, { useState } from 'react';
-import { OrderStatusConfiguration, Employee, AttendanceRecord } from '../types';
+import React, { useState, useRef, useEffect } from 'react';
+import { OrderStatusConfiguration, Employee, AttendanceRecord, Order } from '../types';
 import { PlusIcon, EditIcon, DeleteIcon, LockIcon, SettingsIcon } from './icons';
 import Modal from './Modal';
 import EmployeesPage from './EmployeesPage';
+import VatSettingsSection from './VatSettingsSection';
 
 interface SettingsPageProps {
     statusConfigs: OrderStatusConfiguration[];
@@ -12,11 +13,13 @@ interface SettingsPageProps {
     employees: Employee[];
     setEmployees: React.Dispatch<React.SetStateAction<Employee[]>>;
     vatRate: number;
-    setVatRate: React.Dispatch<React.SetStateAction<number>>;
+    setVatRate: (rate: number, reason?: string) => Promise<void>;
     systemMessage: string;
-    setSystemMessage: React.Dispatch<React.SetStateAction<string>>;
+    setSystemMessage: (message: string) => Promise<void>;
     attendanceRecords: AttendanceRecord[];
     setAttendanceRecords: React.Dispatch<React.SetStateAction<AttendanceRecord[]>>;
+    orders: Order[];
+    vatRateHistory?: any[];
 }
 
 const StatusForm: React.FC<{
@@ -234,11 +237,20 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
     systemMessage, 
     setSystemMessage,
     attendanceRecords,
-    setAttendanceRecords
+    setAttendanceRecords,
+    orders,
+    vatRateHistory
 }) => {
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingConfig, setEditingConfig] = useState<OrderStatusConfiguration | null>(null);
     const [activeTab, setActiveTab] = useState<'statuses' | 'employees' | 'general'>('statuses');
+    const [localSystemMessage, setLocalSystemMessage] = useState(systemMessage);
+    const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+    
+    // Update local state when prop changes
+    useEffect(() => {
+        setLocalSystemMessage(systemMessage);
+    }, [systemMessage]);
 
     const handleAdd = () => {
         setEditingConfig(null);
@@ -430,27 +442,12 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
 
             {activeTab === 'general' && (
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                    <div className="bg-white p-6 rounded-lg shadow-md border border-slate-200">
-                        <h3 className="text-lg font-bold text-slate-800 mb-4">הגדרות מע"מ</h3>
-                        <div>
-                            <label className="block text-sm font-medium text-slate-700 mb-1">אחוז מע"מ (%)</label>
-                            <div className="flex items-center gap-2">
-                                <input 
-                                    type="number" 
-                                    min="0" 
-                                    max="100"
-                                    step="0.1"
-                                    value={vatRate} 
-                                    onChange={(e) => setVatRate(parseFloat(e.target.value) || 0)} 
-                                    className="block w-24 rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" 
-                                />
-                                <span className="text-slate-500 font-medium">%</span>
-                            </div>
-                            <p className="text-xs text-slate-500 mt-2 bg-blue-50 p-2 rounded text-blue-700 border border-blue-100">
-                                <strong>שים לב:</strong> שינוי ערך זה ישפיע מיידית על כל החישובים במערכת המציגים סכומים כולל מע"מ.
-                            </p>
-                        </div>
-                    </div>
+                    <VatSettingsSection
+                        vatRate={vatRate}
+                        onVatRateChange={setVatRate}
+                        orders={orders}
+                        vatRateHistory={vatRateHistory}
+                    />
 
                     <div className="bg-white p-6 rounded-lg shadow-md border border-slate-200">
                         <h3 className="text-lg font-bold text-slate-800 mb-4">הודעות מערכת</h3>
@@ -458,11 +455,47 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
                             <label className="block text-sm font-medium text-slate-700 mb-1">טקסט הודעה ללוח הבקרה</label>
                             <textarea
                                 rows={4}
-                                value={systemMessage}
-                                onChange={(e) => setSystemMessage(e.target.value)}
+                                value={localSystemMessage}
+                                onChange={(e) => {
+                                    const newValue = e.target.value;
+                                    // Update local state immediately for responsive UI
+                                    setLocalSystemMessage(newValue);
+                                    
+                                    // Clear existing timeout
+                                    if (saveTimeoutRef.current) {
+                                        clearTimeout(saveTimeoutRef.current);
+                                    }
+                                    
+                                    // Save to MongoDB after 1 second of no typing (debounce)
+                                    saveTimeoutRef.current = setTimeout(async () => {
+                                        try {
+                                            await setSystemMessage(newValue);
+                                            console.log('System message saved successfully');
+                                        } catch (err) {
+                                            console.error('Error saving system message:', err);
+                                            alert('שגיאה בשמירת הודעת המערכת. נסה שוב.');
+                                        }
+                                    }, 1000);
+                                }}
+                                onBlur={async () => {
+                                    // Save immediately when user leaves the field
+                                    if (saveTimeoutRef.current) {
+                                        clearTimeout(saveTimeoutRef.current);
+                                    }
+                                    if (localSystemMessage !== systemMessage) {
+                                        try {
+                                            await setSystemMessage(localSystemMessage);
+                                            console.log('System message saved on blur');
+                                        } catch (err) {
+                                            console.error('Error saving system message:', err);
+                                            alert('שגיאה בשמירת הודעת המערכת. נסה שוב.');
+                                        }
+                                    }
+                                }}
                                 className="block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm"
                                 placeholder="הזן כאן הודעה שתופיע לכל המשתמשים בראש לוח הבקרה..."
                             />
+                            <p className="text-xs text-slate-500 mt-1">ההודעה תישמר אוטומטית כשתסיים להקליד</p>
                         </div>
                     </div>
                 </div>

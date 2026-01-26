@@ -36,6 +36,7 @@ import SettingsPage from './components/SettingsPage';
 import FinancePage from './components/FinancePage';
 import AttendancePage from './components/AttendancePage';
 import PriceListPage from './components/PriceListPage';
+import CallCenterPage from './components/CallCenterPage';
 
 // A map for page titles
 export const PAGE_TITLES: Record<Page, string> = {
@@ -53,6 +54,7 @@ export const PAGE_TITLES: Record<Page, string> = {
     Finance: 'דוחות / תקציב',
     Attendance: 'נוכחות ושכר',
     PriceList: 'מחירון',
+    CallCenter: 'מרכזייה',
 };
 
 const App: React.FC = () => {
@@ -67,6 +69,7 @@ const App: React.FC = () => {
     const [statusConfigs, setStatusConfigs] = useState<OrderStatusConfiguration[]>([]);
     const [vatRate, setVatRate] = useState<number>(18);
     const [systemMessage, setSystemMessage] = useState<string>('ברוכים הבאים למערכת הניהול! נא להקפיד על עדכון סטטוסים בסוף כל יום.');
+    const [vatRateHistory, setVatRateHistory] = useState<any[]>([]);
 
     // Finance State
     const [fixedExpenses, setFixedExpenses] = useState<FixedExpense[]>([]);
@@ -133,45 +136,60 @@ const App: React.FC = () => {
     // Load all data from MongoDB on mount
     useEffect(() => {
         const loadAllData = async () => {
-            try {
-                setIsLoading(true);
-                setError(null);
-                
-                // Load all data in parallel
-                const [
-                    customersData,
-                    ordersData,
-                    suppliersData,
-                    employeesData,
-                    activitiesData,
-                    statusConfigsData,
-                    fixedExpensesData,
-                    variableExpensesData,
-                    loansData,
-                    debtsData,
-                    receivablesData,
-                    equityData,
-                    attendanceRecordsData,
-                    manualEventsData,
-                    settingsData
-                ] = await Promise.all([
-                    getCustomers(),
-                    getOrders(),
-                    getSuppliers(),
-                    getEmployees(),
-                    getActivities(),
-                    getStatusConfigs(),
-                    getFixedExpenses(),
-                    getVariableExpenses(),
-                    getLoans(),
-                    getDebts(),
-                    getReceivables(),
-                    getEquity(),
-                    getAttendanceRecords(),
-                    getManualEvents(),
-                    getSettings()
-                ]);
+            setIsLoading(true);
+            setError(null);
 
+            const entries: { label: string; fn: () => Promise<any> }[] = [
+                { label: 'לקוחות', fn: getCustomers },
+                { label: 'הזמנות', fn: getOrders },
+                { label: 'ספקים', fn: getSuppliers },
+                { label: 'עובדים', fn: getEmployees },
+                { label: 'פעילויות', fn: getActivities },
+                { label: 'סטטוסים', fn: getStatusConfigs },
+                { label: 'הוצאות קבועות', fn: getFixedExpenses },
+                { label: 'הוצאות משתנות', fn: getVariableExpenses },
+                { label: 'הלוואות', fn: getLoans },
+                { label: 'חובות', fn: getDebts },
+                { label: 'לקוחות לפתיחה', fn: getReceivables },
+                { label: 'הון', fn: getEquity },
+                { label: 'נוכחות', fn: getAttendanceRecords },
+                { label: 'אירועים', fn: getManualEvents },
+                { label: 'הגדרות', fn: getSettings },
+            ];
+
+            const results = await Promise.allSettled(entries.map((e) => e.fn()));
+            const failed = results
+                .map((r, i) => (r.status === 'rejected' ? { label: entries[i].label, err: (r as PromiseRejectedResult).reason } : null))
+                .filter((x): x is { label: string; err: unknown } => x !== null);
+
+            if (failed.length > 0) {
+                const msg = failed.map((f) => f.label).join(', ');
+                const detail = failed[0].err instanceof Error ? failed[0].err.message : String(failed[0].err);
+                console.error('Error loading data:', failed);
+                setError(`שגיאה בטעינת הנתונים. אנא רענן את הדף.\n\nנכשל: ${msg}\n\nפרטים: ${detail}`);
+                setIsLoading(false);
+                return;
+            }
+
+            const [
+                customersData,
+                ordersData,
+                suppliersData,
+                employeesData,
+                activitiesData,
+                statusConfigsData,
+                fixedExpensesData,
+                variableExpensesData,
+                loansData,
+                debtsData,
+                receivablesData,
+                equityData,
+                attendanceRecordsData,
+                manualEventsData,
+                settingsData
+            ] = (results as PromiseFulfilledResult<any>[]).map((r) => r.value);
+
+            try {
                 setCustomers(customersData);
                 setOrders(ordersData);
                 setSuppliers(suppliersData);
@@ -186,15 +204,23 @@ const App: React.FC = () => {
                 setEquity(equityData);
                 setAttendanceRecords(attendanceRecordsData);
                 setManualEvents(manualEventsData);
-                
-                // Update settings
+
                 setVatRate(settingsData.vatRate);
                 setMonthlyGoal(settingsData.monthlyGoal);
                 setSystemMessage(settingsData.systemMessage);
                 setPayrollOverrides(settingsData.payrollOverrides);
+                if (settingsData.vatRateHistory && Array.isArray(settingsData.vatRateHistory) && settingsData.vatRateHistory.length > 0) {
+                    const historyWithDates = settingsData.vatRateHistory.map((entry: any) => ({
+                        ...entry,
+                        changedAt: entry.changedAt ? (entry.changedAt instanceof Date ? entry.changedAt : new Date(entry.changedAt)) : new Date()
+                    }));
+                    setVatRateHistory(historyWithDates);
+                } else {
+                    setVatRateHistory([]);
+                }
             } catch (err) {
-                console.error('Error loading data:', err);
-                setError('שגיאה בטעינת הנתונים. אנא רענן את הדף.');
+                console.error('Error applying loaded data:', err);
+                setError(err instanceof Error ? err.message : String(err));
             } finally {
                 setIsLoading(false);
             }
@@ -412,9 +438,13 @@ const App: React.FC = () => {
                             setSystemMessage={setSystemMessageWithSync}
                             attendanceRecords={attendanceRecords}
                             setAttendanceRecords={setAttendanceRecordsWithSync}
+                            orders={orders}
+                            vatRateHistory={vatRateHistory}
                         />;
             case 'PriceList':
                 return <PriceListPage suppliers={suppliers} />;
+            case 'CallCenter':
+                return <CallCenterPage />;
             default:
                 return <Dashboard customers={customers} orders={orders} activities={activities} monthlyGoal={monthlyGoal} setMonthlyGoal={setMonthlyGoalWithSync} employees={employees} onNavigateToOrder={handleNavigateToOrder} statusConfigs={statusConfigs} vatRate={vatRate} systemMessage={systemMessage} manualEvents={manualEvents} addManualEvent={addManualEvent} />;
         }
@@ -674,15 +704,48 @@ const App: React.FC = () => {
         }
     }, []);
 
-    const setVatRateWithSync = useCallback(async (rate: number) => {
+    const setVatRateWithSync = useCallback(async (rate: number, reason?: string) => {
         setVatRate(rate);
         try {
             const settings = await getSettings();
-            await updateSettings({ ...settings, vatRate: rate });
+            const updatedSettings = await updateSettings(
+                { ...settings, vatRate: rate }, 
+                user?.name || user?.id || 'מערכת',
+                reason
+            );
+            
+            console.log('setVatRateWithSync - updatedSettings:', {
+                vatRate: updatedSettings.vatRate,
+                hasHistory: !!updatedSettings.vatRateHistory,
+                historyLength: updatedSettings.vatRateHistory?.length || 0,
+                history: updatedSettings.vatRateHistory
+            });
+            
+            // Reload settings from DB to ensure we have the latest history
+            const freshSettings = await getSettings();
+            console.log('setVatRateWithSync - freshSettings:', {
+                vatRate: freshSettings.vatRate,
+                hasHistory: !!freshSettings.vatRateHistory,
+                historyLength: freshSettings.vatRateHistory?.length || 0,
+                history: freshSettings.vatRateHistory
+            });
+            
+            // Ensure dates are properly deserialized
+            if (freshSettings.vatRateHistory && Array.isArray(freshSettings.vatRateHistory) && freshSettings.vatRateHistory.length > 0) {
+                const historyWithDates = freshSettings.vatRateHistory.map((entry: any) => ({
+                    ...entry,
+                    changedAt: entry.changedAt ? (entry.changedAt instanceof Date ? entry.changedAt : new Date(entry.changedAt)) : new Date()
+                }));
+                setVatRateHistory(historyWithDates);
+                console.log('Updated VAT rate history from fresh settings:', historyWithDates.length, 'entries', historyWithDates[0]);
+            } else {
+                setVatRateHistory([]);
+                console.log('No VAT rate history in fresh settings');
+            }
         } catch (err) {
             console.error('Error updating VAT rate:', err);
         }
-    }, []);
+    }, [user]);
 
     const setSystemMessageWithSync = useCallback(async (message: string) => {
         setSystemMessage(message);
@@ -718,9 +781,9 @@ const App: React.FC = () => {
     if (error) {
         return (
             <div className="flex h-screen bg-light-bg items-center justify-center" dir="rtl">
-                <div className="text-center bg-red-50 border border-red-200 rounded-lg p-6 max-w-md">
+                <div className="text-center bg-red-50 border border-red-200 rounded-lg p-6 max-w-lg max-h-[80vh] overflow-auto">
                     <p className="text-red-800 font-bold mb-2">שגיאה בטעינת הנתונים</p>
-                    <p className="text-red-600 mb-4">{error}</p>
+                    <p className="text-red-600 mb-4 whitespace-pre-line text-start">{error}</p>
                     <button
                         onClick={() => window.location.reload()}
                         className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700"

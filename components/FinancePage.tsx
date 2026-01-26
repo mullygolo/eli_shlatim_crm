@@ -1,5 +1,5 @@
 
-import React, { useState, useMemo, useEffect, Component, ErrorInfo } from 'react';
+import React, { useState, useMemo, useEffect, useCallback, Component, ErrorInfo } from 'react';
 import { FixedExpense, VariableExpense, Loan, EquityInvestment, Debt, Receivable, ReceivablePayment, PaymentMethod, DebtPayment, Order, TransactionStatus, CustomerPayment, SupplierPayment, LineItemUnit, Attachment, PaymentStatusHistory, AmortizationEntry, Employee, AttendanceRecord, OrderStatusConfiguration } from '../types';
 import { PlusIcon, EditIcon, DeleteIcon, BankIcon, TrendingUpIcon, LogIcon, CashIcon, ClockIcon, LockIcon, DownloadIcon, ImportIcon } from './icons';
 import Modal from './Modal';
@@ -884,7 +884,49 @@ const CheckCenter: React.FC<{
     const [smartFilter, setSmartFilter] = useState<'ACTIVE' | 'URGENT' | 'ARCHIVE' | 'ALL'>('ACTIVE');
     const [searchQuery, setSearchQuery] = useState('');
     const [selectedCheck, setSelectedCheck] = useState<{check: AggregatedCheck, viewOnly: boolean} | null>(null);
+    
+    // Pagination states
+    const [paginatedChecks, setPaginatedChecks] = useState<AggregatedCheck[]>([]);
+    const [checksCurrentPage, setChecksCurrentPage] = useState(1);
+    const [checksPageSize, setChecksPageSize] = useState(50);
+    const [checksTotalCount, setChecksTotalCount] = useState(0);
+    const [loadingChecks, setLoadingChecks] = useState(false);
+    const [checksStats, setChecksStats] = useState({ pending: 0, bounced: 0, overdue: 0, filteredTotal: 0 });
 
+    // Refetch paginated checks
+    const refetchChecks = useCallback(async () => {
+        try {
+            setLoadingChecks(true);
+            const filters: any = {};
+            if (tab) filters.tab = tab;
+            if (smartFilter) filters.smartFilter = smartFilter;
+            if (searchQuery) filters.searchQuery = searchQuery;
+            
+            const result = await mongoService.getChecksPaginated(filters, checksCurrentPage, checksPageSize);
+            
+            // Convert server checks to AggregatedCheck format (convert dates)
+            const convertedChecks: AggregatedCheck[] = result.checks.map((c: any) => ({
+                ...c,
+                date: new Date(c.date),
+                repaymentDate: new Date(c.repaymentDate)
+            }));
+            
+            setPaginatedChecks(convertedChecks);
+            setChecksTotalCount(result.totalCount);
+            setChecksStats(result.stats);
+        } catch (error) {
+            console.error('Error loading paginated checks:', error);
+        } finally {
+            setLoadingChecks(false);
+        }
+    }, [tab, smartFilter, searchQuery, checksCurrentPage, checksPageSize]);
+    
+    // Load paginated checks when filters or pagination change
+    useEffect(() => {
+        refetchChecks();
+    }, [refetchChecks]);
+
+    // Keep old allChecks for backward compatibility (but we won't use it for display)
     const allChecks = useMemo<AggregatedCheck[]>(() => {
         const rawItems: AggregatedCheck[] = [];
         
@@ -1044,64 +1086,8 @@ const CheckCenter: React.FC<{
         return [...incoming, ...Array.from(groupedMap.values())];
     }, [orders, fixedExpenses, variableExpenses, debts, receivables]);
 
-    const filteredChecks = useMemo(() => {
-        const today = new Date();
-        today.setHours(0,0,0,0);
-
-        return allChecks
-            .filter(c => c.type === tab)
-            .filter(c => {
-                // If search query is present, it acts as a global search (ignores lifecycle filters)
-                if (searchQuery.trim()) {
-                    const q = searchQuery.toLowerCase();
-                    return c.reference.toLowerCase().includes(q) || c.entityName.toLowerCase().includes(q);
-                }
-
-                const isActive = ['PENDING', 'BOUNCED', 'IN_BANK_CUSTODY'].includes(c.status);
-                const isOverdue = isActive && c.repaymentDate < today;
-                const isBounced = c.status === 'BOUNCED';
-                const isArchived = ['CLEARED', 'CANCELED', 'RETURNED'].includes(c.status);
-
-                if (smartFilter === 'ACTIVE') return isActive;
-                if (smartFilter === 'URGENT') return isBounced || isOverdue;
-                if (smartFilter === 'ARCHIVE') return isArchived;
-                return true; // ALL
-            })
-            .sort((a, b) => {
-                // PRIORITY SORTING:
-                // 1. Special Case: ARCHIVE View - Newest Cleared/Canceled First (Descending)
-                if (smartFilter === 'ARCHIVE') {
-                    return b.repaymentDate.getTime() - a.repaymentDate.getTime();
-                }
-
-                // 2. ACTIVE/URGENT/ALL/SEARCH Views - Action Priority
-                const isBouncedA = a.status === 'BOUNCED';
-                const isBouncedB = b.status === 'BOUNCED';
-                if (isBouncedA && !isBouncedB) return -1;
-                if (!isBouncedA && isBouncedB) return 1;
-
-                const isOverdueA = ['PENDING', 'IN_BANK_CUSTODY'].includes(a.status) && a.repaymentDate < today;
-                const isOverdueB = ['PENDING', 'IN_BANK_CUSTODY'].includes(b.status) && b.repaymentDate < today;
-                if (isOverdueA && !isOverdueB) return -1;
-                if (!isOverdueA && isOverdueB) return 1;
-
-                // For future/normal ones, sort by date (Ascending - nearest first)
-                return a.repaymentDate.getTime() - b.repaymentDate.getTime();
-            });
-    }, [allChecks, tab, smartFilter, searchQuery]);
-
-    const stats = useMemo(() => {
-        const relevant = allChecks.filter(c => c.type === tab);
-        const today = new Date();
-        today.setHours(0,0,0,0);
-
-        const pending = relevant.filter(c => ['PENDING', 'IN_BANK_CUSTODY'].includes(c.status)).reduce((s, c) => s + c.amount, 0);
-        const bounced = relevant.filter(c => c.status === 'BOUNCED').reduce((s, c) => s + c.amount, 0);
-        const overdue = relevant.filter(c => ['PENDING', 'IN_BANK_CUSTODY'].includes(c.status) && c.repaymentDate < today).reduce((s, c) => s + c.amount, 0);
-        const filteredTotal = filteredChecks.reduce((s, c) => s + c.amount, 0);
-        
-        return { pending, bounced, overdue, filteredTotal };
-    }, [allChecks, tab, filteredChecks]);
+    // Use stats from server
+    const stats = checksStats;
 
     const handleUpdateCheckStatus = (check: AggregatedCheck, newStatus: TransactionStatus, metadata?: any) => {
         if (check.status === newStatus) return;
@@ -1194,6 +1180,9 @@ const CheckCenter: React.FC<{
         setReceivables(updatedReceivables);
         
         addActivity(`סטטוס צ'ק ${check.reference} (${check.type === 'INCOMING' ? 'נכנס' : 'יוצא'}) עודכן ל-${newStatus}`);
+        
+        // Refetch checks to reflect the updated status
+        refetchChecks();
     };
 
     const getStatusBadge = (status: TransactionStatus) => {
@@ -1231,8 +1220,8 @@ const CheckCenter: React.FC<{
 
             <div className="bg-white rounded-lg shadow-sm border border-slate-200 overflow-hidden">
                 <div className="flex border-b border-slate-200 px-4 pt-2 bg-slate-50/50">
-                    <button onClick={() => setTab('INCOMING')} className={`px-4 py-3 font-black text-sm border-b-2 transition-colors ${tab === 'INCOMING' ? 'border-green-500 text-green-700' : 'border-transparent text-slate-500'}`}>צ'קים נכנסים</button>
-                    <button onClick={() => setTab('OUTGOING')} className={`px-4 py-3 font-black text-sm border-b-2 transition-colors ${tab === 'OUTGOING' ? 'border-red-500 text-red-700' : 'border-transparent text-slate-500'}`}>צ'קים יוצאים</button>
+                    <button onClick={() => { setTab('INCOMING'); setChecksCurrentPage(1); }} className={`px-4 py-3 font-black text-sm border-b-2 transition-colors ${tab === 'INCOMING' ? 'border-green-500 text-green-700' : 'border-transparent text-slate-500'}`}>צ'קים נכנסים</button>
+                    <button onClick={() => { setTab('OUTGOING'); setChecksCurrentPage(1); }} className={`px-4 py-3 font-black text-sm border-b-2 transition-colors ${tab === 'OUTGOING' ? 'border-red-500 text-red-700' : 'border-transparent text-slate-500'}`}>צ'קים יוצאים</button>
                 </div>
                 
                 {/* SMART LIFECYCLE FILTERS */}
@@ -1243,7 +1232,7 @@ const CheckCenter: React.FC<{
                             {(['ACTIVE', 'URGENT', 'ARCHIVE', 'ALL'] as const).map(f => (
                                 <button 
                                     key={f} 
-                                    onClick={() => { setSmartFilter(f); setSearchQuery(''); }}
+                                    onClick={() => { setSmartFilter(f); setSearchQuery(''); setChecksCurrentPage(1); }}
                                     className={`flex-1 text-xs font-black py-2.5 px-2 rounded-md transition-all ${smartFilter === f ? 'bg-white text-primary shadow-sm ring-1 ring-black/5' : 'text-slate-500 hover:text-slate-700'}`}
                                 >
                                     {f === 'ACTIVE' ? 'בתהליך (פתוחים)' : f === 'URGENT' ? 'בטיפול דחוף' : f === 'ARCHIVE' ? 'ארכיון (היסטוריה)' : 'הכל'}
@@ -1263,7 +1252,7 @@ const CheckCenter: React.FC<{
                                 type="text" 
                                 placeholder="חפש מספר צ'ק, ספק או לקוח..." 
                                 value={searchQuery}
-                                onChange={e => setSearchQuery(e.target.value)}
+                                onChange={e => { setSearchQuery(e.target.value); setChecksCurrentPage(1); }}
                                 className="w-full text-sm border-slate-300 rounded-lg focus:ring-primary focus:border-primary p-2.5 pl-10 shadow-sm"
                             />
                             <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-300">
@@ -1279,7 +1268,17 @@ const CheckCenter: React.FC<{
                             <tr><th className="px-6 py-4">תאריך פירעון</th><th className="px-6 py-4">מספר צ'ק</th><th className="px-6 py-4">משויך / גורם</th><th className="px-6 py-4">סכום</th><th className="px-6 py-4">סטטוס</th><th className="px-6 py-4 text-left">פעולות</th></tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100">
-                            {filteredChecks.map(check => {
+                            {loadingChecks && (
+                                <tr>
+                                    <td colSpan={6} className="px-6 py-32 text-center">
+                                        <div className="flex flex-col items-center gap-4 text-slate-400">
+                                            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary"></div>
+                                            <p className="text-sm font-medium">טוען צ'קים...</p>
+                                        </div>
+                                    </td>
+                                </tr>
+                            )}
+                            {!loadingChecks && paginatedChecks.map(check => {
                                 const today = new Date();
                                 today.setHours(0,0,0,0);
                                 const isOverdue = ['PENDING', 'IN_BANK_CUSTODY'].includes(check.status) && check.repaymentDate < today;
@@ -1311,7 +1310,7 @@ const CheckCenter: React.FC<{
                                     </tr>
                                 );
                             })}
-                            {filteredChecks.length === 0 && (
+                            {!loadingChecks && paginatedChecks.length === 0 && (
                                 <tr>
                                     <td colSpan={6} className="px-6 py-32 text-center">
                                         <div className="flex flex-col items-center gap-4 text-slate-400 opacity-60">
@@ -1327,6 +1326,66 @@ const CheckCenter: React.FC<{
                         </tbody>
                     </table>
                 </div>
+                
+                {/* Pagination Controls */}
+                {checksTotalCount > 0 && (
+                    <div className="p-4 border-t border-slate-200 bg-white flex flex-col md:flex-row items-center justify-between gap-4">
+                        <div className="text-sm text-slate-600">
+                            מציג {((checksCurrentPage - 1) * checksPageSize) + 1} - {Math.min(checksCurrentPage * checksPageSize, checksTotalCount)} מתוך {checksTotalCount} צ'קים
+                        </div>
+                        <div className="flex items-center gap-4">
+                            <div className="flex items-center gap-2">
+                                <label className="text-xs text-slate-600">פריטים לעמוד:</label>
+                                <select 
+                                    value={checksPageSize}
+                                    onChange={(e) => {
+                                        setChecksPageSize(Number(e.target.value));
+                                        setChecksCurrentPage(1);
+                                    }}
+                                    className="border border-slate-300 rounded-md px-2 py-1 text-sm focus:ring-primary focus:border-primary"
+                                >
+                                    <option value={25}>25</option>
+                                    <option value={50}>50</option>
+                                    <option value={100}>100</option>
+                                    <option value={200}>200</option>
+                                </select>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <button 
+                                    onClick={() => setChecksCurrentPage(1)}
+                                    disabled={checksCurrentPage === 1 || loadingChecks}
+                                    className="px-3 py-1.5 border border-slate-300 rounded-md text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                    ראשון
+                                </button>
+                                <button 
+                                    onClick={() => setChecksCurrentPage(prev => Math.max(1, prev - 1))}
+                                    disabled={checksCurrentPage === 1 || loadingChecks}
+                                    className="px-3 py-1.5 border border-slate-300 rounded-md text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                    קודם
+                                </button>
+                                <span className="px-3 py-1.5 text-sm font-medium text-slate-700">
+                                    עמוד {checksCurrentPage} מתוך {Math.ceil(checksTotalCount / checksPageSize) || 1}
+                                </span>
+                                <button 
+                                    onClick={() => setChecksCurrentPage(prev => Math.min(Math.ceil(checksTotalCount / checksPageSize) || 1, prev + 1))}
+                                    disabled={checksCurrentPage >= Math.ceil(checksTotalCount / checksPageSize) || loadingChecks}
+                                    className="px-3 py-1.5 border border-slate-300 rounded-md text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                    הבא
+                                </button>
+                                <button 
+                                    onClick={() => setChecksCurrentPage(Math.ceil(checksTotalCount / checksPageSize) || 1)}
+                                    disabled={checksCurrentPage >= Math.ceil(checksTotalCount / checksPageSize) || loadingChecks}
+                                    className="px-3 py-1.5 border border-slate-300 rounded-md text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                    אחרון
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
             </div>
             {selectedCheck && <CheckActionModal check={selectedCheck.check} onClose={() => setSelectedCheck(null)} onUpdateStatus={handleUpdateCheckStatus} viewOnlyHistory={selectedCheck.viewOnly} />}
         </div>
@@ -1440,6 +1499,26 @@ const FinancePage: React.FC<FinancePageProps> = ({
 
     const [vMonthFilter, setVMonthFilter] = useState<string | number>(new Date().getMonth() + 1);
     const [vYearFilter, setVYearFilter] = useState<string | number>(new Date().getFullYear());
+
+    // Fixed Expenses Pagination States (only when FIXED tab is active)
+    const [paginatedFixedActive, setPaginatedFixedActive] = useState<FixedExpense[]>([]);
+    const [fixedActiveCurrentPage, setFixedActiveCurrentPage] = useState(1);
+    const [fixedActivePageSize, setFixedActivePageSize] = useState(50);
+    const [fixedActiveTotalCount, setFixedActiveTotalCount] = useState(0);
+    const [loadingFixedActive, setLoadingFixedActive] = useState(false);
+    
+    const [paginatedFixedHistorical, setPaginatedFixedHistorical] = useState<FixedExpense[]>([]);
+    const [fixedHistoricalCurrentPage, setFixedHistoricalCurrentPage] = useState(1);
+    const [fixedHistoricalPageSize, setFixedHistoricalPageSize] = useState(50);
+    const [fixedHistoricalTotalCount, setFixedHistoricalTotalCount] = useState(0);
+    const [loadingFixedHistorical, setLoadingFixedHistorical] = useState(false);
+
+    // Variable Expenses Pagination States (only when VARIABLE tab is active)
+    const [paginatedVariableExpenses, setPaginatedVariableExpenses] = useState<VariableDisplayItem[]>([]);
+    const [variableCurrentPage, setVariableCurrentPage] = useState(1);
+    const [variablePageSize, setVariablePageSize] = useState(50);
+    const [variableTotalCount, setVariableTotalCount] = useState(0);
+    const [loadingVariable, setLoadingVariable] = useState(false);
 
     const [fixedForm, setFixedForm] = useState<Partial<FixedExpense>>({});
     const [variableForm, setVariableForm] = useState<Partial<VariableExpense>>({});
@@ -1737,6 +1816,79 @@ const FinancePage: React.FC<FinancePageProps> = ({
         }
     }, [receivableSearch, receivableStatusFilter, receivablesCurrentPage, receivablesPageSize, vatRate, activeTab]);
 
+    // Refetch paginated fixed expenses (active)
+    const refetchFixedActive = useCallback(async () => {
+        if (activeTab !== 'FIXED') return;
+        try {
+            setLoadingFixedActive(true);
+            const result = await mongoService.getFixedExpensesPaginated({ showHistorical: false }, fixedActiveCurrentPage, fixedActivePageSize);
+            setPaginatedFixedActive(result.expenses);
+            setFixedActiveTotalCount(result.totalCount);
+        } catch (error) {
+            console.error('Error loading paginated fixed active expenses:', error);
+        } finally {
+            setLoadingFixedActive(false);
+        }
+    }, [fixedActiveCurrentPage, fixedActivePageSize, activeTab]);
+
+    // Refetch paginated fixed expenses (historical)
+    const refetchFixedHistorical = useCallback(async () => {
+        if (activeTab !== 'FIXED') return;
+        try {
+            setLoadingFixedHistorical(true);
+            const result = await mongoService.getFixedExpensesPaginated({ showHistorical: true }, fixedHistoricalCurrentPage, fixedHistoricalPageSize);
+            setPaginatedFixedHistorical(result.expenses);
+            setFixedHistoricalTotalCount(result.totalCount);
+        } catch (error) {
+            console.error('Error loading paginated fixed historical expenses:', error);
+        } finally {
+            setLoadingFixedHistorical(false);
+        }
+    }, [fixedHistoricalCurrentPage, fixedHistoricalPageSize, activeTab]);
+
+    // Refetch paginated variable expenses
+    const refetchVariableExpenses = useCallback(async () => {
+        if (activeTab !== 'VARIABLE') return;
+        try {
+            setLoadingVariable(true);
+            const filters: any = {};
+            if (vYearFilter !== 'all') filters.year = vYearFilter;
+            else filters.year = 'all';
+            if (vMonthFilter !== 'all') filters.month = vMonthFilter;
+            else filters.month = 'all';
+            
+            const result = await mongoService.getVariableExpensesPaginated(filters, variableCurrentPage, variablePageSize);
+            
+            // Convert server items to VariableDisplayItem format (convert dates)
+            const convertedItems: VariableDisplayItem[] = result.items.map((item: any) => ({
+                ...item,
+                date: new Date(item.date)
+            }));
+            
+            setPaginatedVariableExpenses(convertedItems);
+            setVariableTotalCount(result.totalCount);
+        } catch (error) {
+            console.error('Error loading paginated variable expenses:', error);
+        } finally {
+            setLoadingVariable(false);
+        }
+    }, [vMonthFilter, vYearFilter, variableCurrentPage, variablePageSize, activeTab]);
+
+    // Load paginated fixed expenses when FIXED tab is active
+    useEffect(() => {
+        if (activeTab === 'FIXED') {
+            refetchFixedActive();
+            refetchFixedHistorical();
+        }
+    }, [activeTab, fixedActiveCurrentPage, fixedActivePageSize, fixedHistoricalCurrentPage, fixedHistoricalPageSize, refetchFixedActive, refetchFixedHistorical]);
+
+    // Load paginated variable expenses when VARIABLE tab is active
+    useEffect(() => {
+        if (activeTab === 'VARIABLE') {
+            refetchVariableExpenses();
+        }
+    }, [activeTab, vMonthFilter, vYearFilter, variableCurrentPage, variablePageSize, refetchVariableExpenses]);
+
     // --- Debts Logic with Filtering and Sorting ---
     // Use paginated debts instead of client-side filtering when DEBTS tab is active
     const filteredDebtsClientSide = useMemo(() => {
@@ -1906,10 +2058,19 @@ const FinancePage: React.FC<FinancePageProps> = ({
                 case 'FIXED':
                     await mongoService.deleteFixedExpense(id);
                     setFixedExpenses(prev => prev.filter(e => e.id !== id));
+                    // Refetch paginated data if FIXED tab is active
+                    if (activeTab === 'FIXED') {
+                        refetchFixedActive();
+                        refetchFixedHistorical();
+                    }
                     break;
                 case 'VARIABLE':
                     await mongoService.deleteVariableExpense(id);
                     setVariableExpenses(prev => prev.filter(e => e.id !== id));
+                    // Refetch paginated data if VARIABLE tab is active
+                    if (activeTab === 'VARIABLE') {
+                        refetchVariableExpenses();
+                    }
                     break;
                 case 'LOANS':
                     await mongoService.deleteLoan(id);
@@ -2252,6 +2413,11 @@ const FinancePage: React.FC<FinancePageProps> = ({
                     const saved = await mongoService.createFixedExpense(newItem);
                     setFixedExpenses(prev => [...prev, saved]);
                 }
+                // Refetch paginated data if FIXED tab is active
+                if (activeTab === 'FIXED') {
+                    refetchFixedActive();
+                    refetchFixedHistorical();
+                }
             } else if (activeTab === 'VARIABLE') {
                 const newItem = { 
                     ...variableForm, 
@@ -2267,6 +2433,10 @@ const FinancePage: React.FC<FinancePageProps> = ({
                 } else {
                     const saved = await mongoService.createVariableExpense(newItem);
                     setVariableExpenses(prev => [...prev, saved]);
+                }
+                // Refetch paginated data if VARIABLE tab is active
+                if (activeTab === 'VARIABLE') {
+                    refetchVariableExpenses();
                 }
             } else if (activeTab === 'LOANS') {
                 const principal = loanForm.principalAmount || 0;
@@ -2531,8 +2701,132 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                 <button onClick={() => handleAdd('FIXED')} className="flex items-center px-5 py-2.5 bg-primary text-white rounded-lg shadow-lg hover:bg-indigo-700 font-bold transition-all"><PlusIcon className="w-5 h-5 me-2"/> הוסף הוצאה</button>
                             </div>
                             <div className="space-y-12">
-                                <FixedExpensesTable items={activeFixedServices} title="שירותים פעילים" />
-                                {historicalFixedServices.length > 0 && <FixedExpensesTable items={historicalFixedServices} title="היסטוריית שירותים (הסתיימו)" isHistorical={true} />}
+                                <div>
+                                    <FixedExpensesTable items={loadingFixedActive ? [] : paginatedFixedActive} title="שירותים פעילים" />
+                                    {/* Pagination Controls for Active Fixed Expenses */}
+                                    {fixedActiveTotalCount > 0 && (
+                                        <div className="mt-4 flex items-center justify-between bg-white px-4 py-3 border-t border-slate-200">
+                                            <div className="flex items-center gap-4">
+                                                <div className="text-sm text-slate-600">
+                                                    מציג {((fixedActiveCurrentPage - 1) * fixedActivePageSize) + 1} - {Math.min(fixedActiveCurrentPage * fixedActivePageSize, fixedActiveTotalCount)} מתוך {fixedActiveTotalCount} שירותים פעילים
+                                                </div>
+                                                <div className="flex items-center gap-2">
+                                                    <label className="text-sm text-slate-600">שורות לעמוד:</label>
+                                                    <select 
+                                                        value={fixedActivePageSize} 
+                                                        onChange={(e) => {
+                                                            setFixedActivePageSize(parseInt(e.target.value));
+                                                            setFixedActiveCurrentPage(1);
+                                                        }}
+                                                        className="text-sm border border-slate-300 rounded px-2 py-1 focus:ring-primary focus:border-primary"
+                                                    >
+                                                        <option value={25}>25</option>
+                                                        <option value={50}>50</option>
+                                                        <option value={100}>100</option>
+                                                        <option value={200}>200</option>
+                                                    </select>
+                                                </div>
+                                            </div>
+                                            <div className="flex items-center gap-2">
+                                                <button
+                                                    onClick={() => setFixedActiveCurrentPage(1)}
+                                                    disabled={fixedActiveCurrentPage === 1 || loadingFixedActive}
+                                                    className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                                >
+                                                    ראשון
+                                                </button>
+                                                <button
+                                                    onClick={() => setFixedActiveCurrentPage(prev => Math.max(1, prev - 1))}
+                                                    disabled={fixedActiveCurrentPage === 1 || loadingFixedActive}
+                                                    className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                                >
+                                                    קודם
+                                                </button>
+                                                <span className="px-3 py-1 text-sm text-slate-600">
+                                                    עמוד {fixedActiveCurrentPage} מתוך {Math.ceil(fixedActiveTotalCount / fixedActivePageSize) || 1}
+                                                </span>
+                                                <button
+                                                    onClick={() => setFixedActiveCurrentPage(prev => Math.min(Math.ceil(fixedActiveTotalCount / fixedActivePageSize) || 1, prev + 1))}
+                                                    disabled={fixedActiveCurrentPage >= Math.ceil(fixedActiveTotalCount / fixedActivePageSize) || loadingFixedActive}
+                                                    className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                                >
+                                                    הבא
+                                                </button>
+                                                <button
+                                                    onClick={() => setFixedActiveCurrentPage(Math.ceil(fixedActiveTotalCount / fixedActivePageSize) || 1)}
+                                                    disabled={fixedActiveCurrentPage >= Math.ceil(fixedActiveTotalCount / fixedActivePageSize) || loadingFixedActive}
+                                                    className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                                >
+                                                    אחרון
+                                                </button>
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                                {fixedHistoricalTotalCount > 0 && (
+                                    <div>
+                                        <FixedExpensesTable items={loadingFixedHistorical ? [] : paginatedFixedHistorical} title="היסטוריית שירותים (הסתיימו)" isHistorical={true} />
+                                        {/* Pagination Controls for Historical Fixed Expenses */}
+                                        {fixedHistoricalTotalCount > 0 && (
+                                            <div className="mt-4 flex items-center justify-between bg-white px-4 py-3 border-t border-slate-200">
+                                                <div className="flex items-center gap-4">
+                                                    <div className="text-sm text-slate-600">
+                                                        מציג {((fixedHistoricalCurrentPage - 1) * fixedHistoricalPageSize) + 1} - {Math.min(fixedHistoricalCurrentPage * fixedHistoricalPageSize, fixedHistoricalTotalCount)} מתוך {fixedHistoricalTotalCount} שירותים היסטוריים
+                                                    </div>
+                                                    <div className="flex items-center gap-2">
+                                                        <label className="text-sm text-slate-600">שורות לעמוד:</label>
+                                                        <select 
+                                                            value={fixedHistoricalPageSize} 
+                                                            onChange={(e) => {
+                                                                setFixedHistoricalPageSize(parseInt(e.target.value));
+                                                                setFixedHistoricalCurrentPage(1);
+                                                            }}
+                                                            className="text-sm border border-slate-300 rounded px-2 py-1 focus:ring-primary focus:border-primary"
+                                                        >
+                                                            <option value={25}>25</option>
+                                                            <option value={50}>50</option>
+                                                            <option value={100}>100</option>
+                                                            <option value={200}>200</option>
+                                                        </select>
+                                                    </div>
+                                                </div>
+                                                <div className="flex items-center gap-2">
+                                                    <button
+                                                        onClick={() => setFixedHistoricalCurrentPage(1)}
+                                                        disabled={fixedHistoricalCurrentPage === 1 || loadingFixedHistorical}
+                                                        className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                                    >
+                                                        ראשון
+                                                    </button>
+                                                    <button
+                                                        onClick={() => setFixedHistoricalCurrentPage(prev => Math.max(1, prev - 1))}
+                                                        disabled={fixedHistoricalCurrentPage === 1 || loadingFixedHistorical}
+                                                        className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                                    >
+                                                        קודם
+                                                    </button>
+                                                    <span className="px-3 py-1 text-sm text-slate-600">
+                                                        עמוד {fixedHistoricalCurrentPage} מתוך {Math.ceil(fixedHistoricalTotalCount / fixedHistoricalPageSize) || 1}
+                                                    </span>
+                                                    <button
+                                                        onClick={() => setFixedHistoricalCurrentPage(prev => Math.min(Math.ceil(fixedHistoricalTotalCount / fixedHistoricalPageSize) || 1, prev + 1))}
+                                                        disabled={fixedHistoricalCurrentPage >= Math.ceil(fixedHistoricalTotalCount / fixedHistoricalPageSize) || loadingFixedHistorical}
+                                                        className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                                    >
+                                                        הבא
+                                                    </button>
+                                                    <button
+                                                        onClick={() => setFixedHistoricalCurrentPage(Math.ceil(fixedHistoricalTotalCount / fixedHistoricalPageSize) || 1)}
+                                                        disabled={fixedHistoricalCurrentPage >= Math.ceil(fixedHistoricalTotalCount / fixedHistoricalPageSize) || loadingFixedHistorical}
+                                                        className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                                    >
+                                                        אחרון
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
                             </div>
                         </div>
                     )}
@@ -2547,7 +2841,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                             <label className="text-[10px] font-black text-slate-400 uppercase">שנה</label>
                                             <select 
                                                 value={vYearFilter} 
-                                                onChange={e => setVYearFilter(e.target.value === 'all' ? 'all' : Number(e.target.value))} 
+                                                onChange={e => { setVYearFilter(e.target.value === 'all' ? 'all' : Number(e.target.value)); setVariableCurrentPage(1); }} 
                                                 className="text-sm border p-2 rounded-md border-slate-300 shadow-sm focus:ring-primary focus:border-primary bg-white min-w-[100px]"
                                             >
                                                 <option value="all">כל השנים</option>
@@ -2558,7 +2852,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                             <label className="text-[10px] font-black text-slate-400 uppercase">חודש</label>
                                             <select 
                                                 value={vMonthFilter} 
-                                                onChange={e => setVMonthFilter(e.target.value === 'all' ? 'all' : Number(e.target.value))} 
+                                                onChange={e => { setVMonthFilter(e.target.value === 'all' ? 'all' : Number(e.target.value)); setVariableCurrentPage(1); }} 
                                                 className="text-sm border p-2 rounded-md border-slate-300 shadow-sm focus:ring-primary focus:border-primary bg-white min-w-[120px]"
                                             >
                                                 <option value="all">כל החודשים</option>
@@ -2568,7 +2862,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                             </select>
                                         </div>
                                         <button 
-                                            onClick={() => { setVMonthFilter('all'); setVYearFilter('all'); }} 
+                                            onClick={() => { setVMonthFilter('all'); setVYearFilter('all'); setVariableCurrentPage(1); }} 
                                             className="text-xs px-4 py-2 mt-4 rounded-md font-bold transition-all bg-slate-100 text-slate-600 hover:bg-slate-200"
                                         >
                                             נקה סינון
@@ -2591,7 +2885,17 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                         </tr>
                                     </thead>
                                     <tbody className="divide-y divide-slate-100 bg-white">
-                                        {filteredVariableExpenses.map(item => {
+                                        {loadingVariable && (
+                                            <tr>
+                                                <td colSpan={7} className="px-6 py-32 text-center">
+                                                    <div className="flex flex-col items-center gap-4 text-slate-400">
+                                                        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary"></div>
+                                                        <p className="text-sm font-medium">טוען הוצאות...</p>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        )}
+                                        {!loadingVariable && paginatedVariableExpenses.map(item => {
                                             const amount = item.amount || 0;
                                             let net = item.isVatExempt ? amount : (item.includesVat ? amount / (1 + vatRate / 100) : amount);
                                             let gross = item.isVatExempt ? amount : (item.includesVat ? amount : amount * (1 + vatRate / 100));
@@ -2607,11 +2911,11 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                                 </tr>
                                             );
                                         })}
-                                        {filteredVariableExpenses.length === 0 && (
+                                        {!loadingVariable && paginatedVariableExpenses.length === 0 && (
                                             <tr><td colSpan={7} className="px-6 py-12 text-center text-slate-400 italic">לא נמצאו הוצאות בסינון הנבחר</td></tr>
                                         )}
                                     </tbody>
-                                    {filteredVariableExpenses.length > 0 && (
+                                    {!loadingVariable && paginatedVariableExpenses.length > 0 && (
                                         <tfoot className="bg-slate-50 font-black border-t-2 border-slate-200">
                                             <tr>
                                                 <td colSpan={4} className="px-6 py-4 text-start text-slate-600">סה"כ לסינון הנוכחי:</td>
@@ -2623,6 +2927,66 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                     )}
                                 </table>
                             </div>
+                            
+                            {/* Pagination Controls for Variable Expenses */}
+                            {variableTotalCount > 0 && (
+                                <div className="mt-4 flex items-center justify-between bg-white px-4 py-3 border-t border-slate-200">
+                                    <div className="flex items-center gap-4">
+                                        <div className="text-sm text-slate-600">
+                                            מציג {((variableCurrentPage - 1) * variablePageSize) + 1} - {Math.min(variableCurrentPage * variablePageSize, variableTotalCount)} מתוך {variableTotalCount} הוצאות
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                            <label className="text-sm text-slate-600">שורות לעמוד:</label>
+                                            <select 
+                                                value={variablePageSize} 
+                                                onChange={(e) => {
+                                                    setVariablePageSize(parseInt(e.target.value));
+                                                    setVariableCurrentPage(1);
+                                                }}
+                                                className="text-sm border border-slate-300 rounded px-2 py-1 focus:ring-primary focus:border-primary"
+                                            >
+                                                <option value={25}>25</option>
+                                                <option value={50}>50</option>
+                                                <option value={100}>100</option>
+                                                <option value={200}>200</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <button
+                                            onClick={() => setVariableCurrentPage(1)}
+                                            disabled={variableCurrentPage === 1 || loadingVariable}
+                                            className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                        >
+                                            ראשון
+                                        </button>
+                                        <button
+                                            onClick={() => setVariableCurrentPage(prev => Math.max(1, prev - 1))}
+                                            disabled={variableCurrentPage === 1 || loadingVariable}
+                                            className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                        >
+                                            קודם
+                                        </button>
+                                        <span className="px-3 py-1 text-sm text-slate-600">
+                                            עמוד {variableCurrentPage} מתוך {Math.ceil(variableTotalCount / variablePageSize) || 1}
+                                        </span>
+                                        <button
+                                            onClick={() => setVariableCurrentPage(prev => Math.min(Math.ceil(variableTotalCount / variablePageSize) || 1, prev + 1))}
+                                            disabled={variableCurrentPage >= Math.ceil(variableTotalCount / variablePageSize) || loadingVariable}
+                                            className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                        >
+                                            הבא
+                                        </button>
+                                        <button
+                                            onClick={() => setVariableCurrentPage(Math.ceil(variableTotalCount / variablePageSize) || 1)}
+                                            disabled={variableCurrentPage >= Math.ceil(variableTotalCount / variablePageSize) || loadingVariable}
+                                            className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                        >
+                                            אחרון
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
                         </div>
                     )}
                     {activeTab === 'LOANS' && (

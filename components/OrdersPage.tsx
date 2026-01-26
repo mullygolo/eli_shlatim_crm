@@ -6,6 +6,8 @@ import Modal from './Modal';
 import ProductSelectorModal from './ProductSelectorModal';
 import SendItemToSuppliersModal from './SendItemToSuppliersModal';
 import SendOrderToSuppliersModal from './SendOrderToSuppliersModal';
+import CreateDocumentModal from './CreateDocumentModal';
+import DocumentViewer from './DocumentViewer';
 import { calculateOrderTotals, calculateDueDate } from '../utils/calculations';
 import MultiSelectFilter from './MultiSelectFilter';
 import * as mongoService from '../services/mongoService';
@@ -682,6 +684,223 @@ const OrderForm: React.FC<{
     });
     const [newPaymentAttachments, setNewPaymentAttachments] = useState<Attachment[]>([]);
     const [viewingPaymentDocuments, setViewingPaymentDocuments] = useState<Attachment[] | null>(null);
+    const [isCreateDocumentModalOpen, setIsCreateDocumentModalOpen] = useState(false);
+    const [createDocumentModalMode, setCreateDocumentModalMode] = useState<'full' | 'from-document'>('full');
+    const [createDocumentModalFromType, setCreateDocumentModalFromType] = useState<'invoice' | 'receipt' | 'credit' | 'estimate' | undefined>(undefined);
+    const [isCreatingDocument, setIsCreatingDocument] = useState(false);
+    const [invoiceSummary, setInvoiceSummary] = useState<{ invoicedAmount: number; creditsAmount: number; netInvoiced: number; hasInvoices: boolean; hasReceipts: boolean } | null>(null);
+
+    // GreenInvoice document creation handlers
+    const handleCreateDocument = async (
+        documentType: 'invoice' | 'receipt' | 'invoice_receipt' | 'credit_invoice' | 'estimate' | 'work_order' | 'delivery_note' | 'transaction_account',
+        method: 'api' | 'window',
+        paymentsOverride?: Array<{ id: string; amount: number; date: Date; method: string; reference?: string; repaymentDate?: Date }>
+    ) => {
+        const documentTypeForApi = documentType;
+        if (!order || !order.id) {
+            alert('שגיאה: לא נמצאה הזמנה');
+            return;
+        }
+
+        const selectedCustomer = customers.find(c => c.id === formData.customerId);
+        if (!selectedCustomer) {
+            alert('שגיאה: לא נמצא לקוח');
+            return;
+        }
+
+        setIsCreatingDocument(true);
+        try {
+            if (method === 'api') {
+                const body: Record<string, unknown> = {
+                    orderId: order.id,
+                    documentType: documentTypeForApi,
+                    customerId: selectedCustomer.id
+                };
+                if (paymentsOverride && (documentTypeForApi === 'receipt' || documentTypeForApi === 'invoice_receipt')) {
+                    body.paymentsOverride = paymentsOverride.map((p) => ({
+                        amount: p.amount,
+                        date: typeof p.date === 'string' ? p.date : (p.date as Date).toISOString().split('T')[0],
+                        method: p.method,
+                        reference: p.reference,
+                        repaymentDate: p.repaymentDate ? (typeof p.repaymentDate === 'string' ? p.repaymentDate : (p.repaymentDate as Date).toISOString().split('T')[0]) : undefined
+                    }));
+                }
+                const response = await fetch('/api/green-invoice/orders/create-document', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${localStorage.getItem('authToken')}`
+                    },
+                    body: JSON.stringify(body)
+                });
+
+                if (!response.ok) {
+                    let errorMessage = 'שגיאה ביצירת מסמך';
+                    try {
+                        const error = await response.json();
+                        errorMessage = error.error || error.message || error.detail || errorMessage;
+                    } catch (e) {
+                        errorMessage = `שגיאה ${response.status}: ${response.statusText}`;
+                    }
+                    throw new Error(errorMessage);
+                }
+
+                const result = await response.json();
+                
+                // Update order with document IDs
+                const updatedOrder: Order = {
+                    ...order,
+                    ...result.orderUpdates
+                };
+
+                await onSave(updatedOrder, true);
+                addActivity(`נוצר מסמך ${getDocumentTypeLabel(documentType)} בחשבונית ירוקה`);
+                setIsCreateDocumentModalOpen(false);
+                alert('המסמך נוצר בהצלחה בחשבונית ירוקה!');
+            } else {
+                // פתיחת חלון לעריכה: יוצרים טיוטה ממולאת (פריטים, לקוח, פרטי הזמנה) ב-API, פותחים לעריכה בחשבונית ירוקה — המשתמש לוחץ "הפקת מסמך" כשמוכן
+                const response = await fetch('/api/green-invoice/orders/create-document', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${localStorage.getItem('authToken')}`
+                    },
+                    body: JSON.stringify({
+                        orderId: order.id,
+                        documentType: documentTypeForApi,
+                        customerId: selectedCustomer.id,
+                        draft: true
+                    })
+                });
+
+                if (!response.ok) {
+                    let errMsg = 'שגיאה ביצירת טיוטה';
+                    try {
+                        const err = await response.json();
+                        errMsg = err.error || err.message || err.detail || errMsg;
+                    } catch (_) {}
+                    throw new Error(errMsg);
+                }
+
+                const result = await response.json();
+                const updatedOrder: Order = { ...order, ...result.orderUpdates };
+                await onSave(updatedOrder, true);
+
+                if (result.editUrl) {
+                    console.log('[DRAFT] Opening GreenInvoice document for editing:', result.editUrl);
+                    console.log('[DRAFT] Document ID:', result.invoice?.id);
+                    console.log('[DRAFT] Document should be a draft (not issued) - user will click "הפקת מסמך" when ready');
+                    
+                    // Open in new window and keep it focused
+                    // Use a unique window name to prevent multiple windows from opening
+                    const windowName = `greeninvoice_draft_${result.invoice?.id || Date.now()}`;
+                    const newWindow = window.open(result.editUrl, windowName, 'width=1200,height=800,scrollbars=yes,resizable=yes,location=yes,menubar=yes,toolbar=yes');
+                    
+                    if (newWindow) {
+                        // Focus the new window and keep it open
+                        newWindow.focus();
+                        
+                        // Add a small delay to ensure window is fully loaded
+                        setTimeout(() => {
+                            if (newWindow.closed) {
+                                console.warn('[DRAFT] Window was closed, user may need to allow popups');
+                            } else {
+                                console.log('[DRAFT] Window is open and ready for editing');
+                            }
+                        }, 1000);
+                        
+                        addActivity(`נוצרה טיוטה ממולאת (פריטים + לקוח) ונפתחה בחשבונית ירוקה לעריכה — הזמנה ${order.orderNumber}. לחץ על "הפקת מסמך" בחשבונית ירוקה כשמוכן.`);
+                    } else {
+                        // If popup was blocked, show alert with URL and instructions
+                        const message = `טיוטה נוצרה בהצלחה!\n\nהחלון נחסם על ידי הדפדפן. לחץ על הקישור כדי לפתוח בחשבונית ירוקה:\n${result.editUrl}\n\nבחשבונית ירוקה תראה את המסמך עם הכפתורים:\n- "הפקת מסמך" (כשמוכן)\n- "שמירת טיוטה"\n- "תצוגה מקדימה"`;
+                        alert(message);
+                        addActivity(`נוצרה טיוטה ממולאת (פריטים + לקוח) — הזמנה ${order.orderNumber}. פתח את הקישור בחשבונית ירוקה לעריכה.`);
+                    }
+                } else {
+                    alert('טיוטה נוצרה בהצלחה, אבל לא נמצא URL לעריכה. אנא פתח את המסמך ידנית בחשבונית ירוקה.');
+                    addActivity(`נוצרה טיוטה ממולאת (פריטים + לקוח) — הזמנה ${order.orderNumber}`);
+                }
+                setIsCreateDocumentModalOpen(false);
+            }
+        } catch (error: any) {
+            console.error('Error creating document:', error);
+            alert(`שגיאה ביצירת מסמך: ${error.message || 'שגיאה לא ידועה'}`);
+        } finally {
+            setIsCreatingDocument(false);
+        }
+    };
+
+    const getDocumentTypeLabel = (type: string): string => {
+        const labels: Record<string, string> = {
+            'estimate': 'הצעת מחיר',
+            'work_order': 'הזמנה עבודה',
+            'invoice': 'חשבונית מס',
+            'receipt': 'קבלה',
+            'invoice_receipt': 'חשבונית מס / קבלה',
+            'credit_invoice': 'חשבונית זיכוי',
+            'delivery_note': 'תעודת משלוח',
+            'transaction_account': 'חשבון עסקה'
+        };
+        return labels[type] || type;
+    };
+
+    const handleDownloadDocument = async (documentId: string, type: 'invoice' | 'receipt' | 'credit' | 'estimate') => {
+        try {
+            // Map type to API document type
+            let apiType: string;
+            if (type === 'credit') {
+                apiType = 'credit_invoice';
+            } else if (type === 'estimate') {
+                apiType = 'estimate';
+            } else {
+                apiType = type;
+            }
+            
+            const token = localStorage.getItem('authToken');
+            const response = await fetch(`/api/green-invoice/documents/${documentId}/pdf?type=${apiType}`, {
+                headers: {
+                    'Authorization': `Bearer ${token}`
+                }
+            });
+
+            if (!response.ok) {
+                const error = await response.json().catch(() => ({ error: 'שגיאה בהורדת המסמך' }));
+                throw new Error(error.error || 'שגיאה בהורדת המסמך');
+            }
+
+            const blob = await response.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            
+            // Determine file name based on type
+            const typeLabels: Record<string, string> = {
+                'invoice': 'חשבונית',
+                'receipt': 'קבלה',
+                'credit': 'זיכוי',
+                'estimate': 'הערכה'
+            };
+            a.download = `${typeLabels[type] || 'מסמך'}_${documentId}.pdf`;
+            
+            document.body.appendChild(a);
+            a.click();
+            window.URL.revokeObjectURL(url);
+            document.body.removeChild(a);
+            
+            addActivity(`הורד מסמך ${typeLabels[type] || 'חשבונאי'}`);
+        } catch (error: any) {
+            console.error('Error downloading document:', error);
+            alert(error.message || 'שגיאה בהורדת המסמך');
+        }
+    };
+
+    const handleOpenInGreenInvoice = (documentId: string, type: 'invoice' | 'receipt' | 'credit' | 'estimate') => {
+        const baseUrl = 'https://app.greeninvoice.co.il';
+        // /invoice/id ו-/#/invoice/id פתחו עמוד ראשי. /incomes עובד — מנסים /incomes/{id} ו-/estimates/{id}
+        const path = type === 'estimate' ? `estimates/${documentId}` : `incomes/${documentId}`;
+        const url = `${baseUrl}/${path}`;
+        window.open(url, '_blank');
+    };
 
     useEffect(() => {
         if (order) {
@@ -698,6 +917,118 @@ const OrderForm: React.FC<{
             setCustomerMode('EXISTING'); 
         }
     }, [order]);
+
+    // Auto-sync payments from GreenInvoice when order has greenInvoiceId
+    useEffect(() => {
+        const syncPaymentsFromGreenInvoice = async () => {
+            if (!order?.greenInvoiceId || !formData.greenInvoiceId) return;
+            
+            try {
+                const token = localStorage.getItem('authToken');
+                const response = await fetch(`/api/green-invoice/invoices/${formData.greenInvoiceId}/sync-payments`, {
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                });
+                
+                if (!response.ok) {
+                    console.warn('Failed to sync payments from GreenInvoice');
+                    return;
+                }
+                
+                const { payments } = await response.json();
+                if (!payments || payments.length === 0) return;
+                
+                // Get existing payment IDs to avoid duplicates
+                const existingPaymentIds = new Set((formData.payments || []).map(p => p.id));
+                const existingPaymentAmounts = new Map((formData.payments || []).map(p => [p.amount, p.date.toISOString().split('T')[0]]));
+                
+                // Map GreenInvoice payment method to CRM payment method
+                const mapPaymentMethodFromGreenInvoice = (method?: string): PaymentMethod => {
+                    if (!method) return PaymentMethod.BANK_TRANSFER;
+                    const methodMap: Record<string, PaymentMethod> = {
+                        'Bank Transfer': PaymentMethod.BANK_TRANSFER,
+                        'Credit Card': PaymentMethod.CREDIT_CARD,
+                        'Cheque': PaymentMethod.CHECK,
+                        'Cash': PaymentMethod.CASH,
+                        'Standing Order': PaymentMethod.STANDING_ORDER,
+                        'Bit/PayBox': PaymentMethod.BIT
+                    };
+                    return methodMap[method] || PaymentMethod.BANK_TRANSFER;
+                };
+                
+                // Add new payments that don't exist yet
+                const newPayments: CustomerPayment[] = [];
+                payments.forEach((giPayment: any) => {
+                    const paymentDate = giPayment.date || new Date().toISOString().split('T')[0];
+                    const paymentAmount = giPayment.amount;
+                    
+                    // Check if this payment already exists (by amount and date)
+                    const existingKey = `${paymentAmount}_${paymentDate}`;
+                    const isDuplicate = Array.from(existingPaymentAmounts.entries()).some(
+                        ([amount, date]) => Math.abs(amount - paymentAmount) < 0.01 && date === paymentDate
+                    );
+                    
+                    if (!isDuplicate) {
+                        const method = mapPaymentMethodFromGreenInvoice(giPayment.method);
+                        newPayments.push({
+                            id: `gi_pay_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                            amount: paymentAmount,
+                            date: new Date(paymentDate),
+                            method,
+                            reference: giPayment.reference || '',
+                            repaymentDate: method === PaymentMethod.CHECK ? new Date(paymentDate) : undefined,
+                            status: 'CLEARED',
+                            notes: 'סונכרן מחשבונית ירוקה'
+                        });
+                    }
+                });
+                
+                if (newPayments.length > 0) {
+                    setFormData(prev => ({
+                        ...prev,
+                        payments: [...(prev.payments || []), ...newPayments]
+                    }));
+                    
+                    addActivity(`סונכרנו ${newPayments.length} תשלומים מחשבונית ירוקה`);
+                }
+            } catch (error) {
+                console.error('Error syncing payments from GreenInvoice:', error);
+                // Don't show error to user - silent sync
+            }
+        };
+        
+        syncPaymentsFromGreenInvoice();
+    }, [order?.greenInvoiceId, formData.greenInvoiceId]);
+
+    // Invoice summary (חויב נטו, יתרות) for ניהול גבייה — כולל מסמכים מזהים שמורים (greenInvoiceId וכו')
+    useEffect(() => {
+        const fetchSummary = async () => {
+            const orderNumber = order?.orderNumber;
+            if (!orderNumber) {
+                setInvoiceSummary(null);
+                return;
+            }
+            try {
+                const token = localStorage.getItem('authToken');
+                const q = new URLSearchParams();
+                if (order.greenInvoiceId) q.set('invoiceId', order.greenInvoiceId);
+                if (order.greenInvoiceReceiptId) q.set('receiptId', order.greenInvoiceReceiptId);
+                if (order.greenInvoiceCreditId) q.set('creditId', order.greenInvoiceCreditId);
+                const suffix = q.toString() ? `?${q.toString()}` : '';
+                const r = await fetch(`/api/green-invoice/documents/invoice-summary/${orderNumber}${suffix}`, {
+                    headers: { Authorization: `Bearer ${token}` }
+                });
+                if (r.ok) {
+                    const s = await r.json();
+                    setInvoiceSummary(s);
+                } else setInvoiceSummary(null);
+            } catch {
+                setInvoiceSummary(null);
+            }
+        };
+        fetchSummary();
+    }, [order?.orderNumber, order?.greenInvoiceId, order?.greenInvoiceReceiptId, order?.greenInvoiceCreditId]);
 
     const minDealDate = useMemo(() => {
         try {
@@ -855,7 +1186,7 @@ const OrderForm: React.FC<{
         setNewPaymentAttachments(prev => prev.filter(att => att.id !== id));
     };
 
-    const handleAddPayment = () => {
+    const handleAddPayment = async () => {
         if (!newPaymentData.amount || newPaymentData.amount <= 0) {
             alert("אנא הזן סכום חיובי");
             return;
@@ -904,6 +1235,63 @@ const OrderForm: React.FC<{
                 content: logContent
             }, ...prev.timeline]
         }));
+
+        // Sync payment to GreenInvoice if invoice exists
+        if (order?.greenInvoiceId) {
+            try {
+                const token = localStorage.getItem('authToken');
+                const response = await fetch(`/api/green-invoice/invoices/${order.greenInvoiceId}/payments`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${token}`
+                    },
+                    body: JSON.stringify({
+                        payment_date: payment.date.toISOString().split('T')[0],
+                        amount_paid: payment.amount,
+                        payment_method: mapPaymentMethodToGreenInvoice(payment.method)
+                    })
+                });
+
+                if (response.ok) {
+                    // Check if payment is full - mark invoice as paid
+                    const { totalAmount, totalPaid } = calculateOrderTotals({
+                        ...formData,
+                        payments: [...formData.payments, payment]
+                    });
+                    const orderVatRate = formData.vatRate ?? vatRate;
+                    const gross = totalAmount * (1 + orderVatRate / 100);
+                    
+                    if (totalPaid + payment.amount >= gross - 0.01) {
+                        // Mark invoice as paid
+                        await fetch(`/api/green-invoice/invoices/${order.greenInvoiceId}/mark-paid`, {
+                            method: 'GET',
+                            headers: {
+                                'Authorization': `Bearer ${token}`
+                            }
+                        });
+                    }
+                    
+                    addActivity(`תשלום סונכרן לחשבונית ירוקה`);
+                }
+            } catch (error) {
+                console.error('Error syncing payment to GreenInvoice:', error);
+                // Don't show error to user - payment was saved locally
+            }
+        }
+    };
+
+    const mapPaymentMethodToGreenInvoice = (method: string): string => {
+        const methodMap: Record<string, string> = {
+            'העברה בנקאית': 'Bank Transfer',
+            'כרטיס אשראי': 'Credit Card',
+            'צ\'ק': 'Cheque',
+            'מזומן': 'Cash',
+            'הוראת קבע': 'Standing Order',
+            'Bit/PayBox': 'Bit/PayBox',
+            'אחר': 'Others'
+        };
+        return methodMap[method] || 'Others';
     };
 
     const confirmDeletePayment = () => {
@@ -938,11 +1326,9 @@ const OrderForm: React.FC<{
 
         (item as any)[name] = (name === 'description' || name === 'unitType' || name === 'supplierId' || name === 'notes') ? value : parseFloat(value) || 0;
 
-        if (item.unitType === LineItemUnit.M2) {
-            const width = item.width || 0;
-            const height = item.height || 0;
-            item.quantity = width * height;
-        }
+        // Note: Quantity is now independent of width/height for M2 units
+        // Users can specify both dimensions (e.g., 200x200) and quantity (e.g., 5 units)
+        // The total area will be calculated as: (width * height) * quantity
 
         // Auto-update price if priceListProductId exists and relevant fields changed
         if (item.priceListProductId && (name === 'quantity' || name === 'width' || name === 'height' || name === 'unitType' || name === 'supplierId')) {
@@ -974,12 +1360,14 @@ const OrderForm: React.FC<{
                             const size = item.unitType === LineItemUnit.M2 && item.width && item.height 
                                 ? { width: item.width, height: item.height } 
                                 : undefined;
-                            const quantity = item.unitType === LineItemUnit.M2 && item.width && item.height
+                            // For M2: price is calculated based on area (width * height), but quantity is separate
+                            // Example: 5 units of 200x200 = price per 40,000 sqm * 5 units
+                            const areaForPricing = item.unitType === LineItemUnit.M2 && item.width && item.height
                                 ? item.width * item.height
                                 : item.quantity;
                             const calculated = calculateProductPrice(
                                 product,
-                                quantity,
+                                areaForPricing, // Use area for pricing tiers, not quantity
                                 size,
                                 item.selectedAddons,
                                 item.supplierId || undefined,
@@ -1041,9 +1429,12 @@ const OrderForm: React.FC<{
             
             if (productSelectorFor.type === 'lineItem') {
                 // Create new line item
+                // Quantity is now independent of width/height for M2 units
+                // Users can specify both dimensions (e.g., 200x200) and quantity (e.g., 5 units)
                 const newItem: LineItem = {
                     id: `li_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
                     description: itemDescription,
+                    quantity: quantity || 1, // Default to 1 if quantity is 0
                     unitPrice: calculated.unitPrice,
                     cost: calculated.unitCost,
                     supplierId: supplierId,
@@ -1059,13 +1450,6 @@ const OrderForm: React.FC<{
                 if (size && size.width !== undefined && size.height !== undefined) {
                     newItem.width = size.width;
                     newItem.height = size.height;
-                }
-                
-                // Calculate quantity based on unit type
-                if (itemUnitType === LineItemUnit.M2 && size && size.width && size.height) {
-                    newItem.quantity = size.width * size.height;
-                } else {
-                    newItem.quantity = quantity;
                 }
                 
                 // Use functional update to ensure we're working with the latest state
@@ -1087,14 +1471,17 @@ const OrderForm: React.FC<{
             } else if (productSelectorFor.type === 'additionalService') {
                 // Create new service
                 // For AdditionalService, price and cost are total (not per unit)
-                const quantityForService = itemUnitType === LineItemUnit.M2 && size && size.width && size.height
+                // For M2: calculate total area (width * height) * quantity, then multiply by unit price
+                const areaPerUnit = itemUnitType === LineItemUnit.M2 && size && size.width && size.height
                     ? size.width * size.height
-                    : quantity;
+                    : 1;
+                const totalQuantity = quantity || 1;
+                const totalArea = areaPerUnit * totalQuantity;
                 const newService: AdditionalService = {
                     id: `as_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
                     description: itemDescription,
-                    price: calculated.unitPrice * quantityForService,
-                    cost: calculated.unitCost * quantityForService,
+                    price: calculated.unitPrice * totalArea,
+                    cost: calculated.unitCost * totalArea,
                     supplierId: supplierId,
                     priceListProductId: product.id,
                     selectedAddons: selectedAddons,
@@ -1715,6 +2102,18 @@ const OrderForm: React.FC<{
                 />
             )}
 
+            {isCreateDocumentModalOpen && order && (
+                <CreateDocumentModal
+                    order={order}
+                    customer={customers.find(c => c.id === formData.customerId) || customers[0]}
+                    onClose={() => setIsCreateDocumentModalOpen(false)}
+                    onCreate={(documentType, method, paymentsOverride) => handleCreateDocument(documentType, method, paymentsOverride)}
+                    balanceDue={balanceDue}
+                    mode={createDocumentModalMode}
+                    fromDocumentType={createDocumentModalFromType}
+                />
+            )}
+
             {paymentIdToDelete && (
                 <Modal title="אישור מחיקת תשלום" onClose={() => setPaymentIdToDelete(null)} size="lg" zIndex={70}>
                     <div className="text-start">
@@ -1915,10 +2314,6 @@ const OrderForm: React.FC<{
                         </select>
                     </div>
                 </div>
-                <div className="flex space-x-4 space-x-reverse pt-2">
-                    <label className="flex items-center"><input type="checkbox" name="invoiceIssued" checked={formData.invoiceIssued} onChange={handleMasterChange} className="h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary me-2" /> הוצאה חשבונית</label>
-                    <label className="flex items-center"><input type="checkbox" name="receiptIssued" checked={formData.receiptIssued} onChange={handleMasterChange} className="h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary me-2" /> הוצאה קבלה</label>
-                </div>
             </div>
 
             <div className="space-y-6">
@@ -2012,7 +2407,7 @@ const OrderForm: React.FC<{
                                         )}
                                         <div className="md:col-span-1">
                                             <label className="text-xs font-medium text-slate-500 md:hidden">כמות</label>
-                                            <input type="number" placeholder="כמות" name="quantity" value={item.quantity} onChange={e => handleLineItemChange(index, e)} disabled={item.unitType === LineItemUnit.M2} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm disabled:bg-slate-100" />
+                                            <input type="number" placeholder="כמות" name="quantity" value={item.quantity} onChange={e => handleLineItemChange(index, e)} min="0" step="0.01" className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
                                         </div>
                                         <div className="md:col-span-1">
                                             <label className="text-xs font-medium text-slate-500 md:hidden">מחיר ליח'</label>
@@ -2035,6 +2430,11 @@ const OrderForm: React.FC<{
                                                 {item.cost > 0 && (
                                                     <span className="text-[10px] text-slate-500" title="סה״כ עלות">
                                                         (₪{(item.quantity * item.cost).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })})
+                                                    </span>
+                                                )}
+                                                {item.unitType === LineItemUnit.M2 && item.width && item.height && (
+                                                    <span className="text-[10px] font-bold text-blue-600 mt-1" title="סה״כ מ״ר">
+                                                        {(item.width * item.height * (item.quantity || 1)).toFixed(2)} מ"ר
                                                     </span>
                                                 )}
                                             </div>
@@ -2225,6 +2625,64 @@ const OrderForm: React.FC<{
                         </div>
                     </div>
                     <div className="p-4">
+                        {invoiceSummary && (
+                            <div className="mb-4 p-4 bg-white border border-slate-200 rounded-xl shadow-sm">
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-3">
+                                    <div className="flex flex-col gap-1.5">
+                                        <span className="text-xs font-bold text-slate-500 uppercase tracking-wide">סטטוס חשבונית</span>
+                                        {!invoiceSummary.hasInvoices ? (
+                                            <span className="inline-flex items-center gap-2 w-fit px-3 py-1.5 rounded-lg bg-red-100 text-red-800 font-bold text-sm border border-red-200">
+                                                <span className="w-2 h-2 rounded-full bg-red-500" /> לא הוצאה
+                                            </span>
+                                        ) : invoiceSummary.netInvoiced >= totalDueWithVat - 1 ? (
+                                            <span className="inline-flex items-center gap-2 w-fit px-3 py-1.5 rounded-lg bg-green-100 text-green-800 font-bold text-sm border border-green-200">
+                                                <span className="w-2 h-2 rounded-full bg-green-500" /> הוצאה מלאה
+                                            </span>
+                                        ) : (
+                                            <div className="flex flex-col gap-1">
+                                                <span className="inline-flex items-center gap-2 w-fit px-3 py-1.5 rounded-lg bg-amber-100 text-amber-900 font-bold text-sm border border-amber-300">
+                                                    <span className="w-2 h-2 rounded-full bg-amber-500" /> חלקי
+                                                </span>
+                                                <span className="text-xs text-slate-600">₪{invoiceSummary.netInvoiced.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} חויב מתוך ₪{totalDueWithVat.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} הזמנה</span>
+                                            </div>
+                                        )}
+                                    </div>
+                                    <div className="flex flex-col gap-1.5">
+                                        <span className="text-xs font-bold text-slate-500 uppercase tracking-wide">סטטוס קבלה</span>
+                                        {totalPaid <= 0 ? (
+                                            <span className="inline-flex items-center gap-2 w-fit px-3 py-1.5 rounded-lg bg-red-100 text-red-800 font-bold text-sm border border-red-200">
+                                                <span className="w-2 h-2 rounded-full bg-red-500" /> לא הוצאה
+                                            </span>
+                                        ) : totalPaid >= (invoiceSummary.netInvoiced || totalDueWithVat) - 1 ? (
+                                            <span className="inline-flex items-center gap-2 w-fit px-3 py-1.5 rounded-lg bg-green-100 text-green-800 font-bold text-sm border border-green-200">
+                                                <span className="w-2 h-2 rounded-full bg-green-500" /> הוצאה מלאה
+                                            </span>
+                                        ) : (
+                                            <div className="flex flex-col gap-1">
+                                                <span className="inline-flex items-center gap-2 w-fit px-3 py-1.5 rounded-lg bg-amber-100 text-amber-900 font-bold text-sm border border-amber-300">
+                                                    <span className="w-2 h-2 rounded-full bg-amber-500" /> חלקי
+                                                </span>
+                                                <span className="text-xs text-slate-600">קבלות על ₪{totalPaid.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                                {(invoiceSummary.netInvoiced < totalDueWithVat - 0.01 || totalPaid < invoiceSummary.netInvoiced - 0.01) && (
+                                    <div className="flex flex-wrap gap-3 pt-3 border-t border-slate-200 text-sm">
+                                        {invoiceSummary.netInvoiced < totalDueWithVat - 0.01 && (
+                                            <span className="inline-flex items-center px-3 py-1.5 rounded-lg bg-amber-50 text-amber-800 font-semibold border border-amber-200">
+                                                יתרה להנפקת חשבונית: ₪{(totalDueWithVat - invoiceSummary.netInvoiced).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                            </span>
+                                        )}
+                                        {totalPaid < invoiceSummary.netInvoiced - 0.01 && (
+                                            <span className="inline-flex items-center px-3 py-1.5 rounded-lg bg-red-50 text-red-800 font-semibold border border-red-200">
+                                                יתרה לתשלום (על החיוב): ₪{(invoiceSummary.netInvoiced - totalPaid).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                            </span>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+                        )}
                         <div className="mb-6">
                             <div className="flex justify-between text-sm mb-1">
                                 <span className="font-medium text-green-700">שולם: ₪{totalPaid.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
@@ -2321,6 +2779,19 @@ const OrderForm: React.FC<{
                         ) : (
                             <p className="text-center text-slate-400 text-sm mb-4 bg-slate-50 p-2 rounded">טרם התקבלו תשלומים.</p>
                         )}
+                        {formData.greenInvoiceId && (
+                            <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg text-sm text-blue-800">
+                                <p className="font-medium mb-1">💡 תשלומים מסונכרנים אוטומטית</p>
+                                <p className="text-xs mb-2">תשלומים שנוספים בחשבונית ירוקה (כולל מקבלות) מסונכרנים לכאן עם פרטים מלאים — אמצעי תשלום, אסמכתא (מס׳ צ׳ק / 4 ספרות). צ׳קים מופיעים בניהול צ׳קים נכנסים ובדוחות כספיים.</p>
+                                <p className="text-xs font-medium text-blue-900">תקבולים ביצירת קבלה:</p>
+                                <p className="text-xs">התשלומים שמופיעים כאן (מסונכרנים או שמוסיפים בהזמנה) נשלחים לקבלה/חשבונית+קבלה ב&quot;שליחה ישירה&quot;. שומרים את ההזמנה ואז יוצרים את המסמך.</p>
+                            </div>
+                        )}
+                        {!formData.greenInvoiceId && (
+                            <div className="mt-3 p-2 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-600">
+                                <strong>תקבולים ביצירת קבלה/חשבונית+קבלה:</strong> תשלומים שמוסיפים כאן (הוסף תשלום חדש) נשלחים אוטומטית ב&quot;שליחה ישירה&quot;. יש לשמור את ההזמנה לפני יצירת המסמך.
+                            </div>
+                        )}
                         {!isAddingPayment ? (
                             <button 
                                 type="button" 
@@ -2406,6 +2877,34 @@ const OrderForm: React.FC<{
                     </div>
                 </div>
             </div>
+
+            {/* GreenInvoice Documents Section */}
+            {isEditMode && order && (
+                <div className="space-y-6">
+                    <h3 className="text-xl font-semibold text-slate-800 border-b pb-2">מסמכים חשבונאיים</h3>
+                    <div className="bg-slate-50 p-4 rounded-lg border border-slate-200">
+                        <DocumentViewer
+                            order={order}
+                            onDownload={handleDownloadDocument}
+                            onOpenInGreenInvoice={handleOpenInGreenInvoice}
+                            onOpenCreateModal={(mode, fromDocumentType) => {
+                                setCreateDocumentModalMode(mode);
+                                setCreateDocumentModalFromType(fromDocumentType);
+                                setIsCreateDocumentModalOpen(true);
+                            }}
+                            onCancelDocument={async (documentId, type) => {
+                                // Create credit invoice for cancellation
+                                try {
+                                    await handleCreateDocument('credit_invoice', 'api');
+                                    addActivity(`נוצרה חשבונית זיכוי עבור ${type}`);
+                                } catch (error: any) {
+                                    alert(`שגיאה ביצירת חשבונית זיכוי: ${error.message || error}`);
+                                }
+                            }}
+                        />
+                    </div>
+                </div>
+            )}
 
              <div className="space-y-6">
                 <h3 className="text-xl font-semibold text-slate-800 border-b pb-2">קבצים וגלריה</h3>

@@ -1,5 +1,5 @@
 
-export type Page = 'Dashboard' | 'Orders' | 'Customers' | 'Suppliers' | 'Employees' | 'Deals' | 'Transactions' | 'Timesheets' | 'Quotes' | 'Reports' | 'Settings' | 'Finance' | 'Attendance' | 'PriceList';
+export type Page = 'Dashboard' | 'Orders' | 'Customers' | 'Suppliers' | 'Employees' | 'Deals' | 'Transactions' | 'Timesheets' | 'Quotes' | 'Reports' | 'Settings' | 'Finance' | 'Attendance' | 'PriceList' | 'CallCenter';
 
 export enum PaymentMethod {
     BANK_TRANSFER = 'העברה בנקאית',
@@ -52,6 +52,8 @@ export interface Customer {
     createdAt: Date;
     paymentMethod: PaymentMethod;
     paymentTerms?: string;
+    // GreenInvoice integration field
+    greenInvoiceClientId?: string; // ID of client in GreenInvoice
 }
 
 /* Fix: Added missing Supplier interface export to resolve module errors */
@@ -221,6 +223,11 @@ export interface Order {
     type?: OrderType;
     parentOrderId?: string; // For service calls linked to original orders
     vatRate?: number; // Deal-specific VAT rate snapshot/override
+    // GreenInvoice integration fields
+    greenInvoiceId?: string; // ID of invoice in GreenInvoice
+    greenInvoiceReceiptId?: string; // ID of receipt in GreenInvoice
+    greenInvoiceCreditId?: string; // ID of credit invoice in GreenInvoice
+    greenInvoiceEstimateId?: string; // ID of estimate in GreenInvoice
 }
 
 export type EmployeeRole = 'ADMIN' | 'MANAGER' | 'EMPLOYEE';
@@ -506,6 +513,20 @@ export interface ManualEvent {
     description?: string;
     date: Date;
     time?: string;
+}
+
+export interface CallLog {
+    id: string;
+    uniqueId: string;
+    file: string;
+    caller: string;
+    callee: string;
+    startDate: Date;
+    endDate?: Date;
+    durationSeconds: number;
+    status: string;
+    direction: 'incoming' | 'outgoing' | 'unknown';
+    hangupReason?: string;
 }
 
 // Price List Types

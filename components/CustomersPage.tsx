@@ -1040,6 +1040,7 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
     const [duplicateFound, setDuplicateFound] = useState<Customer | null>(null);
     const [pendingNewCustomer, setPendingNewCustomer] = useState<{customer: Partial<Customer>, contact: Partial<Contact>} | null>(null);
     const [isMergeModalOpen, setIsMergeModalOpen] = useState(false);
+    const [isSyncingFromGreenInvoice, setIsSyncingFromGreenInvoice] = useState(false);
 
     // Pagination state
     const [currentPage, setCurrentPage] = useState(1);
@@ -1266,6 +1267,49 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
         }
     };
 
+    const handleSyncFromGreenInvoice = async () => {
+        if (!confirm('האם אתה בטוח שברצונך לסנכרן לקוחות מחשבונית ירוקה? זה עלול ליצור לקוחות כפולים אם לא נזהרים.')) {
+            return;
+        }
+
+        setIsSyncingFromGreenInvoice(true);
+        try {
+            const token = localStorage.getItem('authToken');
+            const response = await fetch('/api/customers/sync-from-greeninvoice', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                }
+            });
+
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.error || 'שגיאה בסנכרון');
+            }
+
+            const results = await response.json();
+            
+            // Refetch customers to show updates
+            await refetchCustomers();
+            
+            // Show results
+            const message = `סנכרון הושלם:
+- נוצרו: ${results.created.length} לקוחות חדשים
+- עודכנו: ${results.updated.length} לקוחות קיימים
+- דולגו: ${results.skipped.length} לקוחות
+${results.errors.length > 0 ? `\n- שגיאות: ${results.errors.length}` : ''}`;
+            
+            alert(message);
+            addActivity(`בוצע סנכרון מ-חשבונית ירוקה: ${results.created.length} חדשים, ${results.updated.length} עודכנו`);
+        } catch (error: any) {
+            console.error('Error syncing from GreenInvoice:', error);
+            alert(`שגיאה בסנכרון: ${error.message || 'שגיאה לא ידועה'}`);
+        } finally {
+            setIsSyncingFromGreenInvoice(false);
+        }
+    };
+
     const customerOrders = useMemo(() => {
         if (!viewingCustomer) return [];
         return orders.filter(o => o.customerId === viewingCustomer.id);
@@ -1286,6 +1330,24 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
                     />
                 </div>
                 <div className="flex gap-2">
+                    <button 
+                        onClick={handleSyncFromGreenInvoice} 
+                        disabled={isSyncingFromGreenInvoice}
+                        className="flex-shrink-0 flex items-center px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        title="סנכרן לקוחות מחשבונית ירוקה"
+                    >
+                        {isSyncingFromGreenInvoice ? (
+                            <>
+                                <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white me-2"></div>
+                                מסנכרן...
+                            </>
+                        ) : (
+                            <>
+                                <ImportIcon className="h-5 w-5 me-2" />
+                                סנכרן מחשבונית ירוקה
+                            </>
+                        )}
+                    </button>
                     <button onClick={() => setIsImportModalOpen(true)} className="flex-shrink-0 flex items-center px-4 py-2 bg-secondary text-white rounded-lg hover:bg-emerald-600 transition-colors">
                         <ImportIcon className="h-5 w-5 me-2" />
                         ייבוא לקוחות

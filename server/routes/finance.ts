@@ -1,11 +1,12 @@
 import { Router } from 'express';
 import {
-    getFixedExpenses, createFixedExpense, updateFixedExpense, deleteFixedExpense,
-    getVariableExpenses, createVariableExpense, updateVariableExpense, deleteVariableExpense,
+    getFixedExpenses, getFixedExpensesPaginated, createFixedExpense, updateFixedExpense, deleteFixedExpense,
+    getVariableExpenses, getVariableExpensesPaginated, createVariableExpense, updateVariableExpense, deleteVariableExpense,
     getLoans, createLoan, updateLoan, deleteLoan,
     getDebts, getDebtsPaginated, createDebt, updateDebt, deleteDebt,
     getReceivables, getReceivablesPaginated, createReceivable, updateReceivable, deleteReceivable,
-    getEquity, createEquity, updateEquity, deleteEquity
+    getEquity, createEquity, updateEquity, deleteEquity,
+    getChecksPaginated
 } from '../services/mongoService.js';
 
 const router = Router();
@@ -47,6 +48,23 @@ router.delete('/fixed-expenses/:id', async (req, res) => {
     }
 });
 
+router.get('/fixed-expenses/paginated', async (req, res) => {
+    try {
+        const page = parseInt(req.query.page as string) || 1;
+        const limit = parseInt(req.query.limit as string) || 50;
+        const filters: any = {};
+        
+        if (req.query.showHistorical !== undefined) {
+            filters.showHistorical = req.query.showHistorical === 'true';
+        }
+        
+        const result = await getFixedExpensesPaginated(filters, page, limit);
+        res.json(result);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch paginated fixed expenses' });
+    }
+});
+
 // Variable Expenses
 router.get('/variable-expenses', async (req, res) => {
     try {
@@ -54,6 +72,26 @@ router.get('/variable-expenses', async (req, res) => {
         res.json(expenses);
     } catch (error) {
         res.status(500).json({ error: 'Failed to fetch variable expenses' });
+    }
+});
+
+router.get('/variable-expenses/paginated', async (req, res) => {
+    try {
+        const page = parseInt(req.query.page as string) || 1;
+        const limit = parseInt(req.query.limit as string) || 50;
+        const filters: any = {};
+        
+        if (req.query.year) {
+            filters.year = req.query.year === 'all' ? 'all' : parseInt(req.query.year as string);
+        }
+        if (req.query.month) {
+            filters.month = req.query.month === 'all' ? 'all' : parseInt(req.query.month as string);
+        }
+        
+        const result = await getVariableExpensesPaginated(filters, page, limit);
+        res.json(result);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch paginated variable expenses' });
     }
 });
 
@@ -226,6 +264,24 @@ router.delete('/receivables/:id', async (req, res) => {
         res.status(204).send();
     } catch (error) {
         res.status(500).json({ error: 'Failed to delete receivable' });
+    }
+});
+
+// Checks
+router.get('/checks/paginated', async (req, res) => {
+    try {
+        const page = parseInt(req.query.page as string) || 1;
+        const limit = parseInt(req.query.limit as string) || 50;
+        const filters: any = {};
+        
+        if (req.query.tab) filters.tab = req.query.tab as 'INCOMING' | 'OUTGOING';
+        if (req.query.smartFilter) filters.smartFilter = req.query.smartFilter as 'ACTIVE' | 'URGENT' | 'ARCHIVE' | 'ALL';
+        if (req.query.searchQuery) filters.searchQuery = req.query.searchQuery as string;
+        
+        const result = await getChecksPaginated(filters, page, limit);
+        res.json(result);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch paginated checks' });
     }
 });
 

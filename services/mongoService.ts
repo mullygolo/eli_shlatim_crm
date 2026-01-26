@@ -1,7 +1,7 @@
 import {
     Customer, Order, Supplier, Employee, Activity, OrderStatusConfiguration,
     FixedExpense, VariableExpense, Loan, Debt, Receivable, EquityInvestment,
-    AttendanceRecord, ManualEvent
+    AttendanceRecord, ManualEvent, CallLog
 } from '../types';
 
 // API Base URL - use relative path in production
@@ -26,7 +26,15 @@ async function apiRequest<T>(endpoint: string, options: RequestInit = {}): Promi
     });
 
     if (!response.ok) {
-        throw new Error(`API request failed: ${response.statusText}`);
+        const text = await response.text();
+        let detail = `${response.status} ${response.statusText}`;
+        try {
+            const j = JSON.parse(text) as { error?: string; message?: string; detail?: string };
+            detail = j.detail || j.error || j.message || detail;
+        } catch {
+            if (text && text.length < 200) detail = text;
+        }
+        throw new Error(`API request failed (${endpoint}): ${detail}`);
     }
 
     if (response.status === 204) {
@@ -315,6 +323,32 @@ export async function deleteFixedExpense(expenseId: string): Promise<void> {
     });
 }
 
+// Fixed expenses paginated
+export async function getFixedExpensesPaginated(
+    filters: {
+        showHistorical?: boolean;
+    } = {},
+    page: number = 1,
+    limit: number = 50
+): Promise<{
+    expenses: FixedExpense[];
+    totalCount: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+}> {
+    const queryParams = new URLSearchParams({
+        page: page.toString(),
+        limit: limit.toString(),
+    });
+    
+    if (filters.showHistorical !== undefined) {
+        queryParams.append('showHistorical', filters.showHistorical.toString());
+    }
+    
+    return apiRequest<any>(`/finance/fixed-expenses/paginated?${queryParams}`);
+}
+
 // ==================== VARIABLE EXPENSES ====================
 export async function getVariableExpenses(): Promise<VariableExpense[]> {
     return apiRequest<VariableExpense[]>('/finance/variable-expenses');
@@ -338,6 +372,36 @@ export async function deleteVariableExpense(expenseId: string): Promise<void> {
     return apiRequest<void>(`/finance/variable-expenses/${expenseId}`, {
         method: 'DELETE',
     });
+}
+
+// Variable expenses paginated
+export async function getVariableExpensesPaginated(
+    filters: {
+        year?: number | 'all';
+        month?: number | 'all';
+    } = {},
+    page: number = 1,
+    limit: number = 50
+): Promise<{
+    items: any[];
+    totalCount: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+}> {
+    const queryParams = new URLSearchParams({
+        page: page.toString(),
+        limit: limit.toString(),
+    });
+    
+    if (filters.year !== undefined) {
+        queryParams.append('year', filters.year === 'all' ? 'all' : filters.year.toString());
+    }
+    if (filters.month !== undefined) {
+        queryParams.append('month', filters.month === 'all' ? 'all' : filters.month.toString());
+    }
+    
+    return apiRequest<any>(`/finance/variable-expenses/paginated?${queryParams}`);
 }
 
 // ==================== LOANS ====================
@@ -469,6 +533,40 @@ export async function deleteReceivable(receivableId: string): Promise<void> {
     });
 }
 
+// Checks paginated
+export async function getChecksPaginated(
+    filters: {
+        tab?: 'INCOMING' | 'OUTGOING';
+        smartFilter?: 'ACTIVE' | 'URGENT' | 'ARCHIVE' | 'ALL';
+        searchQuery?: string;
+    } = {},
+    page: number = 1,
+    limit: number = 50
+): Promise<{
+    checks: any[];
+    totalCount: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+    stats: {
+        pending: number;
+        bounced: number;
+        overdue: number;
+        filteredTotal: number;
+    };
+}> {
+    const queryParams = new URLSearchParams({
+        page: page.toString(),
+        limit: limit.toString(),
+    });
+    
+    if (filters.tab) queryParams.append('tab', filters.tab);
+    if (filters.smartFilter) queryParams.append('smartFilter', filters.smartFilter);
+    if (filters.searchQuery) queryParams.append('searchQuery', filters.searchQuery);
+    
+    return apiRequest<any>(`/finance/checks/paginated?${queryParams}`);
+}
+
 // ==================== EQUITY ====================
 export async function getEquity(): Promise<EquityInvestment[]> {
     return apiRequest<EquityInvestment[]>('/finance/equity');
@@ -596,6 +694,11 @@ export async function deleteManualEvent(eventId: string): Promise<void> {
     });
 }
 
+// ==================== CALL LOGS ====================
+export async function getCallLogs(): Promise<CallLog[]> {
+    return apiRequest<CallLog[]>('/call-logs');
+}
+
 // ==================== SETTINGS ====================
 export interface Settings {
     vatRate: number;
@@ -608,9 +711,9 @@ export async function getSettings(): Promise<Settings> {
     return apiRequest<Settings>('/settings');
 }
 
-export async function updateSettings(settings: Settings): Promise<Settings> {
+export async function updateSettings(settings: Settings, userId?: string, reason?: string): Promise<Settings> {
     return apiRequest<Settings>('/settings', {
         method: 'PUT',
-        body: JSON.stringify(settings),
+        body: JSON.stringify({ settings, userId, reason }),
     });
 }

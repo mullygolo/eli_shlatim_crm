@@ -14,8 +14,9 @@ router.get('/', async (req, res) => {
 
 router.put('/', async (req, res) => {
     try {
-        const settings = await updateSettings(req.body);
-        res.json(settings);
+        const { settings, userId, reason } = req.body;
+        const updatedSettings = await updateSettings(settings, userId, reason);
+        res.json(updatedSettings);
     } catch (error) {
         res.status(500).json({ error: 'Failed to update settings' });
     }

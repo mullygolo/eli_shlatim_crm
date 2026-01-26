@@ -3,9 +3,10 @@ import fs from 'fs';
 import {
     Customer, Order, Supplier, Employee, Activity, OrderStatusConfiguration,
     FixedExpense, VariableExpense, Loan, Debt, Receivable, EquityInvestment,
-    AttendanceRecord, ManualEvent, EmployeeStatus, EmployeeRole,
+    AttendanceRecord, ManualEvent, CallLog, EmployeeStatus, EmployeeRole,
     PriceListProduct, SalesHistoryEntry, AdHocProduct,
-    LineItem, AdditionalService, SupplierPayment, TransactionStatus
+    LineItem, AdditionalService, SupplierPayment, TransactionStatus,
+    PaymentMethod, CustomerPayment, ReceivablePayment, DebtPayment
 } from '../types';
 import { hashPassword } from '../utils/password.js';
 import { getTodayRangeIsrael, getDateStringIsrael } from '../utils/timezone.js';
@@ -18,19 +19,49 @@ const DB_NAME = process.env.DB_NAME || 'elishlatim';
 // Connection cache
 let client: MongoClient | null = null;
 let db: Db | null = null;
+let isConnecting = false;
 
-// Helper function to get database connection
+// Helper function to get database connection with retry
 export async function getDb(): Promise<Db> {
-    if (db) return db;
+    // Return cached connection if available and still connected
+    if (db && client) {
+        try {
+            // Ping to verify connection is still alive
+            await client.db('admin').command({ ping: 1 });
+            return db;
+        } catch (error) {
+            // Connection lost, reset and reconnect
+            console.warn('MongoDB connection lost, reconnecting...');
+            client = null;
+            db = null;
+        }
+    }
+    
+    // Prevent multiple simultaneous connection attempts
+    if (isConnecting) {
+        // Wait a bit and retry
+        await new Promise(resolve => setTimeout(resolve, 100));
+        return getDb();
+    }
+    
+    isConnecting = true;
     
     try {
-        client = new MongoClient(MONGO_URI);
+        console.log('Connecting to MongoDB...');
+        client = new MongoClient(MONGO_URI, {
+            serverSelectionTimeoutMS: 10000, // 10 seconds timeout
+            connectTimeoutMS: 10000,
+        });
         await client.connect();
         db = client.db(DB_NAME);
+        console.log('MongoDB connected successfully');
         return db;
     } catch (error) {
         console.error('Failed to connect to MongoDB:', error);
-        throw error;
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        throw new Error(`MongoDB connection failed: ${errorMessage}. Check MONGO_URI in .env file.`);
+    } finally {
+        isConnecting = false;
     }
 }
 
@@ -56,7 +87,7 @@ export function deserializeDates(obj: any): any {
     if (typeof obj === 'object') {
         const deserialized: any = {};
         for (const key in obj) {
-            if (key.includes('Date') || key.includes('date') || key === 'timestamp' || key === 'createdAt' || key === 'uploadedAt' || key === 'completedAt' || key === 'startDate' || key === 'endDate' || key === 'dueDate' || key === 'repaymentDate' || key === 'effectiveDate' || key === 'expectedCloseDate' || key === 'clockIn' || key === 'clockOut' || key === 'requestedClockIn' || key === 'requestedClockOut') {
+            if (key.includes('Date') || key.includes('date') || key === 'timestamp' || key === 'createdAt' || key === 'uploadedAt' || key === 'completedAt' || key === 'startDate' || key === 'endDate' || key === 'dueDate' || key === 'repaymentDate' || key === 'effectiveDate' || key === 'expectedCloseDate' || key === 'clockIn' || key === 'clockOut' || key === 'requestedClockIn' || key === 'requestedClockOut' || key === 'changedAt') {
                 deserialized[key] = obj[key] ? new Date(obj[key]) : undefined;
             } else {
                 deserialized[key] = deserializeDates(obj[key]);
@@ -76,6 +107,18 @@ export async function getCustomers(): Promise<Customer[]> {
         return docs.map(deserializeDates) as Customer[];
     } catch (error) {
         console.error('Error fetching customers:', error);
+        throw error;
+    }
+}
+
+export async function getCustomerById(customerId: string): Promise<Customer | null> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<Customer>('customers');
+        const doc = await collection.findOne({ id: customerId });
+        return doc ? deserializeDates(doc) as Customer : null;
+    } catch (error) {
+        console.error('Error fetching customer by ID:', error);
         throw error;
     }
 }
@@ -1222,6 +1265,76 @@ export async function deleteFixedExpense(expenseId: string): Promise<void> {
     }
 }
 
+// Get fixed expenses with server-side filtering and pagination
+export async function getFixedExpensesPaginated(
+    filters: {
+        showHistorical?: boolean; // true = historical, false = active, undefined = all
+    } = {},
+    page: number = 1,
+    limit: number = 50
+): Promise<{
+    expenses: FixedExpense[];
+    totalCount: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+}> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<FixedExpense>('fixedExpenses');
+        
+        // Fetch all expenses for filtering
+        const allDocs = await collection.find({}).toArray();
+        const allExpenses = allDocs.map(deserializeDates) as FixedExpense[];
+        
+        // Filter by active/historical
+        let filtered = allExpenses;
+        if (filters.showHistorical !== undefined) {
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+            
+            if (filters.showHistorical) {
+                // Historical: has endDate and it's in the past
+                filtered = filtered.filter(e => e.endDate && new Date(e.endDate) < today);
+            } else {
+                // Active: no endDate or endDate is in the future
+                filtered = filtered.filter(e => !e.endDate || new Date(e.endDate) >= today);
+            }
+        }
+        
+        // Sort: active by paymentDay, historical by endDate descending
+        filtered.sort((a, b) => {
+            if (filters.showHistorical) {
+                // Historical: newest endDate first
+                const aDate = a.endDate ? new Date(a.endDate).getTime() : 0;
+                const bDate = b.endDate ? new Date(b.endDate).getTime() : 0;
+                return bDate - aDate;
+            } else {
+                // Active: by paymentDay
+                return (a.paymentDay || 1) - (b.paymentDay || 1);
+            }
+        });
+        
+        // Get total count after filtering
+        const totalCount = filtered.length;
+        
+        // Apply pagination
+        const skip = (page - 1) * limit;
+        const paginatedExpenses = filtered.slice(skip, skip + limit);
+        
+        return {
+            expenses: paginatedExpenses,
+            totalCount,
+            page,
+            limit,
+            totalPages: Math.ceil(totalCount / limit)
+        };
+    } catch (error) {
+        console.error('Error fetching paginated fixed expenses:', error);
+        throw error;
+    }
+}
+
 // ==================== VARIABLE EXPENSES ====================
 export async function getVariableExpenses(): Promise<VariableExpense[]> {
     try {
@@ -1272,6 +1385,150 @@ export async function deleteVariableExpense(expenseId: string): Promise<void> {
         await collection.deleteOne({ id: expenseId });
     } catch (error) {
         console.error('Error deleting variable expense:', error);
+        throw error;
+    }
+}
+
+// Internal type for variable expense display items (matches frontend VariableDisplayItem)
+interface VariableDisplayItemServer {
+    id: string;
+    name: string;
+    category: string;
+    amount: number;
+    date: Date;
+    paymentMethod: string;
+    isInstallment: boolean;
+    originalId: string;
+    isVatExempt?: boolean;
+    includesVat?: boolean;
+    checksCount?: number;
+    isDebtPayment?: boolean;
+}
+
+// Get variable expenses with server-side filtering and pagination
+export async function getVariableExpensesPaginated(
+    filters: {
+        year?: number | 'all';
+        month?: number | 'all';
+    } = {},
+    page: number = 1,
+    limit: number = 50
+): Promise<{
+    items: VariableDisplayItemServer[];
+    totalCount: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+}> {
+    try {
+        // Load all data sources
+        const [variableExpensesDocs, debtsDocs] = await Promise.all([
+            (await getDb()).collection<VariableExpense>('variableExpenses').find({}).toArray(),
+            (await getDb()).collection<Debt>('debts').find({}).toArray()
+        ]);
+
+        const variableExpenses = variableExpensesDocs.map(deserializeDates) as VariableExpense[];
+        const debts = debtsDocs.map(deserializeDates) as Debt[];
+
+        const year = filters.year || 'all';
+        const month = filters.month || 'all';
+        const displayItems: VariableDisplayItemServer[] = [];
+
+        // 1. Base Variable Expenses
+        variableExpenses.forEach(e => {
+            const expenseDate = new Date(e.date);
+            const yearMatches = year === 'all' || expenseDate.getFullYear() === Number(year);
+            const monthMatches = month === 'all' || (expenseDate.getMonth() + 1) === Number(month);
+            
+            if (yearMatches && monthMatches) {
+                displayItems.push({
+                    id: e.id,
+                    originalId: e.id,
+                    name: e.name,
+                    category: e.category,
+                    amount: e.amount,
+                    date: expenseDate,
+                    paymentMethod: e.paymentMethod || PaymentMethod.BANK_TRANSFER,
+                    isInstallment: false,
+                    includesVat: e.includesVat,
+                    isVatExempt: e.isVatExempt,
+                    checksCount: e.checks?.length
+                });
+            }
+
+            // 2. Future installments (checks) for this variable expense
+            if (e.checks && e.checks.length > 0) {
+                const checksInFilter = e.checks.filter(c => {
+                    if (!c.repaymentDate) return false;
+                    const rd = new Date(c.repaymentDate);
+                    const yMatches = year === 'all' || rd.getFullYear() === Number(year);
+                    const mMatches = month === 'all' || (rd.getMonth() + 1) === Number(month);
+                    return yMatches && mMatches;
+                });
+
+                checksInFilter.forEach((check, idx) => {
+                    displayItems.push({
+                        id: `${e.id}_inst_${idx}`,
+                        originalId: e.id,
+                        name: `תשלום (פריסה): ${e.name}`,
+                        category: e.category,
+                        amount: check.amount,
+                        date: new Date(check.repaymentDate!),
+                        paymentMethod: `צ'ק (מס' ${check.reference || '?'})`,
+                        isInstallment: true,
+                        isVatExempt: true
+                    });
+                });
+            }
+        });
+
+        // 3. Debt Payments
+        debts.forEach(debt => {
+            if (!debt.payments) return;
+            debt.payments.forEach(p => {
+                const pDate = new Date(p.date);
+                const yearMatches = year === 'all' || pDate.getFullYear() === Number(year);
+                const monthMatches = month === 'all' || (pDate.getMonth() + 1) === Number(month);
+                
+                if (yearMatches && monthMatches) {
+                    const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
+                    if (p.status && invalidStatuses.includes(p.status)) return;
+
+                    displayItems.push({
+                        id: p.id,
+                        originalId: debt.id,
+                        name: `תשלום חוב: ${debt.name}`,
+                        category: 'חובות',
+                        amount: p.amount,
+                        date: pDate,
+                        paymentMethod: p.method === PaymentMethod.CHECK ? `צ'ק (מס' ${p.reference || '?'})` : p.method,
+                        isInstallment: true,
+                        isVatExempt: true,
+                        isDebtPayment: true
+                    });
+                }
+            });
+        });
+
+        // Sort by date descending
+        displayItems.sort((a, b) => b.date.getTime() - a.date.getTime());
+
+        // Get total count
+        const totalCount = displayItems.length;
+
+        // Apply pagination
+        const skip = (page - 1) * limit;
+        const paginatedItems = displayItems.slice(skip, skip + limit);
+
+        return {
+            items: paginatedItems,
+            totalCount,
+            page,
+            limit,
+            totalPages: Math.ceil(totalCount / limit)
+        };
+    } catch (error) {
+        console.error('Error fetching paginated variable expenses:', error);
         throw error;
     }
 }
@@ -1638,6 +1895,310 @@ export async function getReceivablesPaginated(
         };
     } catch (error) {
         console.error('Error fetching paginated receivables:', error);
+        throw error;
+    }
+}
+
+// ==================== CHECKS ====================
+// Internal type for aggregated checks (matches frontend AggregatedCheck)
+interface AggregatedCheckServer {
+    uniqueId: string;
+    type: 'INCOMING' | 'OUTGOING';
+    date: Date;
+    repaymentDate: Date;
+    amount: number;
+    reference: string;
+    entityName: string;
+    status: TransactionStatus;
+    statusHistory: any[];
+    sources: any[];
+}
+
+export async function getChecksPaginated(
+    filters: {
+        tab?: 'INCOMING' | 'OUTGOING';
+        smartFilter?: 'ACTIVE' | 'URGENT' | 'ARCHIVE' | 'ALL';
+        searchQuery?: string;
+    } = {},
+    page: number = 1,
+    limit: number = 50
+): Promise<{
+    checks: AggregatedCheckServer[];
+    totalCount: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+    stats: {
+        pending: number;
+        bounced: number;
+        overdue: number;
+        filteredTotal: number;
+    };
+}> {
+    try {
+        // Load all data sources
+        const [ordersDocs, receivablesDocs, fixedExpensesDocs, variableExpensesDocs] = await Promise.all([
+            (await getDb()).collection<Order>('orders').find({}).toArray(),
+            (await getDb()).collection<Receivable>('receivables').find({}).toArray(),
+            (await getDb()).collection<FixedExpense>('fixedExpenses').find({}).toArray(),
+            (await getDb()).collection<VariableExpense>('variableExpenses').find({}).toArray()
+        ]);
+
+        const orders = ordersDocs.map(deserializeDates) as Order[];
+        const receivables = receivablesDocs.map(deserializeDates) as Receivable[];
+        const fixedExpenses = fixedExpensesDocs.map(deserializeDates) as FixedExpense[];
+        const variableExpenses = variableExpensesDocs.map(deserializeDates) as VariableExpense[];
+
+        const rawItems: AggregatedCheckServer[] = [];
+
+        // Collect checks from orders - INCOMING (customer payments)
+        orders.forEach(order => {
+            order.payments?.forEach((p: CustomerPayment) => {
+                if (p.method === PaymentMethod.CHECK) {
+                    rawItems.push({
+                        uniqueId: p.id,
+                        type: 'INCOMING',
+                        date: new Date(p.date),
+                        repaymentDate: p.repaymentDate ? new Date(p.repaymentDate) : new Date(p.date),
+                        amount: p.amount,
+                        reference: p.reference || 'ללא מס',
+                        entityName: `לקוח (הזמנה ${order.orderNumber})`,
+                        status: p.status || 'PENDING',
+                        statusHistory: p.statusHistory || [],
+                        sources: [{
+                            orderId: order.id,
+                            orderNumber: order.orderNumber,
+                            paymentId: p.id,
+                            amount: p.amount
+                        }]
+                    });
+                }
+            });
+
+            // Collect checks from orders - OUTGOING (supplier payments)
+            const processOutgoing = (items: any[], sourceType: 'lineItem' | 'additionalService') => {
+                items.forEach((item, idx) => {
+                    item.supplierPayments?.forEach((p: SupplierPayment) => {
+                        if (p.method === PaymentMethod.CHECK) {
+                            rawItems.push({
+                                uniqueId: p.id,
+                                type: 'OUTGOING',
+                                date: new Date(p.date),
+                                repaymentDate: p.repaymentDate ? new Date(p.repaymentDate) : new Date(p.date),
+                                amount: p.amount,
+                                reference: p.reference || 'ללא מס',
+                                entityName: `ספק (הזמנה ${order.orderNumber})`,
+                                status: p.status || 'PENDING',
+                                statusHistory: p.statusHistory || [],
+                                sources: [{
+                                    orderId: order.id,
+                                    orderNumber: order.orderNumber,
+                                    paymentId: p.id,
+                                    sourceIndex: idx,
+                                    sourceType: sourceType,
+                                    amount: p.amount
+                                }]
+                            });
+                        }
+                    });
+                });
+            };
+            processOutgoing(order.lineItems || [], 'lineItem');
+            processOutgoing(order.additionalServices || [], 'additionalService');
+        });
+
+        // Collect checks from receivables - INCOMING
+        receivables.forEach(receivable => {
+            receivable.payments?.forEach((p: ReceivablePayment) => {
+                if (p.method === PaymentMethod.CHECK) {
+                    rawItems.push({
+                        uniqueId: p.id,
+                        type: 'INCOMING',
+                        date: new Date(p.date),
+                        repaymentDate: p.repaymentDate ? new Date(p.repaymentDate) : new Date(p.date),
+                        amount: p.amount,
+                        reference: p.reference || 'ללא מס',
+                        entityName: `חייב: ${receivable.name}`,
+                        status: p.status || 'PENDING',
+                        statusHistory: p.statusHistory || [],
+                        sources: [{
+                            orderId: 'REC',
+                            orderNumber: 'RECEIVABLE',
+                            paymentId: p.id,
+                            sourceType: 'receivable',
+                            receivableId: receivable.id,
+                            amount: p.amount
+                        }]
+                    });
+                }
+            });
+        });
+
+        // Collect checks from fixedExpenses - OUTGOING
+        fixedExpenses.forEach(fe => {
+            fe.checks?.forEach((p: SupplierPayment) => {
+                rawItems.push({
+                    uniqueId: p.id,
+                    type: 'OUTGOING',
+                    date: new Date(p.date),
+                    repaymentDate: p.repaymentDate ? new Date(p.repaymentDate) : new Date(p.date),
+                    amount: p.amount,
+                    reference: p.reference || 'ללא מס',
+                    entityName: `הוצאה קבועה: ${fe.name}`,
+                    status: p.status || 'PENDING',
+                    statusHistory: p.statusHistory || [],
+                    sources: [{
+                        orderId: 'FIXED',
+                        orderNumber: 'FIXED',
+                        paymentId: p.id,
+                        sourceType: 'fixedExpense',
+                        fixedExpenseId: fe.id,
+                        amount: p.amount
+                    }]
+                });
+            });
+        });
+
+        // Collect checks from variableExpenses - OUTGOING
+        variableExpenses.forEach(ve => {
+            ve.checks?.forEach((p: SupplierPayment) => {
+                rawItems.push({
+                    uniqueId: p.id,
+                    type: 'OUTGOING',
+                    date: new Date(p.date),
+                    repaymentDate: p.repaymentDate ? new Date(p.repaymentDate) : new Date(p.date),
+                    amount: p.amount,
+                    reference: p.reference || 'ללא מס',
+                    entityName: `הוצאה משתנה: ${ve.name}`,
+                    status: p.status || 'PENDING',
+                    statusHistory: p.statusHistory || [],
+                    sources: [{
+                        orderId: 'VAR',
+                        orderNumber: 'VAR',
+                        paymentId: p.id,
+                        sourceType: 'variableExpense',
+                        variableExpenseId: ve.id,
+                        amount: p.amount
+                    }]
+                });
+            });
+        });
+
+        // Separate INCOMING and OUTGOING
+        const incoming = rawItems.filter(i => i.type === 'INCOMING');
+        const outgoing = rawItems.filter(i => i.type === 'OUTGOING');
+
+        // Group OUTGOING by reference + repaymentDate
+        const groupedMap = new Map<string, AggregatedCheckServer>();
+        outgoing.forEach(item => {
+            const repaymentDate = item.repaymentDate ? new Date(item.repaymentDate).getTime() : new Date(item.date).getTime();
+            const key = `${item.reference}_${repaymentDate}`;
+
+            if (groupedMap.has(key)) {
+                const existing = groupedMap.get(key)!;
+                existing.amount += item.amount;
+                existing.sources = [...existing.sources, ...item.sources];
+
+                if (!existing.entityName.includes(item.entityName)) {
+                    if (existing.sources.length <= 3) {
+                        existing.entityName += `, ${item.entityName}`;
+                    } else if (!existing.entityName.includes('מרוכז')) {
+                        existing.entityName = `תשלום מרוכז (צ'ק ${item.reference})`;
+                    }
+                }
+            } else {
+                groupedMap.set(key, { ...item });
+            }
+        });
+
+        // Combine incoming and grouped outgoing
+        let allChecks: AggregatedCheckServer[] = [...incoming, ...Array.from(groupedMap.values())];
+
+        // Apply filters
+        const tab = filters.tab || 'INCOMING';
+        const smartFilter = filters.smartFilter || 'ACTIVE';
+        const searchQuery = filters.searchQuery || '';
+
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        // Filter by tab
+        let filteredChecks = allChecks.filter(c => c.type === tab);
+
+        // Filter by search query or smart filter
+        filteredChecks = filteredChecks.filter(c => {
+            // If search query is present, it acts as a global search (ignores lifecycle filters)
+            if (searchQuery.trim()) {
+                const q = searchQuery.toLowerCase();
+                return c.reference.toLowerCase().includes(q) || c.entityName.toLowerCase().includes(q);
+            }
+
+            const isActive = ['PENDING', 'BOUNCED', 'IN_BANK_CUSTODY'].includes(c.status);
+            const isOverdue = isActive && new Date(c.repaymentDate) < today;
+            const isBounced = c.status === 'BOUNCED';
+            const isArchived = ['CLEARED', 'CANCELED', 'RETURNED'].includes(c.status);
+
+            if (smartFilter === 'ACTIVE') return isActive;
+            if (smartFilter === 'URGENT') return isBounced || isOverdue;
+            if (smartFilter === 'ARCHIVE') return isArchived;
+            return true; // ALL
+        });
+
+        // Sort
+        filteredChecks.sort((a, b) => {
+            // PRIORITY SORTING:
+            // 1. Special Case: ARCHIVE View - Newest Cleared/Canceled First (Descending)
+            if (smartFilter === 'ARCHIVE') {
+                return new Date(b.repaymentDate).getTime() - new Date(a.repaymentDate).getTime();
+            }
+
+            // 2. ACTIVE/URGENT/ALL/SEARCH Views - Action Priority
+            const isBouncedA = a.status === 'BOUNCED';
+            const isBouncedB = b.status === 'BOUNCED';
+            if (isBouncedA && !isBouncedB) return -1;
+            if (!isBouncedA && isBouncedB) return 1;
+
+            const repaymentDateA = new Date(a.repaymentDate);
+            const repaymentDateB = new Date(b.repaymentDate);
+            const isOverdueA = ['PENDING', 'IN_BANK_CUSTODY'].includes(a.status) && repaymentDateA < today;
+            const isOverdueB = ['PENDING', 'IN_BANK_CUSTODY'].includes(b.status) && repaymentDateB < today;
+            if (isOverdueA && !isOverdueB) return -1;
+            if (!isOverdueA && isOverdueB) return 1;
+
+            // For future/normal ones, sort by date (Ascending - nearest first)
+            return repaymentDateA.getTime() - repaymentDateB.getTime();
+        });
+
+        // Calculate stats for the current tab
+        const relevantForStats = allChecks.filter(c => c.type === tab);
+        const pending = relevantForStats.filter(c => ['PENDING', 'IN_BANK_CUSTODY'].includes(c.status)).reduce((s, c) => s + c.amount, 0);
+        const bounced = relevantForStats.filter(c => c.status === 'BOUNCED').reduce((s, c) => s + c.amount, 0);
+        const overdue = relevantForStats.filter(c => {
+            const isActive = ['PENDING', 'IN_BANK_CUSTODY'].includes(c.status);
+            return isActive && new Date(c.repaymentDate) < today;
+        }).reduce((s, c) => s + c.amount, 0);
+        const filteredTotal = filteredChecks.reduce((s, c) => s + c.amount, 0);
+
+        // Apply pagination
+        const totalCount = filteredChecks.length;
+        const skip = (page - 1) * limit;
+        const paginatedChecks = filteredChecks.slice(skip, skip + limit);
+
+        return {
+            checks: paginatedChecks,
+            totalCount,
+            page,
+            limit,
+            totalPages: Math.ceil(totalCount / limit),
+            stats: {
+                pending,
+                bounced,
+                overdue,
+                filteredTotal
+            }
+        };
+    } catch (error) {
+        console.error('Error fetching paginated checks:', error);
         throw error;
     }
 }
@@ -2270,12 +2831,87 @@ export async function deleteManualEvent(eventId: string): Promise<void> {
     }
 }
 
+// ==================== CALL LOGS ====================
+export async function getCallLogs(): Promise<CallLog[]> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<CallLog>('callLogs');
+        const docs = await collection.find({}).sort({ startDate: -1 }).toArray();
+        return docs.map(deserializeDates) as CallLog[];
+    } catch (error) {
+        console.error('Error fetching call logs:', error);
+        throw error;
+    }
+}
+
+export async function createCallLog(callLog: CallLog): Promise<CallLog> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<CallLog>('callLogs');
+        const serialized = serializeDates(callLog);
+        await collection.insertOne(serialized);
+        return deserializeDates(serialized) as CallLog;
+    } catch (error) {
+        console.error('Error creating call log:', error);
+        throw error;
+    }
+}
+
+export async function upsertCallLogByUniqueId(callLog: CallLog): Promise<CallLog> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<CallLog>('callLogs');
+        const serialized = serializeDates(callLog) as any;
+        const { _id, ...doc } = serialized;
+        await collection.updateOne(
+            { uniqueId: callLog.uniqueId },
+            { $set: doc },
+            { upsert: true }
+        );
+        return deserializeDates(serialized) as CallLog;
+    } catch (error) {
+        console.error('Error upserting call log:', error);
+        throw error;
+    }
+}
+
+export async function initializeCallLogsIndex(): Promise<void> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<CallLog>('callLogs');
+        try {
+            await collection.createIndex(
+                { uniqueId: 1 },
+                { unique: true, name: 'unique_call_uniqueId' }
+            );
+            console.log('Call logs unique index on uniqueId created successfully');
+        } catch (error: any) {
+            if (error.code !== 85 && error.codeName !== 'IndexOptionsConflict') {
+                console.warn('Could not create callLogs index (might already exist):', error.message);
+            }
+        }
+    } catch (error) {
+        console.error('Error initializing call logs index:', error);
+    }
+}
+
 // ==================== SETTINGS ====================
+export interface VatRateHistoryEntry {
+    id: string;
+    oldValue: number;
+    newValue: number;
+    changedAt: Date;
+    changedBy: string; // User name/ID
+    reason?: string; // Optional reason for change
+    affectedOrdersCount?: number; // How many orders were affected
+}
+
 export interface Settings {
     vatRate: number;
     monthlyGoal: number;
     systemMessage: string;
     payrollOverrides: Record<string, { finalGross?: number; finalEmployerCost?: number }>;
+    vatRateHistory?: VatRateHistoryEntry[]; // History of VAT rate changes
 }
 
 export async function getSettings(): Promise<Settings> {
@@ -2284,7 +2920,18 @@ export async function getSettings(): Promise<Settings> {
         const collection = database.collection<Settings>('settings');
         const doc = await collection.findOne({});
         if (doc) {
-            return deserializeDates(doc) as Settings;
+            const settings = deserializeDates(doc) as Settings;
+            // Ensure vatRateHistory is properly deserialized
+            if (settings.vatRateHistory && Array.isArray(settings.vatRateHistory)) {
+                settings.vatRateHistory = settings.vatRateHistory.map(entry => ({
+                    ...entry,
+                    changedAt: entry.changedAt ? (entry.changedAt instanceof Date ? entry.changedAt : new Date(entry.changedAt)) : new Date()
+                }));
+                console.log('getSettings - loaded vatRateHistory:', settings.vatRateHistory.length, 'entries', settings.vatRateHistory[0]);
+            } else {
+                console.log('getSettings - no vatRateHistory in doc');
+            }
+            return settings;
         }
         return {
             vatRate: 18,
@@ -2298,13 +2945,109 @@ export async function getSettings(): Promise<Settings> {
     }
 }
 
-export async function updateSettings(settings: Settings): Promise<Settings> {
+export async function updateSettings(settings: Settings, userId?: string, reason?: string): Promise<Settings> {
     try {
         const database = await getDb();
         const collection = database.collection<Settings>('settings');
+        
+        // Get current settings to track VAT rate changes
+        const currentDoc = await collection.findOne({});
+        const currentSettings = currentDoc ? (deserializeDates(currentDoc) as Settings) : null;
+        
+        // Initialize history array if it doesn't exist
+        if (!settings.vatRateHistory) {
+            settings.vatRateHistory = [];
+        }
+        
+        // If VAT rate changed, add to history
+        if (currentSettings) {
+            if (currentSettings.vatRate !== settings.vatRate) {
+                // VAT rate changed - add to history
+                const history: VatRateHistoryEntry[] = currentSettings.vatRateHistory || [];
+                
+                // Count affected orders (orders without specific VAT rate override)
+                const ordersCollection = database.collection('orders');
+                const affectedOrders = await ordersCollection.countDocuments({
+                    $or: [
+                        { vatRate: { $exists: false } },
+                        { vatRate: null },
+                        { vatRate: currentSettings.vatRate }
+                    ]
+                });
+                
+                const newHistoryEntry: VatRateHistoryEntry = {
+                    id: `vat_hist_${Date.now()}`,
+                    oldValue: currentSettings.vatRate,
+                    newValue: settings.vatRate,
+                    changedAt: new Date(),
+                    changedBy: userId || 'מערכת',
+                    reason: reason,
+                    affectedOrdersCount: affectedOrders
+                };
+                
+                history.unshift(newHistoryEntry);
+                
+                // Keep only last 50 entries
+                settings.vatRateHistory = history.slice(0, 50);
+                
+                console.log('✅ VAT rate history updated:', {
+                    oldValue: currentSettings.vatRate,
+                    newValue: settings.vatRate,
+                    historyLength: settings.vatRateHistory.length,
+                    newEntry: newHistoryEntry
+                });
+            } else {
+                // VAT rate didn't change - keep existing history
+                if (currentSettings.vatRateHistory) {
+                    settings.vatRateHistory = currentSettings.vatRateHistory;
+                    console.log('ℹ️ VAT rate unchanged, keeping existing history:', settings.vatRateHistory.length, 'entries');
+                }
+            }
+        } else {
+            // No existing settings - this is the first time, no history to track
+            console.log('ℹ️ No existing settings found, initializing without history');
+        }
+        
         const serialized = serializeDates(settings);
-        await collection.replaceOne({}, serialized, { upsert: true });
-        return deserializeDates(serialized) as Settings;
+        console.log('🔍 updateSettings - before save:', {
+            vatRateHistoryLength: settings.vatRateHistory?.length || 0,
+            vatRateHistory: settings.vatRateHistory,
+            serializedHasHistory: !!serialized.vatRateHistory,
+            serializedHistoryLength: serialized.vatRateHistory?.length || 0
+        });
+        
+        // Remove _id from serialized object to avoid MongoDB immutable field error
+        const { _id, ...serializedWithoutId } = serialized as any;
+        await collection.replaceOne({}, serializedWithoutId, { upsert: true });
+        
+        // Reload from DB to ensure we get the saved data
+        const savedDoc = await collection.findOne({});
+        if (!savedDoc) {
+            throw new Error('Failed to save settings');
+        }
+        
+        console.log('🔍 updateSettings - saved doc from DB:', {
+            hasVatRateHistory: !!savedDoc.vatRateHistory,
+            vatRateHistoryType: typeof savedDoc.vatRateHistory,
+            vatRateHistoryIsArray: Array.isArray(savedDoc.vatRateHistory),
+            vatRateHistoryLength: savedDoc.vatRateHistory?.length || 0,
+            vatRateHistory: savedDoc.vatRateHistory
+        });
+        
+        const result = deserializeDates(savedDoc) as Settings;
+        
+        // Ensure vatRateHistory is properly deserialized in result
+        if (result.vatRateHistory && Array.isArray(result.vatRateHistory)) {
+            result.vatRateHistory = result.vatRateHistory.map(entry => ({
+                ...entry,
+                changedAt: entry.changedAt ? (entry.changedAt instanceof Date ? entry.changedAt : new Date(entry.changedAt)) : new Date()
+            }));
+            console.log('✅ updateSettings - returning settings with history:', result.vatRateHistory.length, 'entries', result.vatRateHistory[0]);
+        } else {
+            console.log('❌ updateSettings - no vatRateHistory in saved doc after deserialization');
+        }
+        
+        return result;
     } catch (error) {
         console.error('Error updating settings:', error);
         throw error;

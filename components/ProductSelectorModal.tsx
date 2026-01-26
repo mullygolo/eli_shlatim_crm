@@ -976,15 +976,15 @@ const ProductSelectorModal: React.FC<ProductSelectorModalProps> = ({
         updateInstance(productId, selectedItemId, (instance) => {
             // If width and height are provided, set unitType to M2 automatically
             const newUnitType = (width && height) ? LineItemUnit.M2 : instance.unitType;
-            const newQuantity = newUnitType === LineItemUnit.M2 && width && height
-                ? (width * height) || 0
-                : instance.quantity;
+            // Keep existing quantity - don't auto-calculate from width * height
+            // Users can specify both dimensions (e.g., 200x200) and quantity (e.g., 5 units)
+            // The total area will be calculated as: (width * height) * quantity
             return {
                 ...instance,
                 width,
                 height,
                 unitType: newUnitType,
-                quantity: newQuantity
+                quantity: instance.quantity || 1 // Default to 1 if quantity is 0
             };
         });
     };
@@ -1001,12 +1001,12 @@ const ProductSelectorModal: React.FC<ProductSelectorModalProps> = ({
     // Handle unit type change for a product instance
     const handleUnitTypeChange = (productId: string, selectedItemId: string, unitType: LineItemUnit) => {
         updateInstance(productId, selectedItemId, (instance) => {
-            // Reset width/height and quantity if switching to/from M2
+            // When switching to/from M2, keep quantity separate from width/height
             if (unitType === LineItemUnit.M2) {
                 return {
                     ...instance,
                     unitType,
-                    quantity: (instance.width || 0) * (instance.height || 0) || 0
+                    quantity: instance.quantity || 1 // Default to 1 if quantity is 0
                 };
             } else {
                 return {
@@ -1014,7 +1014,7 @@ const ProductSelectorModal: React.FC<ProductSelectorModalProps> = ({
                     unitType,
                     width: undefined,
                     height: undefined,
-                    quantity: instance.quantity || 0
+                    quantity: instance.quantity || 1 // Default to 1 if quantity is 0
                 };
             }
         });
@@ -1637,19 +1637,34 @@ const ProductSelectorModal: React.FC<ProductSelectorModalProps> = ({
                                     </div>
                                 )}
 
-                                                                        {/* Quantity (if not M2) */}
-                                                                        {instance.unitType !== LineItemUnit.M2 && (
+                                                                        {/* Quantity - always visible, even for M2 */}
                                     <div>
                                                                                 <label className="block text-sm font-medium text-slate-700 mb-1">כמות</label>
                                                     <input
                                                                                     type="number"
                                                                                     min="0"
+                                                                                    step="0.01"
                                                                                     value={instance.quantity ?? ''}
                                                                                     onChange={(e) => handleQuantityChange(product.id, instance.selectedItemId, parseFloat(e.target.value) || 0)}
                                                                                     className="w-full px-3 py-2 text-sm border border-slate-300 rounded-md focus:ring-2 focus:ring-primary focus:border-transparent"
+                                                                                    placeholder="מספר יחידות"
                                                                                 />
                                     </div>
-                                )}
+                                                                        
+                                                                        {/* Total M2 - shows total area for M2 units */}
+                                                                        {instance.unitType === LineItemUnit.M2 && instance.width && instance.height && (
+                                    <div>
+                                                                                <label className="block text-sm font-medium text-slate-700 mb-1">סה"כ מ"ר</label>
+                                                                                <div className="w-full px-3 py-2 text-sm border border-blue-300 rounded-md bg-blue-50">
+                                                                                    <div className="text-lg font-black text-blue-800">
+                                                                                        {(instance.width * instance.height * (instance.quantity || 1)).toFixed(2)} מ"ר
+                                                                                    </div>
+                                                                                    <p className="text-xs text-blue-600 mt-1">
+                                                                                        {instance.width} × {instance.height} × {instance.quantity || 1} = {(instance.width * instance.height * (instance.quantity || 1)).toFixed(2)}
+                                                                                    </p>
+                                                                                </div>
+                                    </div>
+                                                                        )}
                                         </div>
                                         </div>
                                                             ))}

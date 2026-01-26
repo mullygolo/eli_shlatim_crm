@@ -16,7 +16,10 @@ import manualEventsRouter from './routes/manualEvents.js';
 import settingsRouter from './routes/settings.js';
 import authRouter from './routes/auth.js';
 import priceListRouter from './routes/priceList.js';
-import { initializeDefaultAdmin, autoCloseOldAttendanceRecords, initializeAttendanceIndexes } from './services/mongoService.js';
+import greenInvoiceRouter from './routes/greenInvoice.js';
+import webhookCallsRouter from './routes/webhookCalls.js';
+import callLogsRouter from './routes/callLogs.js';
+import { initializeDefaultAdmin, autoCloseOldAttendanceRecords, initializeAttendanceIndexes, initializeCallLogsIndex, getDb } from './services/mongoService.js';
 import { getDateStringIsrael } from './utils/timezone.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -45,10 +48,25 @@ app.use('/api/attendance', attendanceRouter);
 app.use('/api/manual-events', manualEventsRouter);
 app.use('/api/settings', settingsRouter);
 app.use('/api/price-list', priceListRouter);
+app.use('/api/green-invoice', greenInvoiceRouter);
+app.use('/api/webhook', webhookCallsRouter);
+app.use('/api/call-logs', callLogsRouter);
 
 // Health check
 app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', message: 'Server is running' });
+});
+
+// Health check – MongoDB connection
+app.get('/api/health/db', async (req, res) => {
+    try {
+        await getDb();
+        res.json({ status: 'ok', mongo: 'connected' });
+    } catch (error) {
+        console.error('Health check DB failed:', error);
+        const detail = error instanceof Error ? error.message : String(error);
+        res.status(503).json({ status: 'error', mongo: 'disconnected', detail });
+    }
 });
 
 // Serve static files from the React app (after API routes)
@@ -81,25 +99,53 @@ app.get('*', (req, res) => {
 
 // Error handling middleware
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
-    console.error('Error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    console.error('Unhandled error:', err);
+    const detail = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ 
+        error: 'Internal server error',
+        detail: process.env.NODE_ENV !== 'production' ? detail : undefined
+    });
 });
 
 // Initialize default admin user on server startup (before listening)
 (async () => {
+    console.log('Starting server initialization...');
+    
+    // Test MongoDB connection first
+    try {
+        console.log('Testing MongoDB connection...');
+        await getDb();
+        console.log('✓ MongoDB connection successful');
+    } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        console.error('✗ MongoDB connection failed:', errorMsg);
+        console.error('Please check:');
+        console.error('  1. MONGO_URI in server/.env is correct');
+        console.error('  2. MongoDB Atlas (or your DB) is accessible');
+        console.error('  3. Network/firewall allows connection');
+        console.error('Server will start but API calls will fail until MongoDB is connected.');
+    }
+    
     try {
         await initializeDefaultAdmin();
-        console.log('Default admin initialization completed');
+        console.log('✓ Default admin initialization completed');
     } catch (error) {
-        console.error('Failed to initialize default admin:', error);
+        console.error('✗ Failed to initialize default admin:', error);
     }
     
     // Initialize attendance indexes to prevent duplicates
     try {
         await initializeAttendanceIndexes();
-        console.log('Attendance indexes initialization completed');
+        console.log('✓ Attendance indexes initialization completed');
     } catch (error) {
-        console.error('Failed to initialize attendance indexes:', error);
+        console.error('✗ Failed to initialize attendance indexes:', error);
+    }
+
+    try {
+        await initializeCallLogsIndex();
+        console.log('✓ Call logs index initialization completed');
+    } catch (error) {
+        console.error('✗ Failed to initialize call logs index:', error);
     }
     
     // Set up periodic task to auto-close old attendance records
@@ -128,7 +174,9 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
     
     // Start server after admin initialization
     app.listen(PORT, () => {
-        console.log(`Server is running on port ${PORT}`);
+        console.log(`\n✓ Server is running on port ${PORT}`);
+        console.log(`  Health check: http://localhost:${PORT}/api/health`);
+        console.log(`  DB check: http://localhost:${PORT}/api/health/db\n`);
     });
 })();
 

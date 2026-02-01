@@ -7,6 +7,8 @@ interface HeaderProps {
     title: string;
     employees?: Employee[];
     attendanceRecords?: AttendanceRecord[];
+    showAddOrderWidget?: boolean;
+    onAddOrder?: () => void;
 }
 
 interface ActiveEmployeeInfo {
@@ -15,7 +17,7 @@ interface ActiveEmployeeInfo {
     clockInTime: string; // Added field
 }
 
-const Header: React.FC<HeaderProps> = ({ title, employees = [], attendanceRecords = [] }) => {
+const Header: React.FC<HeaderProps> = ({ title, employees = [], attendanceRecords = [], showAddOrderWidget, onAddOrder }) => {
     const { user, logout } = useAuth();
     
     const activeEmployees = useMemo((): ActiveEmployeeInfo[] => {
@@ -66,6 +68,20 @@ const Header: React.FC<HeaderProps> = ({ title, employees = [], attendanceRecord
             <h1 className="text-2xl font-semibold text-slate-800">{title}</h1>
             
             <div className="flex items-center gap-4">
+            {/* Add Order widget - prominent, widget-style */}
+            {showAddOrderWidget && onAddOrder && (
+                <button
+                    type="button"
+                    onClick={onAddOrder}
+                    className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-primary text-white font-bold text-sm shadow-md border-2 border-primary/80 hover:bg-indigo-700 hover:border-indigo-600 hover:shadow-lg transition-all"
+                    title="הוסף הזמנה חדשה"
+                >
+                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+                    </svg>
+                    הוסף הזמנה
+                </button>
+            )}
             {/* User Info & Logout */}
             {user && (
                 <div className="flex items-center gap-3">

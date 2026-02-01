@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { getOrders, createOrder, updateOrder, deleteOrder, getOrdersPaginated, getSettings, getOrderById, getOrdersByParentId, getPayableItems } from '../services/mongoService.js';
+import { getOrders, createOrder, updateOrder, deleteOrder, getOrdersPaginated, getSettings, getOrderById, getOrdersByParentId, getPayableItems, getPreparationStatusSuggestions } from '../services/mongoService.js';
 
 const router = Router();
 
@@ -43,6 +43,16 @@ router.get('/payables', async (req, res) => {
     } catch (error) {
         console.error('Error fetching payable items:', error);
         res.status(500).json({ error: 'Failed to fetch payable items' });
+    }
+});
+
+router.get('/preparation-status-suggestions', async (req, res) => {
+    try {
+        const suggestions = await getPreparationStatusSuggestions();
+        res.json({ suggestions });
+    } catch (error) {
+        console.error('Error fetching preparation status suggestions:', error);
+        res.status(500).json({ error: 'Failed to fetch suggestions' });
     }
 });
 

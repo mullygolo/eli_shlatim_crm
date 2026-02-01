@@ -305,6 +305,26 @@ export async function getOrderById(orderId: string): Promise<Order | null> {
     }
 }
 
+/** Distinct preparationStatus values from all orders' line items (for autocomplete suggestions). */
+export async function getPreparationStatusSuggestions(): Promise<string[]> {
+    try {
+        const database = await getDb();
+        const collection = database.collection('orders');
+        const result = await collection.aggregate<{ _id: string }>([
+            { $unwind: '$lineItems' },
+            { $match: { 'lineItems.preparationStatus': { $exists: true, $ne: '', $type: 'string' } } },
+            { $group: { _id: '$lineItems.preparationStatus' } },
+            { $sort: { _id: 1 } },
+            { $limit: 30 },
+            { $project: { _id: 1 } }
+        ]).toArray();
+        return result.map(r => r._id).filter(Boolean);
+    } catch (error) {
+        console.error('Error fetching preparation status suggestions:', error);
+        return [];
+    }
+}
+
 export async function getOrdersByParentId(parentOrderId: string): Promise<Order[]> {
     try {
         const database = await getDb();

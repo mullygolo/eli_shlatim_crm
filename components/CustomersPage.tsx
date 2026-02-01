@@ -938,99 +938,8 @@ const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, custo
     )
 };
 
-const CustomerImportModal: React.FC<{ onImport: (customers: Customer[]) => void; onCancel: () => void; }> = ({ onImport, onCancel }) => {
-    const [pastedData, setPastedData] = useState('');
-    const [errors, setErrors] = useState<string[]>([]);
-    
-    const handleImportClick = () => {
-        const lines = pastedData.trim().split('\n');
-        const newCustomers: Customer[] = [];
-        const parsingErrors: string[] = [];
-
-        if (pastedData.trim() === '') {
-            setErrors(["לא נמצאו נתונים לייבוא. אנא הדבק מידע בתיבה."]);
-            return;
-        }
-
-        lines.forEach((line, index) => {
-            const columns = line.split('\t'); // Tab-separated for spreadsheet compatibility
-            
-            const [companyName, contactName, email, phone = '', category = ''] = columns.map(c => c.trim());
-
-            if (!companyName || !contactName || !email) {
-                parsingErrors.push(`שורה ${index + 1}: חסר שם חברה, שם איש קשר או אימייל.`);
-                return;
-            }
-
-            const newContact: Contact = {
-                id: `cont_import_${Date.now()}_${index}`,
-                name: contactName,
-                email: email,
-                phone: phone,
-                role: 'איש קשר ראשי',
-                isBillingContact: true,
-                isDefault: true
-            };
-
-            const newCustomer: Customer = {
-                id: `cust_import_${Date.now()}_${index}`,
-                name: companyName,
-                website: '',
-                address: '',
-                category: category,
-                notes: 'לקוח שיובא מהמערכת הישנה',
-                isSpecial: false,
-                contacts: [newContact],
-                createdAt: new Date(),
-                paymentMethod: PaymentMethod.BANK_TRANSFER,
-                paymentTerms: 'תשלום מיידי',
-            };
-            newCustomers.push(newCustomer);
-        });
-
-        setErrors(parsingErrors);
-        
-        if (parsingErrors.length === 0 && newCustomers.length > 0) {
-            onImport(newCustomers);
-        }
-    };
-
-    return (
-        <div className="space-y-4 text-start">
-            <p className="text-sm text-slate-600">
-                כדי לייבא לקוחות, העתק נתונים מטבלת ה-Excel או Google Sheets שלך והדבק אותם כאן.
-                <br />
-                ודא שהעמודות הן בסדר הבא:
-                <strong className="block mt-1">שם חברה, שם איש קשר, אימייל, טלפון (אופציונלי), קטגוריה (אופציונלי)</strong>
-            </p>
-            <textarea
-                value={pastedData}
-                onChange={(e) => setPastedData(e.target.value)}
-                rows={10}
-                className="w-full p-2 border rounded font-mono text-sm border-slate-300 focus:border-primary focus:ring-primary"
-                placeholder="הדבק כאן את נתוני הלקוחות שלך..."
-                aria-label="אזור להדבקת נתוני לקוחות לייבוא"
-            />
-            {errors.length > 0 && (
-                <div className="bg-red-50 p-3 rounded-md">
-                    <h4 className="font-semibold text-red-700">שגיאות בנתונים:</h4>
-                    <ul className="list-disc list-inside text-sm text-red-600">
-                        {errors.map((error, i) => <li key={i}>{error}</li>)}
-                    </ul>
-                </div>
-            )}
-            <div className="flex justify-end space-x-2 pt-4 space-x-reverse">
-                <button type="button" onClick={onCancel} className="px-4 py-2 bg-slate-200 text-slate-800 rounded-md hover:bg-slate-300">ביטול</button>
-                <button type="button" onClick={handleImportClick} className="px-4 py-2 bg-primary text-white rounded-md hover:bg-indigo-700">ייבא נתונים</button>
-            </div>
-        </div>
-    );
-};
-
-
 const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, orders, setOrders, addActivity, onNavigateToOrder, statusConfigs, vatRate }) => {
     const [isNewCustomerModalOpen, setIsNewCustomerModalOpen] = useState(false);
-    const [isImportModalOpen, setIsImportModalOpen] = useState(false);
     const [isDetailModalOpen, setIsDetailModalOpen] = useState(false);
     const [isCollectionCenterOpen, setIsCollectionCenterOpen] = useState(false);
     const [viewingCustomer, setViewingCustomer] = useState<Customer | null>(null);
@@ -1049,10 +958,10 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
     const [loading, setLoading] = useState(true);
     const [paginatedCustomers, setPaginatedCustomers] = useState<(Customer & { debt?: number })[]>([]);
 
-    // Load customers from API with pagination
-    const refetchCustomers = async () => {
+    // Load customers from API with pagination (silent = true: don't show loading, for background refresh)
+    const refetchCustomers = async (silent: boolean = false) => {
+        if (!silent) setLoading(true);
         try {
-            setLoading(true);
             const filters = { searchTerm: searchTerm || undefined };
             const result = await mongoService.getCustomersPaginated(filters, currentPage, pageSize);
             setPaginatedCustomers(result.customers);
@@ -1060,13 +969,22 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
         } catch (error) {
             console.error('Error loading customers:', error);
         } finally {
-            setLoading(false);
+            if (!silent) setLoading(false);
         }
     };
 
-    // Load customers when search term or pagination changes
+    // Load customers when search term or pagination changes; if customers already in props, show first page immediately then refetch in background
     useEffect(() => {
-        refetchCustomers();
+        if (customers.length > 0 && paginatedCustomers.length === 0) {
+            const start = (currentPage - 1) * pageSize;
+            const slice = customers.slice(start, start + pageSize);
+            setPaginatedCustomers(slice);
+            setTotalCount(customers.length);
+            setLoading(false);
+            refetchCustomers(true);
+        } else {
+            refetchCustomers();
+        }
     }, [searchTerm, currentPage, pageSize]);
 
     // Use paginated customers for display
@@ -1247,26 +1165,6 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
         setViewingCustomer(null);
     };
 
-    const handleImportCustomers = async (newCustomers: Customer[]) => {
-        try {
-            // Save all customers to MongoDB
-            const savedCustomers = await Promise.all(
-                newCustomers.map(customer => mongoService.createCustomer(customer))
-            );
-            
-            // Update local state with saved customers
-            setCustomers(prev => [...prev, ...savedCustomers]);
-            // Refetch paginated customers to show imported customers
-            await refetchCustomers();
-            addActivity(`${savedCustomers.length} לקוחות יובאו בהצלחה`);
-            setIsImportModalOpen(false);
-        } catch (error) {
-            console.error('Error importing customers:', error);
-            alert('שגיאה בייבוא הלקוחות. חלק מהלקוחות אולי לא נשמרו.');
-            setIsImportModalOpen(false);
-        }
-    };
-
     const handleSyncFromGreenInvoice = async () => {
         if (!confirm('האם אתה בטוח שברצונך לסנכרן לקוחות מחשבונית ירוקה? זה עלול ליצור לקוחות כפולים אם לא נזהרים.')) {
             return;
@@ -1347,10 +1245,6 @@ ${results.errors.length > 0 ? `\n- שגיאות: ${results.errors.length}` : ''}
                                 סנכרן מחשבונית ירוקה
                             </>
                         )}
-                    </button>
-                    <button onClick={() => setIsImportModalOpen(true)} className="flex-shrink-0 flex items-center px-4 py-2 bg-secondary text-white rounded-lg hover:bg-emerald-600 transition-colors">
-                        <ImportIcon className="h-5 w-5 me-2" />
-                        ייבוא לקוחות
                     </button>
                     <button onClick={() => setIsNewCustomerModalOpen(true)} className="flex-shrink-0 flex items-center px-4 py-2 bg-primary text-white rounded-lg hover:bg-indigo-700 transition-colors">
                         <PlusIcon className="h-5 w-5 me-2" />
@@ -1603,11 +1497,6 @@ ${results.errors.length > 0 ? `\n- שגיאות: ${results.errors.length}` : ''}
                 />
             )}
 
-             {isImportModalOpen && (
-                <Modal title="ייבוא לקוחות" onClose={() => setIsImportModalOpen(false)} size="2xl">
-                    <CustomerImportModal onImport={handleImportCustomers} onCancel={() => setIsImportModalOpen(false)} />
-                </Modal>
-            )}
         </div>
     );
 };

@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { CallLog } from '../types';
-import { PhoneIcon } from './icons';
+import { PhoneIcon, ImportIcon } from './icons';
 import Modal from './Modal';
-import { getCallLogs } from '../services/mongoService';
+import { getCallLogs, syncCallLogs } from '../services/mongoService';
 
 const formatDuration = (seconds: number): string => {
     if (!seconds || isNaN(seconds)) return '0:00';
@@ -32,6 +32,12 @@ const CallCenterPage: React.FC = () => {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [playingLog, setPlayingLog] = useState<CallLog | null>(null);
+    const [showSyncModal, setShowSyncModal] = useState(false);
+    const [syncLoading, setSyncLoading] = useState(false);
+    const [syncError, setSyncError] = useState<string | null>(null);
+    const [syncSuccess, setSyncSuccess] = useState<string | null>(null);
+    const [syncStartDate, setSyncStartDate] = useState('');
+    const [syncEndDate, setSyncEndDate] = useState('');
 
     useEffect(() => {
         let cancelled = false;
@@ -52,6 +58,57 @@ const CallCenterPage: React.FC = () => {
                 if (!cancelled) setLoading(false);
             });
         return () => { cancelled = true; };
+    }, []);
+
+    const loadLogs = async () => {
+        setLoading(true);
+        setError(null);
+        try {
+            const data = await getCallLogs();
+            setLogs(data);
+        } catch (err) {
+            setError(err instanceof Error ? err.message : String(err));
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handleSync = async () => {
+        if (!syncStartDate || !syncEndDate) {
+            setSyncError('נא לבחור תאריך התחלה ותאריך סיום');
+            return;
+        }
+
+        setSyncLoading(true);
+        setSyncError(null);
+        setSyncSuccess(null);
+
+        try {
+            const result = await syncCallLogs(syncStartDate, syncEndDate);
+            setSyncSuccess(result.message);
+            // Reload logs after sync
+            await loadLogs();
+            // Auto-close modal after 2 seconds
+            setTimeout(() => {
+                setShowSyncModal(false);
+                setSyncStartDate('');
+                setSyncEndDate('');
+                setSyncSuccess(null);
+            }, 2000);
+        } catch (err) {
+            setSyncError(err instanceof Error ? err.message : String(err));
+        } finally {
+            setSyncLoading(false);
+        }
+    };
+
+    // Set default date range (last 30 days)
+    useEffect(() => {
+        const today = new Date();
+        const thirtyDaysAgo = new Date();
+        thirtyDaysAgo.setDate(today.getDate() - 30);
+        setSyncEndDate(today.toISOString().split('T')[0]);
+        setSyncStartDate(thirtyDaysAgo.toISOString().split('T')[0]);
     }, []);
 
     if (loading) {
@@ -76,9 +133,19 @@ const CallCenterPage: React.FC = () => {
 
     return (
         <div className="space-y-4" dir="rtl">
-            <div className="flex items-center gap-2 text-slate-700">
-                <PhoneIcon className="h-6 w-6" />
-                <h2 className="text-lg font-semibold">לוג שיחות מרכזייה</h2>
+            <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2 text-slate-700">
+                    <PhoneIcon className="h-6 w-6" />
+                    <h2 className="text-lg font-semibold">לוג שיחות מרכזייה</h2>
+                </div>
+                <button
+                    type="button"
+                    onClick={() => setShowSyncModal(true)}
+                    className="inline-flex items-center gap-2 px-4 py-2 bg-primary text-white rounded-lg hover:bg-indigo-700 transition"
+                >
+                    <ImportIcon className="h-5 w-5" />
+                    סנכרן היסטוריה מהמרכזיה
+                </button>
             </div>
 
             <div className="bg-white shadow-md rounded-lg overflow-hidden">
@@ -163,6 +230,87 @@ const CallCenterPage: React.FC = () => {
                             controls
                             className="w-full"
                         />
+                    </div>
+                </Modal>
+            )}
+
+            {showSyncModal && (
+                <Modal
+                    title="סנכרון היסטוריית שיחות מהמרכזיה"
+                    onClose={() => {
+                        setShowSyncModal(false);
+                        setSyncError(null);
+                        setSyncSuccess(null);
+                    }}
+                    size="lg"
+                >
+                    <div className="space-y-4 text-start">
+                        <p className="text-sm text-slate-600 mb-4">
+                            בחר טווח תאריכים לסנכרון שיחות מהמרכזיה. השיחות יישמרו במערכת ויופיעו בטבלה.
+                        </p>
+
+                        <div className="grid grid-cols-2 gap-4">
+                            <div>
+                                <label className="block text-sm font-medium text-slate-700 mb-1">
+                                    תאריך התחלה
+                                </label>
+                                <input
+                                    type="date"
+                                    value={syncStartDate}
+                                    onChange={(e) => setSyncStartDate(e.target.value)}
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-primary focus:border-primary"
+                                    max={syncEndDate || undefined}
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-slate-700 mb-1">
+                                    תאריך סיום
+                                </label>
+                                <input
+                                    type="date"
+                                    value={syncEndDate}
+                                    onChange={(e) => setSyncEndDate(e.target.value)}
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-primary focus:border-primary"
+                                    min={syncStartDate || undefined}
+                                    max={new Date().toISOString().split('T')[0]}
+                                />
+                            </div>
+                        </div>
+
+                        {syncError && (
+                            <div className="rounded-lg bg-red-50 border border-red-200 p-3">
+                                <p className="text-sm text-red-800">{syncError}</p>
+                            </div>
+                        )}
+
+                        {syncSuccess && (
+                            <div className="rounded-lg bg-green-50 border border-green-200 p-3">
+                                <p className="text-sm text-green-800">{syncSuccess}</p>
+                            </div>
+                        )}
+
+                        <div className="flex justify-end gap-3 pt-4">
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setShowSyncModal(false);
+                                    setSyncError(null);
+                                    setSyncSuccess(null);
+                                }}
+                                className="px-4 py-2 text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50"
+                                disabled={syncLoading}
+                            >
+                                ביטול
+                            </button>
+                            <button
+                                type="button"
+                                onClick={handleSync}
+                                disabled={syncLoading || !syncStartDate || !syncEndDate}
+                                className="px-4 py-2 bg-primary text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                {syncLoading ? 'מסנכרן...' : 'סנכרן'}
+                            </button>
+                        </div>
                     </div>
                 </Modal>
             )}

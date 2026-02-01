@@ -125,6 +125,7 @@ export interface LineItem {
     priceListNotes?: string; // Notes from price list
     variantId?: string; // Selected variant ID from price list
     notes?: string; // General notes
+    preparationStatus?: string; // Free-text preparation status per item
 }
 
 export interface AdditionalService {

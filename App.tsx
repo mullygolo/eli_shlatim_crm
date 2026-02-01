@@ -133,19 +133,77 @@ const App: React.FC = () => {
         };
     }, [isAuthenticated, logout]);
 
-    // Load all data from MongoDB on mount
+    // Load data in two phases: critical first (show app fast), then rest in background
+    const CRITICAL_TIMEOUT_MS = 10000;
+    const BACKGROUND_TIMEOUT_MS = 20000;
     useEffect(() => {
-        const loadAllData = async () => {
+        let cancelled = false;
+
+        const applySettings = (settingsData: any) => {
+            setVatRate(settingsData.vatRate);
+            setMonthlyGoal(settingsData.monthlyGoal);
+            setSystemMessage(settingsData.systemMessage);
+            setPayrollOverrides(settingsData.payrollOverrides);
+            if (settingsData.vatRateHistory && Array.isArray(settingsData.vatRateHistory) && settingsData.vatRateHistory.length > 0) {
+                const historyWithDates = settingsData.vatRateHistory.map((entry: any) => ({
+                    ...entry,
+                    changedAt: entry.changedAt ? (entry.changedAt instanceof Date ? entry.changedAt : new Date(entry.changedAt)) : new Date()
+                }));
+                setVatRateHistory(historyWithDates);
+            } else {
+                setVatRateHistory([]);
+            }
+        };
+
+        const loadCritical = async () => {
             setIsLoading(true);
             setError(null);
+            const entries: { label: string; fn: () => Promise<any> }[] = [
+                { label: 'סטטוסים', fn: getStatusConfigs },
+                { label: 'הגדרות', fn: getSettings },
+                { label: 'עובדים', fn: getEmployees },
+            ];
+            const loadPromise = Promise.allSettled(entries.map((e) => e.fn()));
+            const timeoutPromise = new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error('DATA_LOAD_TIMEOUT')), CRITICAL_TIMEOUT_MS)
+            );
+            let results: PromiseSettledResult<any>[];
+            try {
+                results = await Promise.race([loadPromise, timeoutPromise]);
+            } catch (err) {
+                if (!cancelled && (err instanceof Error && err.message === 'DATA_LOAD_TIMEOUT')) {
+                    setError('השרת לא מגיב. וודא שהשרת רץ (למשל באמצעות start.bat) על פורט 3002, ואז רענן את הדף.');
+                } else if (!cancelled) {
+                    setError(err instanceof Error ? err.message : String(err));
+                }
+                setIsLoading(false);
+                return;
+            }
+            if (cancelled) return;
+            const failed = results
+                .map((r, i) => (r.status === 'rejected' ? { label: entries[i].label, err: (r as PromiseRejectedResult).reason } : null))
+                .filter((x): x is { label: string; err: unknown } => x !== null);
+            if (failed.length > 0) {
+                const msg = failed.map((f) => f.label).join(', ');
+                const detail = failed[0].err instanceof Error ? failed[0].err.message : String(failed[0].err);
+                console.error('Error loading critical data:', failed);
+                setError(`שגיאה בטעינת הנתונים. אנא רענן את הדף.\n\nנכשל: ${msg}\n\nפרטים: ${detail}`);
+                setIsLoading(false);
+                return;
+            }
+            const [statusConfigsData, settingsData, employeesData] = (results as PromiseFulfilledResult<any>[]).map((r) => r.value);
+            setStatusConfigs(statusConfigsData.length > 0 ? statusConfigsData : []);
+            setEmployees(employeesData);
+            applySettings(settingsData);
+            if (!cancelled) setIsLoading(false);
+        };
 
+        const loadRestInBackground = async () => {
             const entries: { label: string; fn: () => Promise<any> }[] = [
                 { label: 'לקוחות', fn: getCustomers },
                 { label: 'הזמנות', fn: getOrders },
                 { label: 'ספקים', fn: getSuppliers },
-                { label: 'עובדים', fn: getEmployees },
                 { label: 'פעילויות', fn: getActivities },
-                { label: 'סטטוסים', fn: getStatusConfigs },
                 { label: 'הוצאות קבועות', fn: getFixedExpenses },
                 { label: 'הוצאות משתנות', fn: getVariableExpenses },
                 { label: 'הלוואות', fn: getLoans },
@@ -154,80 +212,49 @@ const App: React.FC = () => {
                 { label: 'הון', fn: getEquity },
                 { label: 'נוכחות', fn: getAttendanceRecords },
                 { label: 'אירועים', fn: getManualEvents },
-                { label: 'הגדרות', fn: getSettings },
             ];
-
-            const results = await Promise.allSettled(entries.map((e) => e.fn()));
+            const loadPromise = Promise.allSettled(entries.map((e) => e.fn()));
+            const timeoutPromise = new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error('BACKGROUND_TIMEOUT')), BACKGROUND_TIMEOUT_MS)
+            );
+            let results: PromiseSettledResult<any>[];
+            try {
+                results = await Promise.race([loadPromise, timeoutPromise]);
+            } catch (err) {
+                if (!cancelled) console.error('Background data load timeout or error:', err);
+                return;
+            }
+            if (cancelled) return;
             const failed = results
                 .map((r, i) => (r.status === 'rejected' ? { label: entries[i].label, err: (r as PromiseRejectedResult).reason } : null))
                 .filter((x): x is { label: string; err: unknown } => x !== null);
-
             if (failed.length > 0) {
-                const msg = failed.map((f) => f.label).join(', ');
-                const detail = failed[0].err instanceof Error ? failed[0].err.message : String(failed[0].err);
-                console.error('Error loading data:', failed);
-                setError(`שגיאה בטעינת הנתונים. אנא רענן את הדף.\n\nנכשל: ${msg}\n\nפרטים: ${detail}`);
-                setIsLoading(false);
-                return;
+                console.error('Error loading background data (partial):', failed);
             }
-
-            const [
-                customersData,
-                ordersData,
-                suppliersData,
-                employeesData,
-                activitiesData,
-                statusConfigsData,
-                fixedExpensesData,
-                variableExpensesData,
-                loansData,
-                debtsData,
-                receivablesData,
-                equityData,
-                attendanceRecordsData,
-                manualEventsData,
-                settingsData
-            ] = (results as PromiseFulfilledResult<any>[]).map((r) => r.value);
-
+            const getValue = (r: PromiseSettledResult<any>, fallback: any) => (r.status === 'fulfilled' ? r.value : fallback);
+            if (cancelled) return;
             try {
-                setCustomers(customersData);
-                setOrders(ordersData);
-                setSuppliers(suppliersData);
-                setEmployees(employeesData);
-                setActivities(activitiesData);
-                setStatusConfigs(statusConfigsData.length > 0 ? statusConfigsData : []);
-                setFixedExpenses(fixedExpensesData);
-                setVariableExpenses(variableExpensesData);
-                setLoans(loansData);
-                setDebts(debtsData);
-                setReceivables(receivablesData);
-                setEquity(equityData);
-                setAttendanceRecords(attendanceRecordsData);
-                setManualEvents(manualEventsData);
-
-                setVatRate(settingsData.vatRate);
-                setMonthlyGoal(settingsData.monthlyGoal);
-                setSystemMessage(settingsData.systemMessage);
-                setPayrollOverrides(settingsData.payrollOverrides);
-                if (settingsData.vatRateHistory && Array.isArray(settingsData.vatRateHistory) && settingsData.vatRateHistory.length > 0) {
-                    const historyWithDates = settingsData.vatRateHistory.map((entry: any) => ({
-                        ...entry,
-                        changedAt: entry.changedAt ? (entry.changedAt instanceof Date ? entry.changedAt : new Date(entry.changedAt)) : new Date()
-                    }));
-                    setVatRateHistory(historyWithDates);
-                } else {
-                    setVatRateHistory([]);
-                }
+                setCustomers(getValue(results[0], []));
+                setOrders(getValue(results[1], []));
+                setSuppliers(getValue(results[2], []));
+                setActivities(getValue(results[3], []));
+                setFixedExpenses(getValue(results[4], []));
+                setVariableExpenses(getValue(results[5], []));
+                setLoans(getValue(results[6], []));
+                setDebts(getValue(results[7], []));
+                setReceivables(getValue(results[8], []));
+                setEquity(getValue(results[9], []));
+                setAttendanceRecords(getValue(results[10], []));
+                setManualEvents(getValue(results[11], []));
             } catch (err) {
-                console.error('Error applying loaded data:', err);
-                setError(err instanceof Error ? err.message : String(err));
-            } finally {
-                setIsLoading(false);
+                console.error('Error applying background data:', err);
             }
         };
 
-        loadAllData();
-        
+        loadCritical().then(() => {
+            if (!cancelled) loadRestInBackground();
+        });
+
         // Set up automatic refresh for attendance records every 30 seconds
         const attendanceRefreshInterval = setInterval(async () => {
             try {
@@ -237,14 +264,16 @@ const App: React.FC = () => {
                 console.error('Error refreshing attendance records:', err);
             }
         }, 30000); // Refresh every 30 seconds
-        
+
         return () => {
+            cancelled = true;
             clearInterval(attendanceRefreshInterval);
         };
     }, []);
 
     const [openOrderId, setOpenOrderId] = useState<string | null>(null);
-    
+    const [openNewOrderRequest, setOpenNewOrderRequest] = useState(false);
+
     // Mock data placeholders for new pages
     const [deals, setDeals] = useState<any[]>([]); 
     const [transactions, setTransactions] = useState<any[]>([]);
@@ -258,6 +287,11 @@ const App: React.FC = () => {
     
     const onOrderOpened = useCallback(() => {
         setOpenOrderId(null);
+    }, []);
+
+    const handleAddOrderFromHeader = useCallback(() => {
+        setCurrentPage('Orders');
+        setOpenNewOrderRequest(true);
     }, []);
 
     const addActivity = useCallback(async (description: string) => {
@@ -360,6 +394,8 @@ const App: React.FC = () => {
                             addActivity={addActivity} 
                             initialOpenOrderId={openOrderId} 
                             onOrderOpened={onOrderOpened}
+                            openNewOrderRequest={openNewOrderRequest}
+                            onClearedOpenNewOrderRequest={() => setOpenNewOrderRequest(false)}
                             statusConfigs={statusConfigs}
                             getNextOrderNumber={getNextOrderNumber}
                             vatRate={vatRate}
@@ -800,7 +836,13 @@ const App: React.FC = () => {
             <div className="flex h-screen bg-light-bg" dir="rtl">
                 <Sidebar currentPage={currentPage} setCurrentPage={setCurrentPage} />
                 <div className="flex-1 flex flex-col min-w-0">
-                    <Header title={PAGE_TITLES[currentPage]} employees={employees} attendanceRecords={attendanceRecords} />
+                    <Header
+                        title={PAGE_TITLES[currentPage]}
+                        employees={employees}
+                        attendanceRecords={attendanceRecords}
+                        showAddOrderWidget={['Dashboard', 'Orders', 'Customers', 'Suppliers', 'PriceList', 'Attendance', 'CallCenter'].includes(currentPage)}
+                        onAddOrder={handleAddOrderFromHeader}
+                    />
                     <main className="flex-1 overflow-x-auto overflow-y-auto bg-light-bg p-4 sm:p-6 lg:p-8">
                         {renderPage()}
                     </main>

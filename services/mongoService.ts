@@ -114,6 +114,11 @@ export async function getOrderById(orderId: string): Promise<Order> {
     return apiRequest<Order>(`/orders/${orderId}`);
 }
 
+export async function getPreparationStatusSuggestions(): Promise<string[]> {
+    const data = await apiRequest<{ suggestions: string[] }>('/orders/preparation-status-suggestions');
+    return data?.suggestions ?? [];
+}
+
 export async function getOrdersByParentId(parentOrderId: string): Promise<Order[]> {
     return apiRequest<Order[]>(`/orders/parent/${parentOrderId}`);
 }
@@ -697,6 +702,21 @@ export async function deleteManualEvent(eventId: string): Promise<void> {
 // ==================== CALL LOGS ====================
 export async function getCallLogs(): Promise<CallLog[]> {
     return apiRequest<CallLog[]>('/call-logs');
+}
+
+export interface SyncCallLogsResult {
+    success: boolean;
+    fetched: number;
+    saved: number;
+    skipped: number;
+    message: string;
+}
+
+export async function syncCallLogs(startDate: string, endDate: string, number?: string): Promise<SyncCallLogsResult> {
+    return apiRequest<SyncCallLogsResult>('/call-logs/sync', {
+        method: 'POST',
+        body: JSON.stringify({ startDate, endDate, number }),
+    });
 }
 
 // ==================== SETTINGS ====================

@@ -27,6 +27,8 @@ interface OrdersPageProps {
     addActivity: (description: string) => void;
     initialOpenOrderId?: string | null;
     onOrderOpened?: () => void;
+    openNewOrderRequest?: boolean;
+    onClearedOpenNewOrderRequest?: () => void;
     statusConfigs: OrderStatusConfiguration[];
     getNextOrderNumber: () => string;
     vatRate: number;
@@ -139,7 +141,9 @@ const SmartCustomerSearch: React.FC<{
     customers: Customer[];
     selectedCustomerId: string;
     onSelect: (customerId: string) => void;
-}> = ({ customers, selectedCustomerId, onSelect }) => {
+    showAddNewOption?: boolean;
+    onAddNewCustomer?: (nameFromSearch: string) => void;
+}> = ({ customers, selectedCustomerId, onSelect, showAddNewOption, onAddNewCustomer }) => {
     const [searchTerm, setSearchTerm] = useState('');
     const [isOpen, setIsOpen] = useState(false);
     const wrapperRef = useRef<HTMLDivElement>(null);
@@ -210,9 +214,23 @@ const SmartCustomerSearch: React.FC<{
                 </div>
             </div>
             {isOpen && (
-                <ul className="absolute z-50 mt-1 w-full bg-white shadow-lg max-h-60 rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 overflow-auto focus:outline-none sm:text-sm border border-slate-200">
-                    {filteredCustomers.length === 0 ? (
-                        <li className="text-gray-500 select-none relative py-2 pl-3 pr-9 text-center">לא נמצאו תוצאות</li>
+                <ul className="absolute z-50 mt-1 w-full bg-white shadow-lg max-h-60 rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 overflow-auto focus:outline-none sm:text-sm border border-slate-200" role="listbox">
+                    {filteredCustomers.length === 0 && (!showAddNewOption || !searchTerm.trim()) ? (
+                        <li className="text-gray-500 select-none relative py-2 pl-3 pr-9 text-center" role="option">לא נמצאו תוצאות</li>
+                    ) : filteredCustomers.length === 0 && showAddNewOption && searchTerm.trim() ? (
+                        <>
+                            <li
+                                role="option"
+                                className="text-indigo-700 bg-indigo-50 hover:bg-indigo-100 cursor-pointer select-none relative py-2.5 pl-3 pr-4 border-b border-indigo-100 font-medium"
+                                onClick={() => {
+                                    onAddNewCustomer?.(searchTerm.trim());
+                                    setIsOpen(false);
+                                }}
+                            >
+                                <span className="block truncate text-start">הוסף לקוח חדש: {searchTerm.trim()}</span>
+                            </li>
+                            <li className="sticky bottom-0 bg-slate-50 border-t border-slate-200 p-2 text-center text-xs text-slate-500">לא נמצא – ניתן להוסיף לקוח חדש</li>
+                        </>
                     ) : (
                         filteredCustomers.map(customer => {
                             let matchLabel = '';
@@ -249,9 +267,11 @@ const SmartCustomerSearch: React.FC<{
                             );
                         })
                     )}
-                    <li className="sticky bottom-0 bg-slate-50 border-t border-slate-200 p-2 text-center text-xs text-slate-500">
-                         מציג {filteredCustomers.length} תוצאות
-                    </li>
+                    {filteredCustomers.length > 0 && (
+                        <li className="sticky bottom-0 bg-slate-50 border-t border-slate-200 p-2 text-center text-xs text-slate-500">
+                             מציג {filteredCustomers.length} תוצאות
+                        </li>
+                    )}
                 </ul>
             )}
         </div>
@@ -275,19 +295,19 @@ const NewSupplierForm: React.FC<{ onSave: (supplier: { name: string; contactPers
         <form onSubmit={handleSubmit} className="space-y-4 text-start">
             <div>
                 <label className="block text-sm font-medium text-slate-700">שם הספק</label>
-                <input type="text" name="name" value={formData.name} onChange={handleChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" required />
+                <input type="text" name="name" value={formData.name} onChange={handleChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" required />
             </div>
             <div>
                 <label className="block text-sm font-medium text-slate-700">איש קשר ראשי</label>
-                <input type="text" name="contactPerson" value={formData.contactPerson} onChange={handleChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+                <input type="text" name="contactPerson" value={formData.contactPerson} onChange={handleChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" />
             </div>
             <div>
                 <label className="block text-sm font-medium text-slate-700">אימייל</label>
-                <input type="email" name="email" value={formData.email} onChange={handleChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+                <input type="email" name="email" value={formData.email} onChange={handleChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" />
             </div>
             <div>
                 <label className="block text-sm font-medium text-slate-700">טלפון</label>
-                <input type="tel" name="phone" value={formData.phone} onChange={handleChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+                <input type="tel" name="phone" value={formData.phone} onChange={handleChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" />
             </div>
             <div className="flex justify-end space-x-2 pt-4 space-x-reverse">
                 <button type="button" onClick={onCancel} className="px-4 py-2 bg-slate-200 text-slate-800 rounded-md hover:bg-slate-300">ביטול</button>
@@ -598,12 +618,14 @@ const OrderForm: React.FC<{
     statusConfigs: OrderStatusConfiguration[];
     getNextOrderNumber: () => string;
     vatRate: number;
-}> = ({ order, customers, setCustomers, suppliers, setSuppliers, employees, onSave, onDraftCreate, onCancel, addActivity, onSwitchOrder, statusConfigs, getNextOrderNumber, vatRate }) => {
+    setHeaderContent?: (node: React.ReactNode) => void;
+}> = ({ order, customers, setCustomers, suppliers, setSuppliers, employees, onSave, onDraftCreate, onCancel, addActivity, onSwitchOrder, statusConfigs, getNextOrderNumber, vatRate, setHeaderContent }) => {
     
     // Find Dynamic Initial Status
     const initialStatus = useMemo(() => statusConfigs.find(c => c.isLead)?.label || 'ליד חדש', [statusConfigs]);
 
     const [customerMode, setCustomerMode] = useState<'EXISTING' | 'NEW'>('EXISTING');
+    const [showNewCustomerForm, setShowNewCustomerForm] = useState(false);
     const [newCustomerData, setNewCustomerData] = useState({
         name: '',
         contactName: '',
@@ -673,6 +695,11 @@ const OrderForm: React.FC<{
         assigneeId: '',
         dueDate: new Date().toISOString().split('T')[0], 
     });
+
+    const [preparationStatusSuggestions, setPreparationStatusSuggestions] = useState<string[]>([]);
+    useEffect(() => {
+        mongoService.getPreparationStatusSuggestions().then(setPreparationStatusSuggestions).catch(() => setPreparationStatusSuggestions([]));
+    }, []);
 
     const [isAddingPayment, setIsAddingPayment] = useState(false);
     const [paymentIdToDelete, setPaymentIdToDelete] = useState<string | null>(null); 
@@ -915,7 +942,8 @@ const OrderForm: React.FC<{
                 setDateString(new Date().toISOString().split('T')[0]);
                 setDealStartDateString('');
             }
-            setCustomerMode('EXISTING'); 
+            setCustomerMode('EXISTING');
+            setShowNewCustomerForm(false);
         }
     }, [order]);
 
@@ -1325,7 +1353,7 @@ const OrderForm: React.FC<{
         const newLineItems = [...formData.lineItems];
         const item = { ...newLineItems[index] };
 
-        (item as any)[name] = (name === 'description' || name === 'unitType' || name === 'supplierId' || name === 'notes') ? value : parseFloat(value) || 0;
+        (item as any)[name] = (name === 'description' || name === 'unitType' || name === 'supplierId' || name === 'notes' || name === 'preparationStatus') ? value : parseFloat(value) || 0;
 
         // Note: Quantity is now independent of width/height for M2 units
         // Users can specify both dimensions (e.g., 200x200) and quantity (e.g., 5 units)
@@ -1757,6 +1785,16 @@ const OrderForm: React.FC<{
                     action: 'REMOVED' 
                 });
             } else {
+                if ((oldItem.preparationStatus ?? '') !== (newItem.preparationStatus ?? '')) {
+                    changes.push({
+                        field: 'lineItems',
+                        label: 'סטטוס הכנה',
+                        subItemLabel: oldItem.description || newItem.description,
+                        oldValue: oldItem.preparationStatus || '—',
+                        newValue: newItem.preparationStatus || '—',
+                        action: 'UPDATED'
+                    });
+                }
                 if (oldItem.description !== newItem.description || oldItem.quantity !== newItem.quantity || oldItem.unitPrice !== newItem.unitPrice || oldItem.width !== newItem.width || oldItem.height !== newItem.height || oldItem.supplierId !== newItem.supplierId) {
                     const oldSName = suppliers.find(s => s.id === oldItem.supplierId)?.name || 'לא משויך';
                     const newSName = suppliers.find(s => s.id === newItem.supplierId)?.name || 'לא משויך';
@@ -2087,6 +2125,35 @@ const OrderForm: React.FC<{
     const hasDealDate = !!formData.dealStartDate;
     const iDealActiveAndDated = isActiveDeal && hasDealDate;
 
+    const createdDateDisplay = formData.createdAt
+        ? new Date(formData.createdAt).toLocaleDateString('he-IL')
+        : (formData.date ? new Date(formData.date).toLocaleDateString('he-IL') : new Date().toLocaleDateString('he-IL'));
+
+    useEffect(() => {
+        if (!setHeaderContent) return;
+        setHeaderContent(
+            <div className="flex items-center gap-3 px-3 py-1.5 rounded-lg bg-slate-50 border border-slate-100 text-xs text-slate-600">
+                <span className="flex items-center gap-1.5" title="נוצר בתאריך">
+                    <span className="text-slate-400 font-medium">נוצר:</span>
+                    <span className="font-mono font-semibold text-slate-700">{createdDateDisplay}</span>
+                </span>
+                <span className="w-px h-4 bg-slate-200 flex-shrink-0" aria-hidden />
+                <span className={`flex items-center gap-1.5 ${iDealActiveAndDated ? 'text-green-700' : 'text-slate-500'}`} title={hasDealDate ? 'תאריך אישור עסקה' : 'טרם אושרה עסקה'}>
+                    <span className="font-medium">{hasDealDate ? 'אישור עסקה:' : 'טרם אושרה'}</span>
+                    <input
+                        type="date"
+                        name="dealStartDate"
+                        value={dealStartDateString}
+                        onChange={handleMasterChange}
+                        min={minDealDate}
+                        className={`w-[6.5rem] py-1 px-1.5 rounded border text-xs font-medium bg-white cursor-pointer ${iDealActiveAndDated ? 'border-green-200 text-green-700 bg-green-50/50' : hasDealDate ? 'border-slate-200 text-slate-600' : 'border-dashed border-slate-200 text-slate-400'}`}
+                    />
+                </span>
+            </div>
+        );
+        return () => { setHeaderContent(null); };
+    }, [setHeaderContent, createdDateDisplay, dealStartDateString, hasDealDate, iDealActiveAndDated, minDealDate]);
+
     return (
         <>
         <form onSubmit={handleSubmit} className="space-y-8 text-start">
@@ -2169,88 +2236,32 @@ const OrderForm: React.FC<{
             </div>
 
             <div className="space-y-4">
-                <div className="flex justify-between items-center border-b pb-2">
-                    <div className="flex items-center gap-2">
-                        <h3 className="text-xl font-semibold text-slate-800">פרטי הזמנה ולקוח</h3>
-                        {formData.type === OrderType.SERVICE_CALL && (
-                            <span className="bg-red-100 text-red-800 text-xs px-2 py-1 rounded-full font-bold flex items-center">
-                                <SettingsIcon className="w-3 h-3 me-1" />
-                                קריאת שירות
-                            </span>
-                        )}
+                {formData.type === OrderType.SERVICE_CALL && (
+                    <div className="flex justify-between items-center border-b pb-2">
+                        <span className="bg-red-100 text-red-800 text-xs px-2 py-1 rounded-full font-bold flex items-center">
+                            <SettingsIcon className="w-3 h-3 me-1" />
+                            קריאת שירות
+                        </span>
                     </div>
-                    {!isEditMode && !formData.parentOrderId && (
-                        <div className="bg-slate-100 p-1 rounded-lg flex text-xs font-medium">
-                            <button type="button" onClick={() => setCustomerMode('EXISTING')} className={`px-3 py-1.5 rounded-md transition-all ${customerMode === 'EXISTING' ? 'bg-white text-primary shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>לקוח קיים</button>
-                             <button type="button" onClick={() => setCustomerMode('NEW')} className={`px-3 py-1.5 rounded-md transition-all ${customerMode === 'NEW' ? 'bg-white text-primary shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>+ לקוח חדש</button>
-                        </div>
-                    )}
-                </div>
+                )}
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
-                    <div className="bg-slate-50 rounded-lg p-2 border border-slate-200/60 flex flex-col relative">
-                        <div className="flex items-center gap-1 mb-1">
-                            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">נוצר בתאריך</span>
-                            <div className="text-slate-300"><SettingsIcon className="w-3 h-3"/></div>
-                        </div>
-                        <div className="font-mono text-sm font-semibold text-slate-600 bg-transparent border-none p-0">
-                            {formData.createdAt 
-                                ? new Date(formData.createdAt).toLocaleDateString('he-IL') 
-                                : (formData.date ? new Date(formData.date).toLocaleDateString('he-IL') : new Date().toLocaleDateString('he-IL'))
-                            }
-                        </div>
-                        <div className="absolute top-2 left-2 text-slate-300 text-xs" title="לקריאה בלבד">🔒</div>
-                    </div>
-
-                    <div className={`rounded-lg p-2 border transition-all flex flex-col relative group ${iDealActiveAndDated ? 'bg-green-50 border-green-200' : (hasDealDate ? 'bg-slate-50 border-slate-300' : 'bg-slate-50 border-slate-200 border-dashed')}`}>
-                        <div className="flex justify-between items-start mb-1">
-                            <label htmlFor="dealStartDate" className={`block text-[10px] font-bold uppercase tracking-wider cursor-pointer ${iDealActiveAndDated ? 'text-green-700' : 'text-slate-500'}`}>
-                                {hasDealDate ? 'תאריך אישור עסקה' : 'טרם אושרה עסקה'}
-                                <span className="text-xs text-slate-400 font-normal mr-1">(קובע תנאי תשלום)</span>
-                            </label>
-                             <div className={`text-[10px] px-1.5 rounded-full border flex items-center gap-1 ${isActiveDeal ? 'bg-green-100 text-green-700 border-green-200' : 'bg-slate-200 text-slate-500 border-slate-300'}`}>
-                                <span className={`w-1.5 h-1.5 rounded-full ${isActiveDeal ? 'bg-green-500 animate-pulse' : 'bg-slate-400'}`}></span>
-                                {isActiveDeal ? 'פעיל' : 'לא פעיל'}
-                            </div>
-                        </div>
-                        <input type="date" name="dealStartDate" id="dealStartDate" value={dealStartDateString} onChange={handleMasterChange} min={minDealDate} className={`block w-full text-sm font-semibold bg-transparent border-none p-0 focus:ring-0 cursor-pointer ${iDealActiveAndDated ? 'text-green-800' : 'text-slate-500'}`} />
-                    </div>
-                </div>
-
-                <div className={`p-4 rounded-lg border ${customerMode === 'NEW' ? 'bg-indigo-50 border-indigo-200' : 'bg-slate-50 border-slate-200'}`}>
-                    {customerMode === 'EXISTING' ? (
-                        <div className="space-y-4">
-                            <SmartCustomerSearch customers={customers} selectedCustomerId={formData.customerId} onSelect={(id) => setFormData(prev => ({ ...prev, customerId: id, contactId: '' }))} />
-                            <div>
-                                <label className="block text-sm font-medium text-slate-700">איש קשר</label>
-                                <select name="contactId" value={formData.contactId || ''} onChange={handleMasterChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" disabled={!selectedCustomer}>
-                                    <option value="">בחר איש קשר</option>
-                                    {selectedCustomer?.contacts.map(c => <option key={c.id} value={c.id}>{c.name} {c.isDefault ? '(★ ברירת מחדל)' : ''}</option>)}
-                                </select>
-                            </div>
-                            
-                            <div>
-                                <label className="block text-sm font-medium text-slate-700">תנאי תשלום</label>
-                                <div className="relative">
-                                    <input type="text" value={formData.paymentTerms || ''} readOnly className="mt-1 block w-full rounded-md border-slate-300 bg-slate-100 text-slate-500 shadow-sm sm:text-sm cursor-not-allowed pr-8" />
-                                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                                        <LockIcon className="h-4 w-4 text-slate-400" />
-                                    </div>
-                                </div>
-                                <p className="text-[10px] text-slate-400 mt-1">{selectedCustomer ? `(מוגדר עבור ${selectedCustomer.name})` : 'מוגדר בכרטיס לקוח'}</p>
-                            </div>
-
-                            {selectedContact && (
-                                <div className="mt-2 text-xs text-slate-500 bg-white p-2 rounded border border-slate-100">
-                                    <p><strong>תפקיד:</strong> {selectedContact.role}</p>
-                                    <p><strong>טלפון:</strong> {selectedContact.phone}</p>
-                                    <p><strong>מייל:</strong> {selectedContact.email}</p>
-                                </div>
-                            )}
-                        </div>
-                    ) : (
+                <div className={`p-4 rounded-lg border ${showNewCustomerForm ? 'bg-indigo-50 border-indigo-200' : 'bg-slate-50 border-slate-200'}`}>
+                    {showNewCustomerForm ? (
                         <div className="space-y-3">
-                            <h4 className="text-sm font-bold text-indigo-800 mb-2 border-b border-indigo-200 pb-1">פרטי לקוח חדש</h4>
+                            <div className="flex items-center justify-between gap-2 flex-wrap">
+                                <h4 className="text-sm font-bold text-indigo-800 border-b border-indigo-200 pb-1">פרטי לקוח חדש</h4>
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        setShowNewCustomerForm(false);
+                                        setCustomerMode('EXISTING');
+                                        setFormData(prev => ({ ...prev, customerId: '', contactId: '' }));
+                                    }}
+                                    className="text-xs font-medium text-indigo-600 hover:text-indigo-800 hover:underline"
+                                >
+                                    בחר לקוח קיים
+                                </button>
+                            </div>
                             <div className="grid grid-cols-2 gap-3">
                                 <div className="col-span-2">
                                     <label className="block text-xs font-medium text-slate-600">שם חברה <span className="text-red-500">*</span></label>
@@ -2293,40 +2304,96 @@ const OrderForm: React.FC<{
                                 </div>
                             </div>
                         </div>
+                    ) : selectedCustomer ? (
+                        <div className="space-y-4">
+                            <SmartCustomerSearch
+                                customers={customers}
+                                selectedCustomerId={formData.customerId}
+                                onSelect={(id) => setFormData(prev => ({ ...prev, customerId: id, contactId: '' }))}
+                                showAddNewOption={!isEditMode && !formData.parentOrderId}
+                                onAddNewCustomer={(name) => {
+                                    setNewCustomerData(prev => ({ ...prev, name }));
+                                    setCustomerMode('NEW');
+                                    setShowNewCustomerForm(true);
+                                    setFormData(prev => ({ ...prev, customerId: '', contactId: '' }));
+                                }}
+                            />
+                            <div>
+                                <label className="block text-sm font-medium text-slate-700">איש קשר</label>
+                                <select name="contactId" value={formData.contactId || ''} onChange={handleMasterChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" disabled={!selectedCustomer}>
+                                    <option value="">בחר איש קשר</option>
+                                    {selectedCustomer?.contacts.map(c => <option key={c.id} value={c.id}>{c.name} {c.isDefault ? '(★ ברירת מחדל)' : ''}</option>)}
+                                </select>
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-slate-700">תנאי תשלום</label>
+                                <div className="relative">
+                                    <input type="text" value={formData.paymentTerms || ''} readOnly className="mt-1 block w-full rounded-md border-slate-300 bg-slate-100 text-slate-500 shadow-sm sm:text-sm cursor-not-allowed pr-8" />
+                                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                                        <LockIcon className="h-4 w-4 text-slate-400" />
+                                    </div>
+                                </div>
+                                <p className="text-[10px] text-slate-400 mt-1">{selectedCustomer ? `(מוגדר עבור ${selectedCustomer.name})` : 'מוגדר בכרטיס לקוח'}</p>
+                            </div>
+                            {selectedContact && (
+                                <div className="mt-2 text-xs text-slate-500 bg-white p-2 rounded border border-slate-100">
+                                    <p><strong>תפקיד:</strong> {selectedContact.role}</p>
+                                    <p><strong>טלפון:</strong> {selectedContact.phone}</p>
+                                    <p><strong>מייל:</strong> {selectedContact.email}</p>
+                                </div>
+                            )}
+                        </div>
+                    ) : (
+                        <SmartCustomerSearch
+                            customers={customers}
+                            selectedCustomerId={formData.customerId}
+                            onSelect={(id) => setFormData(prev => ({ ...prev, customerId: id, contactId: '' }))}
+                            showAddNewOption={!isEditMode && !formData.parentOrderId}
+                            onAddNewCustomer={(name) => {
+                                setNewCustomerData(prev => ({ ...prev, name }));
+                                setCustomerMode('NEW');
+                                setShowNewCustomerForm(true);
+                                setFormData(prev => ({ ...prev, customerId: '', contactId: '' }));
+                            }}
+                        />
                     )}
                 </div>
             </div>
 
-            <div className="space-y-4">
-                <h3 className="text-xl font-semibold text-slate-800 border-b pb-2">סטטוסים ותהליך</h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div>
-                        <label className="block text-sm font-medium text-slate-700">סוכן מטפל</label>
-                        <select name="employeeId" value={formData.employeeId} onChange={handleMasterChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm">
-                            <option value="">בחר עובד</option>
-                            {employees.map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
-                        </select>
-                    </div>
-                    <div>
-                        <label className="block text-sm font-medium text-slate-700">סטטוס הזמנה</label>
-                        <select name="orderStatus" value={formData.orderStatus} onChange={handleMasterChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                    <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">סטטוס הזמנה</label>
+                    <div className={`rounded-xl border-2 p-4 ${currentStatusConfig?.color || 'bg-slate-100 text-slate-800'} border-current/20 shadow-sm`}>
+                        <select
+                            name="orderStatus"
+                            value={formData.orderStatus}
+                            onChange={handleMasterChange}
+                            className={`w-full rounded-lg py-3 px-4 text-lg font-bold bg-transparent border-0 cursor-pointer focus:ring-2 focus:ring-offset-2 focus:ring-primary appearance-none ${currentStatusConfig?.color || 'bg-slate-100 text-slate-800'}`}
+                        >
                             {statusConfigs.sort((a,b) => a.orderIndex - b.orderIndex).map(config => (
                                 <option key={config.id} value={config.label}>{config.label}</option>
                             ))}
                         </select>
                     </div>
                 </div>
+                <div>
+                    <label className="block text-sm font-medium text-slate-700">סוכן מטפל</label>
+                    <select name="employeeId" value={formData.employeeId} onChange={handleMasterChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm">
+                        <option value="">בחר עובד</option>
+                        {employees.map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
+                    </select>
+                </div>
             </div>
 
-            <div className="space-y-6">
-                <h3 className="text-xl font-semibold text-slate-800 border-b pb-2">פירוט הזמנה ועלויות</h3>
-                <div>
-                    <label className="block text-sm font-medium text-slate-700">כותרת הזמנה</label>
-                    <input type="text" name="description" value={formData.description} onChange={handleMasterChange} required className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+            <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-6 space-y-6">
+                <h3 className="text-2xl font-bold text-slate-900 border-b-2 border-primary pb-3">פירוט הזמנה ועלויות</h3>
+                <div className="bg-primary/5 rounded-lg p-4 border border-slate-200">
+                    <label className="block text-base font-semibold text-slate-800 mb-2">כותרת הזמנה</label>
+                    <input type="text" name="description" value={formData.description} onChange={handleMasterChange} required className="block w-full rounded-lg border-2 border-slate-200 bg-white py-2.5 px-3 text-base font-medium text-slate-800 focus:border-primary focus:ring-2 focus:ring-primary/20 shadow-sm" />
                 </div>
                 <div>
-                    <div className="flex items-center justify-between mb-2">
-                        <h4 className="text-lg font-medium text-slate-800">פריטי הזמנה</h4>
+                    <div className="flex items-center justify-between mb-4">
+                        <h4 className="text-xl font-semibold text-slate-800">פריטי הזמנה</h4>
                         <div className="flex items-center gap-2">
                             {formData.lineItems.some(item => item.priceListProductId) && (
                                 <button
@@ -2356,76 +2423,85 @@ const OrderForm: React.FC<{
                             </button>
                         </div>
                     </div>
-                    <div className="hidden md:grid text-[11px] grid-cols-12 gap-2 px-2 text-slate-500 font-bold uppercase tracking-tight">
-                        <div className="col-span-2">תיאור</div>
-                        <div className="col-span-1">סוג יח'</div>
-                        <div className="col-span-1">רוחב</div>
-                        <div className="col-span-1">גובה</div>
-                        <div className="col-span-1 text-center">כמות</div>
-                        <div className="col-span-1 text-center">מחיר</div>
-                        <div className="col-span-1 text-center">עלות</div>
-                        <div className="col-span-1 text-center bg-indigo-50 rounded-t py-0.5 border-x border-t border-indigo-100 text-indigo-700">רווח %</div>
-                        <div className="col-span-1 text-center">סה"כ</div>
-                        <div className="col-span-2">ספק</div>
-                    </div>
-                    <div className="space-y-3">
+                    <datalist id="preparation-status-list">
+                        {preparationStatusSuggestions.map(s => <option key={s} value={s} />)}
+                    </datalist>
+                    <div className="overflow-x-auto rounded-lg border-2 border-slate-300 bg-slate-100/80" style={{ minWidth: 'min(100%, 1000px)' }}>
+                        <div className="hidden md:grid text-xs font-semibold min-w-[1000px]" style={{ gridTemplateColumns: 'repeat(12, minmax(0, 1fr)) minmax(180px, 2fr)' }}>
+                            <div className="col-span-2 py-2.5 px-2 border-b-2 border-r border-slate-400 bg-slate-200 text-slate-800">תיאור</div>
+                            <div className="col-span-1 py-2.5 px-2 border-b-2 border-r border-slate-400 bg-slate-200 text-slate-800">סוג יח'</div>
+                            <div className="col-span-1 py-2.5 px-2 border-b-2 border-r border-slate-400 bg-slate-200 text-slate-800">רוחב</div>
+                            <div className="col-span-1 py-2.5 px-2 border-b-2 border-r border-slate-400 bg-slate-200 text-slate-800">גובה</div>
+                            <div className="col-span-1 py-2.5 px-2 border-b-2 border-r border-slate-400 bg-slate-200 text-slate-800 text-center">כמות</div>
+                            <div className="col-span-1 py-2.5 px-2 border-b-2 border-r border-slate-400 bg-slate-200 text-slate-800 text-center">מחיר</div>
+                            <div className="col-span-1 py-2.5 px-2 border-b-2 border-r border-slate-400 bg-slate-200 text-slate-800 text-center">עלות</div>
+                            <div className="col-span-1 py-2.5 px-2 border-b-2 border-r border-slate-400 bg-indigo-100 text-indigo-800 text-center">רווח %</div>
+                            <div className="col-span-1 py-2.5 px-2 border-b-2 border-r border-slate-400 bg-slate-200 text-slate-800 text-center">סה"כ</div>
+                            <div className="col-span-2 py-2.5 px-2 border-b-2 border-r border-slate-400 bg-slate-200 text-slate-800">ספק</div>
+                            <div className="py-2.5 px-2 border-b-2 border-slate-400 bg-slate-200 text-slate-800">סטטוס הכנה</div>
+                        </div>
+                        <div className="divide-y-2 divide-slate-300">
                         {formData.lineItems.map((item, index) => {
                             const itemMarkup = item.cost > 0 ? ((item.unitPrice - item.cost) / item.cost) * 100 : (item.unitPrice > 0 ? 100 : 0);
                             const markupColorClass = getProfitMarginColor(itemMarkup);
+                            const rowBg = index % 2 === 0 ? 'bg-white' : 'bg-slate-50';
+                            const cellBorder = 'border-r border-slate-300';
                             return (
-                                <div key={item.id} className="p-3 border rounded-lg bg-slate-50 md:p-0 md:border-none md:bg-transparent md:grid md:grid-cols-12 md:gap-2 md:items-center relative">
-                                    <button type="button" onClick={() => removeLineItem(index)} className="absolute top-2 left-2 text-red-500 hover:text-red-700 p-1 md:hidden"><DeleteIcon className="h-5 w-5"/></button>
-                                    <div className="md:col-span-2">
+                                <div key={item.id} className={`p-3 border border-slate-200 rounded-lg bg-slate-50 md:rounded-none md:border-0 md:border-b md:border-slate-300 md:py-2 md:px-0 md:grid md:gap-0 md:items-stretch md:min-w-[1000px] ${rowBg} relative hover:bg-slate-50/80 transition-colors`} style={{ gridTemplateColumns: 'repeat(12, minmax(0, 1fr)) minmax(180px, 2fr)' }}>
+                                    <button type="button" onClick={() => removeLineItem(index)} className="absolute top-2 left-2 text-red-500 hover:text-red-700 p-1 md:hidden z-10"><DeleteIcon className="h-5 w-5"/></button>
+                                    <div className={`md:col-span-2 md:py-1.5 md:px-2 md:border-r md:border-slate-300 md:bg-inherit min-w-0 ${cellBorder}`}>
                                         <label className="text-xs font-medium text-slate-500 md:hidden">תיאור</label>
-                                        <input 
-                                            type="text" 
-                                            placeholder="תיאור" 
-                                            name="description" 
-                                            value={item.description} 
-                                            onChange={e => handleLineItemChange(index, e)} 
-                                            className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" 
+                                        <input
+                                            type="text"
+                                            placeholder="תיאור"
+                                            name="description"
+                                            value={item.description}
+                                            onChange={e => handleLineItemChange(index, e)}
+                                            title={item.description || 'תיאור'}
+                                            className="mt-1 md:mt-0 block w-full min-w-0 rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary"
+                                            style={{ maxWidth: '100%' }}
                                         />
                                     </div>
-                                    <div className="md:col-span-1">
+                                    <div className={`md:col-span-1 md:py-1.5 md:px-2 ${cellBorder}`}>
                                         <label className="text-xs font-medium text-slate-500 md:hidden mt-2">סוג יחידה</label>
-                                        <select name="unitType" value={item.unitType} onChange={e => handleLineItemChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm">
+                                        <select name="unitType" value={item.unitType} onChange={e => handleLineItemChange(index, e)} className="mt-1 md:mt-0 block w-full min-w-0 rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary">
                                             {Object.values(LineItemUnit).map(u => <option key={u} value={u}>{u}</option>)}
                                         </select>
                                     </div>
-                                    <div className="grid grid-cols-2 gap-x-2 mt-2 md:col-span-9 md:contents">
+                                    <div className="grid grid-cols-2 gap-x-2 mt-2 md:col-span-9 md:contents md:mt-0">
                                         {item.unitType === LineItemUnit.M2 ? (
                                             <>
-                                                <div className="md:col-span-1">
+                                                <div className={`md:col-span-1 md:py-1.5 md:px-2 ${cellBorder}`}>
                                                     <label className="text-xs font-medium text-slate-500 md:hidden">רוחב</label>
-                                                    <input type="number" placeholder="רוחב" name="width" value={item.width || ''} onChange={e => handleLineItemChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+                                                    <input type="number" placeholder="רוחב" name="width" value={item.width || ''} onChange={e => handleLineItemChange(index, e)} className="mt-1 md:mt-0 block w-full rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary" />
                                                 </div>
-                                                <div className="md:col-span-1">
+                                                <div className={`md:col-span-1 md:py-1.5 md:px-2 ${cellBorder}`}>
                                                     <label className="text-xs font-medium text-slate-500 md:hidden">גובה</label>
-                                                    <input type="number" placeholder="גובה" name="height" value={item.height || ''} onChange={e => handleLineItemChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+                                                    <input type="number" placeholder="גובה" name="height" value={item.height || ''} onChange={e => handleLineItemChange(index, e)} className="mt-1 md:mt-0 block w-full rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary" />
                                                 </div>
                                             </>
                                         ) : (
-                                            <div className="hidden md:block md:col-span-2"></div>
+                                            <div className="hidden md:block md:col-span-2 md:border-r md:border-slate-300"></div>
                                         )}
-                                        <div className="md:col-span-1">
+                                        <div className={`md:col-span-1 md:py-1.5 md:px-2 ${cellBorder}`}>
                                             <label className="text-xs font-medium text-slate-500 md:hidden">כמות</label>
-                                            <input type="number" placeholder="כמות" name="quantity" value={item.quantity} onChange={e => handleLineItemChange(index, e)} min="0" step="0.01" className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+                                            <input type="number" placeholder="כמות" name="quantity" value={item.quantity} onChange={e => handleLineItemChange(index, e)} min="0" step="0.01" className="mt-1 md:mt-0 block w-full rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary" />
                                         </div>
-                                        <div className="md:col-span-1">
+                                        <div className={`md:col-span-1 md:py-1.5 md:px-2 ${cellBorder}`}>
                                             <label className="text-xs font-medium text-slate-500 md:hidden">מחיר ליח'</label>
-                                            <input type="number" placeholder="מחיר" name="unitPrice" value={item.unitPrice} onChange={e => handleLineItemChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+                                            <input type="number" placeholder="מחיר" name="unitPrice" value={item.unitPrice} onChange={e => handleLineItemChange(index, e)} className="mt-1 md:mt-0 block w-full rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary" />
                                         </div>
-                                        <div className="md:col-span-1">
+                                        <div className={`md:col-span-1 md:py-1.5 md:px-2 ${cellBorder}`}>
                                             <label className="text-xs font-medium text-slate-500 md:hidden">עלות ליח'</label>
-                                            <input type="number" placeholder="עלות" name="cost" value={item.cost} onChange={e => handleLineItemChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+                                            <input type="number" placeholder="עלות" name="cost" value={item.cost} onChange={e => handleLineItemChange(index, e)} className="mt-1 md:mt-0 block w-full rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary" />
                                         </div>
-                                        <div className="md:col-span-1 flex items-center md:flex-col md:justify-center md:items-center mt-1 md:mt-0 bg-indigo-50/30 md:h-full rounded-b md:rounded-none">
+                                        <div className={`md:col-span-1 flex items-center md:flex-col md:justify-center md:items-center mt-1 md:mt-0 md:py-1.5 md:px-2 bg-indigo-50/50 md:border-r md:border-slate-300 ${cellBorder}`}>
                                             <label className="text-[10px] font-bold text-indigo-500 md:hidden w-20">רווח %</label>
                                             <span className={`text-xs font-black ${markupColorClass} font-mono`}>
                                                 {itemMarkup.toFixed(1)}%
                                             </span>
                                         </div>
-                                        <div className="md:col-span-1 flex items-center md:flex-col md:justify-center md:items-start mt-1 md:mt-0">
+                                        <div className={`md:col-span-1 flex items-center md:flex-col md:justify-center md:items-start mt-1 md:mt-0 md:py-1.5 md:px-2 ${cellBorder}`}>
                                             <label className="text-xs font-medium text-slate-500 md:hidden w-20">סה"כ</label>
                                             <div className="flex flex-col">
                                                 <span className="text-xs font-semibold text-slate-800">₪{(item.quantity * item.unitPrice).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
@@ -2441,10 +2517,16 @@ const OrderForm: React.FC<{
                                                 )}
                                             </div>
                                         </div>
-                                        <div className="col-span-2 md:col-span-2">
+                                        <div className={`col-span-2 md:col-span-2 md:py-1.5 md:px-2 md:min-w-0`}>
                                             <label className="text-xs font-medium text-slate-500 md:hidden">ספק</label>
-                                            <div className="flex items-center gap-1 mt-1">
-                                                <select name="supplierId" value={item.supplierId || ''} onChange={e => handleLineItemChange(index, e)} className="flex-grow block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm">
+                                            <div className="flex items-center gap-1 mt-1 md:mt-0">
+                                                <select
+                                                    name="supplierId"
+                                                    value={item.supplierId || ''}
+                                                    onChange={e => handleLineItemChange(index, e)}
+                                                    title={item.supplierId ? (suppliers.find(s => s.id === item.supplierId)?.name || '') : 'בחר ספק'}
+                                                    className="flex-grow min-w-0 block w-full rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary sm:text-sm"
+                                                >
                                                     <option value="">בחר ספק</option>
                                                     {suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
                                                 </select>
@@ -2455,22 +2537,36 @@ const OrderForm: React.FC<{
                                                             setSendItemForIndex(index);
                                                             setSendItemModalOpen(true);
                                                         }}
-                                                        className="px-2 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700 flex items-center gap-1"
+                                                        className="px-2 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700 flex items-center gap-1 shrink-0"
                                                         title="שלח לספק"
                                                     >
                                                         <EmailIcon className="w-3 h-3" />
                                                     </button>
                                                 )}
-                                                <button type="button" onClick={() => removeLineItem(index)} className="hidden md:block text-red-500 hover:text-red-700 p-1"><DeleteIcon className="h-5 w-5"/></button>
+                                                <button type="button" onClick={() => removeLineItem(index)} className="hidden md:block text-red-500 hover:text-red-700 p-1 shrink-0"><DeleteIcon className="h-5 w-5"/></button>
                                             </div>
                                         </div>
-                                        <div className="col-span-12 md:col-span-12 mt-2">
+                                        <div className="md:py-1.5 md:px-2 md:min-w-0">
+                                            <label className="text-xs font-medium text-slate-500 md:hidden mt-2">סטטוס הכנה</label>
+                                            <input
+                                                type="text"
+                                                placeholder="סטטוס הכנה"
+                                                name="preparationStatus"
+                                                value={item.preparationStatus ?? ''}
+                                                onChange={e => handleLineItemChange(index, e)}
+                                                list="preparation-status-list"
+                                                title={item.preparationStatus ?? 'סטטוס הכנה'}
+                                                className="mt-1 md:mt-0 block w-full min-w-0 rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary"
+                                                style={{ maxWidth: '100%' }}
+                                            />
+                                        </div>
+                                        <div className="col-span-12 mt-2 md:mt-2 md:py-1.5 md:px-2 md:border-t md:border-slate-200" style={{ gridColumn: '1 / -1' }}>
                                             <label className="text-xs font-medium text-slate-500 md:hidden">הערה</label>
                                             <textarea
                                                 name="notes"
                                                 value={item.notes || ''}
                                                 onChange={e => handleLineItemChange(index, e)}
-                                                className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm"
+                                                className="mt-1 md:mt-0 block w-full min-w-0 rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary"
                                                 placeholder="הערות לפריט זה"
                                                 rows={2}
                                             />
@@ -2479,8 +2575,9 @@ const OrderForm: React.FC<{
                                 </div>
                             );
                         })}
+                        </div>
                     </div>
-                    <button type="button" onClick={addLineItem} className="mt-2 text-sm text-primary hover:text-indigo-800">+ הוסף פריט</button>
+                    <button type="button" onClick={addLineItem} className="mt-4 py-2 px-4 text-sm font-medium text-primary border border-primary/30 rounded-lg hover:bg-primary/5 hover:border-primary/50 transition-colors">+ הוסף פריט</button>
                 </div>
                 <div>
                     <h4 className="text-lg font-medium text-slate-800 mb-2">שירותים נוספים (שליח / מתקין)</h4>
@@ -2509,16 +2606,16 @@ const OrderForm: React.FC<{
                                     </div>
                                     <div>
                                         <label className="block text-xs font-medium text-slate-600">עלות (עבורנו)</label>
-                                        <input type="number" name="cost" value={service.cost} onChange={e => handleAdditionalServiceChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+                                        <input type="number" name="cost" value={service.cost} onChange={e => handleAdditionalServiceChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" />
                                     </div>
                                     <div>
                                         <label className="block text-xs font-medium text-slate-600">מחיר (ללקוח)</label>
-                                        <input type="number" name="price" value={service.price} onChange={e => handleAdditionalServiceChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+                                        <input type="number" name="price" value={service.price} onChange={e => handleAdditionalServiceChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" />
                                     </div>
                                     <div className="md:col-span-2">
                                         <label className="block text-xs font-medium text-slate-600">ספק שירות</label>
                                         <div className="flex items-center gap-2">
-                                            <select name="supplierId" value={service.supplierId || ''} onChange={e => handleAdditionalServiceChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm">
+                                            <select name="supplierId" value={service.supplierId || ''} onChange={e => handleAdditionalServiceChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm">
                                                 <option value="">בחר ספק שירות</option>
                                                 {suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
                                             </select>
@@ -2536,24 +2633,24 @@ const OrderForm: React.FC<{
                                                 return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
                                             })() : ''} 
                                             onChange={e => handleAdditionalServiceChange(index, e)} 
-                                            className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" 
+                                            className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" 
                                         />
                                     </div>
                                     <div className="md:col-span-2">
                                         <label className="block text-xs font-medium text-slate-600">כתובת למשלוח/התקנה</label>
-                                        <input type="text" name="address" value={service.address || ''} onChange={e => handleAdditionalServiceChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+                                        <input type="text" name="address" value={service.address || ''} onChange={e => handleAdditionalServiceChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" />
                                     </div>
                                     <div>
                                         <label className="block text-xs font-medium text-slate-600">איש קשר בשטח</label>
-                                        <input type="text" name="siteContactName" value={service.siteContactName || ''} onChange={e => handleAdditionalServiceChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+                                        <input type="text" name="siteContactName" value={service.siteContactName || ''} onChange={e => handleAdditionalServiceChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" />
                                     </div>
                                     <div>
                                         <label className="block text-xs font-medium text-slate-600">פרטי התקשרות</label>
-                                        <input type="text" name="siteContactDetails" value={service.siteContactDetails || ''} onChange={e => handleAdditionalServiceChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+                                        <input type="text" name="siteContactDetails" value={service.siteContactDetails || ''} onChange={e => handleAdditionalServiceChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" />
                                     </div>
                                     <div className="md:col-span-4">
                                         <label className="block text-xs font-medium text-slate-600">הערות לשירות</label>
-                                        <textarea name="notes" value={service.notes || ''} onChange={e => handleAdditionalServiceChange(index, e)} rows={2} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+                                        <textarea name="notes" value={service.notes || ''} onChange={e => handleAdditionalServiceChange(index, e)} rows={2} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" />
                                     </div>
                                 </div>
                             </div>
@@ -2958,19 +3055,19 @@ const OrderForm: React.FC<{
                         <button type="button" onClick={() => setNewTimelineEntry(prev => ({ ...prev, type: 'NOTE' }))} className={`px-4 py-2 text-sm font-medium ${newTimelineEntry.type === 'NOTE' ? 'border-b-2 border-primary text-primary' : 'text-slate-500'}`}>הוסף הערה</button>
                          <button type="button" onClick={() => setNewTimelineEntry(prev => ({ ...prev, type: 'TASK' }))} className={`px-4 py-2 text-sm font-medium ${newTimelineEntry.type === 'TASK' ? 'border-b-2 border-primary text-primary' : 'text-slate-500'}`}>הוסף משימה</button>
                     </div>
-                    <textarea value={newTimelineEntry.content} onChange={e => setNewTimelineEntry(prev => ({ ...prev, content: e.target.value }))} rows={3} placeholder={newTimelineEntry.type === 'NOTE' ? 'רשום עדכון...' : 'תיאור המשימה...'} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+                    <textarea value={newTimelineEntry.content} onChange={e => setNewTimelineEntry(prev => ({ ...prev, content: e.target.value }))} rows={3} placeholder={newTimelineEntry.type === 'NOTE' ? 'רשום עדכון...' : 'תיאור המשימה...'} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" />
                     {newTimelineEntry.type === 'TASK' && (
                         <div className="grid grid-cols-2 gap-4 mt-3">
                             <div>
                                 <label className="block text-xs font-medium text-slate-600">שייך ל</label>
-                                <select value={newTimelineEntry.assigneeId} onChange={e => setNewTimelineEntry(prev => ({...prev, assigneeId: e.target.value}))} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm">
+                                <select value={newTimelineEntry.assigneeId} onChange={e => setNewTimelineEntry(prev => ({...prev, assigneeId: e.target.value}))} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm">
                                     <option value="">בחר עובד (ריק = אני)</option>
                                     {employees.map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
                                 </select>
                             </div>
                             <div>
                                 <label className="block text-xs font-medium text-slate-600">תאריך יעד</label>
-                                <input type="date" value={newTimelineEntry.dueDate} onChange={e => setNewTimelineEntry(prev => ({...prev, dueDate: e.target.value}))} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+                                <input type="date" value={newTimelineEntry.dueDate} onChange={e => setNewTimelineEntry(prev => ({...prev, dueDate: e.target.value}))} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" />
                             </div>
                         </div>
                     )}
@@ -2985,7 +3082,11 @@ const OrderForm: React.FC<{
                          <button type="button" onClick={() => setTimelineFilter('SYSTEM')} className={`px-3 py-1 text-xs rounded-full border transition-colors ${timelineFilter === 'SYSTEM' ? 'bg-gray-600 text-white border-gray-600' : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50'}`}>יומן מערכת</button>
                     </div>
                     <div className="space-y-4 max-h-96 overflow-y-auto pr-2 custom-scrollbar">
-                        {filteredTimeline.sort((a,b) => b.timestamp.getTime() - a.timestamp.getTime()).map(event => {
+                        {filteredTimeline
+                            .map(event => ({ ...event, _ts: event.timestamp instanceof Date ? event.timestamp : new Date(event.timestamp) }))
+                            .sort((a, b) => b._ts.getTime() - a._ts.getTime())
+                            .map(event => {
+                            const eventTime = event.timestamp instanceof Date ? event.timestamp : new Date(event.timestamp);
                             const getTimelineIcon = () => {
                                 switch (event.type) {
                                     case 'NOTE': return <NoteIcon className="h-5 w-5 text-slate-500" />;
@@ -3004,7 +3105,7 @@ const OrderForm: React.FC<{
                                     <div className="flex-1">
                                         <div className="text-sm">
                                             <span className="font-semibold text-slate-800">{event.user}</span>
-                                            <span className="text-xs text-slate-500 ms-2">{event.timestamp.toLocaleString('he-IL')}</span>
+                                            <span className="text-xs text-slate-500 ms-2">{eventTime.toLocaleString('he-IL')}</span>
                                         </div>
                                         <div className={`mt-1 text-sm text-slate-700 ${event.type === 'TASK' && event.isCompleted ? 'opacity-80' : ''}`}>
                                             {event.type === 'TASK' ? (
@@ -3223,9 +3324,10 @@ const OrderForm: React.FC<{
     );
 };
 
-const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, setCustomers, suppliers, setSuppliers, employees, addActivity, initialOpenOrderId, onOrderOpened, statusConfigs, getNextOrderNumber, vatRate }) => {
+const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, setCustomers, suppliers, setSuppliers, employees, addActivity, initialOpenOrderId, onOrderOpened, openNewOrderRequest, onClearedOpenNewOrderRequest, statusConfigs, getNextOrderNumber, vatRate }) => {
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingOrder, setEditingOrder] = useState<Order | null>(null);
+    const [orderFormHeaderContent, setOrderFormHeaderContent] = useState<React.ReactNode>(null);
     const [searchTerm, setSearchTerm] = useState('');
     const [customerFilter, setCustomerFilter] = useState<string[]>([]);
     const [supplierFilter, setSupplierFilter] = useState<string[]>([]);
@@ -3266,11 +3368,6 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
         { value: 7, name: 'יולי' }, { value: 8, name: 'אוגוסט' }, { value: 9, name: 'ספטמבר' },
         { value: 10, name: 'אוקטובר' }, { value: 11, name: 'נובמבר' }, { value: 12, name: 'דצמבר' },
     ];
-
-    const handleAddOrder = () => {
-        setEditingOrder(null);
-        setIsModalOpen(true);
-    };
 
     const handleEditOrder = (order: Order) => {
         setEditingOrder(order);
@@ -3348,9 +3445,9 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
         setEditingOrder(draftOrder);
     };
 
-    // Helper function to fetch paginated orders
-    const refetchOrders = async () => {
-        setLoading(true);
+    // Helper function to fetch paginated orders (silent = true: don't show loading spinner, for background refresh)
+    const refetchOrders = async (silent: boolean = false) => {
+        if (!silent) setLoading(true);
         try {
             const filters = {
                 customerFilter,
@@ -3375,7 +3472,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
         } catch (error) {
             console.error('Error fetching paginated orders:', error);
         } finally {
-            setLoading(false);
+            if (!silent) setLoading(false);
         }
     };
 
@@ -3384,9 +3481,35 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
         setCurrentPage(1);
     }, [customerFilter, supplierFilter, employeeFilter, orderStatusFilter, paymentStatusFilter, monthFilter, yearFilter, startDateFilter, endDateFilter, dateFilterType, searchTerm, isCollectionMode, showCompletedOrders]);
 
-    // Fetch paginated orders when filters or pagination change
+    // Fetch paginated orders when filters or pagination change; if orders already in props (e.g. from background load), show first page immediately then refetch in background
     useEffect(() => {
-        refetchOrders();
+        if (orders.length > 0 && paginatedOrders.length === 0) {
+            const start = (currentPage - 1) * pageSize;
+            const slice = orders.slice(start, start + pageSize);
+            setPaginatedOrders(slice);
+            setTotalCount(orders.length);
+            const totals = slice.reduce(
+                (acc, order) => {
+                    const t = calculateOrderTotals(order);
+                    acc.totalAmount += t.totalAmount;
+                    acc.totalCost += t.totalCost;
+                    acc.totalProfit += t.profit;
+                    return acc;
+                },
+                { totalAmount: 0, totalCost: 0, totalProfit: 0 }
+            );
+            setSummaryTotals(prev => ({
+                ...prev,
+                totalAmount: totals.totalAmount,
+                totalCost: totals.totalCost,
+                totalProfit: totals.totalProfit,
+                totalAmountInclVat: totals.totalAmount * (1 + (vatRate || 0) / 100),
+            }));
+            setLoading(false);
+            refetchOrders(true);
+        } else {
+            refetchOrders();
+        }
     }, [currentPage, pageSize, customerFilter, supplierFilter, employeeFilter, orderStatusFilter, paymentStatusFilter, monthFilter, yearFilter, startDateFilter, endDateFilter, dateFilterType, searchTerm, isCollectionMode, showCompletedOrders]);
 
     useEffect(() => {
@@ -3400,6 +3523,14 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
             }
         }
     }, [initialOpenOrderId, paginatedOrders, orders, onOrderOpened]);
+
+    useEffect(() => {
+        if (openNewOrderRequest && onClearedOpenNewOrderRequest) {
+            setEditingOrder(null);
+            setIsModalOpen(true);
+            onClearedOpenNewOrderRequest();
+        }
+    }, [openNewOrderRequest, onClearedOpenNewOrderRequest]);
 
     const handleSaveOrder = async (order: Order, keepOpen: boolean = false) => {
         try {
@@ -3597,27 +3728,24 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
                         )}
                     </div>
                 </div>
-                <button onClick={handleAddOrder} className="flex-shrink-0 flex items-center px-4 py-2 bg-primary text-white rounded-lg hover:bg-indigo-700 transition-colors h-fit mt-5">
-                    <PlusIcon className="h-5 w-5 me-2" />
-                    הוסף הזמנה
-                </button>
             </div>
             <div className="bg-white shadow-md rounded-lg overflow-x-auto">
                 <table className="min-w-full divide-y divide-slate-200 text-start">
-                    <thead className="bg-slate-50">
+                    <thead className="bg-slate-50 sticky top-0 z-10 shadow-sm">
                         <tr>
-                            <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider"># הזמנה</th>
+                            <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">סטטוס</th>
+                            <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">הזמנה</th>
                             <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">תיאור</th>
                             <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">לקוח</th>
                             <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">ספקים</th>
-                             <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">סכום</th>
-                             <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">יתרה לתשלום</th>
-                             <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">רווח</th>
+                            <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">מחיר הזמנה</th>
+                            <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">עלות הזמנה</th>
+                            <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">רווח</th>
                             <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">
                                 {dateFilterType === 'ORDER_DATE' ? 'תאריך הזמנה' : 'תאריך אישור'}
                             </th>
                             <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider bg-yellow-50/50">מועד תשלום</th>
-                            <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">סטטוס</th>
+                            <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">יתרה לתשלום</th>
                         </tr>
                     </thead>
                     <tbody className="bg-white divide-y divide-slate-200">
@@ -3679,6 +3807,19 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
 
                             return (
                                 <tr key={order.id} className={`hover:bg-slate-50 ${order.type === OrderType.SERVICE_CALL ? 'bg-red-50/50' : ''}`}>
+                                    <td className="px-4 py-4 whitespace-nowrap text-sm">
+                                        <div className="relative">
+                                            <select value={order.orderStatus} onChange={(e) => handleStatusChange(order.id, e.target.value)} className={`appearance-none w-full cursor-pointer px-2 py-1 text-xs leading-5 font-semibold rounded-full focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary text-center ${getStatusBadge(order.orderStatus)}`} aria-label={`שנה סטטוס עבור הזמנה ${order.orderNumber}`}>
+                                                {statusConfigs.sort((a,b) => a.orderIndex - b.orderIndex).map(config => (
+                                                    <option key={config.id} value={config.label}>{config.label}</option>
+                                                ))}
+                                            </select>
+                                            <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center px-1 text-inherit">
+                                                <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd"></path></svg>
+                                            </div>
+                                            {durationText && <p className="text-xs text-slate-500 mt-1 text-center">({durationText})</p>}
+                                        </div>
+                                    </td>
                                     <td className="px-4 py-4 whitespace-nowrap text-sm font-medium">
                                         <button onClick={() => handleEditOrder(order)} className="text-primary hover:underline font-semibold">{order.orderNumber}</button>
                                         {order.type === OrderType.SERVICE_CALL && <span className="block text-[10px] text-red-600 font-bold">תיקון</span>}
@@ -3715,19 +3856,19 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
                                         </div>
                                         {!isActiveDeal && <span className="text-[10px] text-slate-400 block">(צפוי)</span>}
                                     </td>
-                                    <td className="px-4 py-4 whitespace-nowrap text-sm font-bold text-red-600">
-                                        {isActiveDeal ? (
-                                            balanceDue > 1 ? (
-                                                <>
-                                                    <div className="text-red-600">{balanceDue.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
-                                                    <div className="text-[10px] text-red-400 font-normal">כולל מע"מ</div>
-                                                </>
-                                            ) : <span className="text-green-600 text-xs">שולם במלואו</span>
+                                    <td className="px-4 py-4 whitespace-nowrap text-sm font-semibold text-slate-700">
+                                        {totalCost > 0 ? (
+                                            <>
+                                                <div>{totalCost.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                                                <div className="text-[10px] text-slate-500 font-normal">
+                                                    ({totalAmount > 0 ? ((totalCost / totalAmount) * 100).toFixed(1) : '0'}% ממחיר המכירה)
+                                                </div>
+                                            </>
                                         ) : (
-                                            <span className="text-slate-400 text-xs font-normal">לא לתשלום</span>
+                                            <span className="text-slate-400 font-normal">—</span>
                                         )}
                                     </td>
-                                     <td className={`px-4 py-4 whitespace-nowrap text-sm font-semibold text-center ${profitColorClass}`}>
+                                    <td className={`px-4 py-4 whitespace-nowrap text-sm font-semibold text-center ${profitColorClass}`}>
                                         <div>{profit.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
                                         <div className="text-xs font-normal opacity-80">({itemMarkup.toFixed(1)}%)</div>
                                     </td>
@@ -3747,18 +3888,17 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
                                             {!isOverdue && balanceDue > 1 && isActiveDeal && <span className="text-[10px] text-slate-400 mt-1">({order.paymentTerms})</span>}
                                         </div>
                                     </td>
-                                    <td className="px-4 py-4 whitespace-nowrap text-sm">
-                                        <div className="relative">
-                                            <select value={order.orderStatus} onChange={(e) => handleStatusChange(order.id, e.target.value)} className={`appearance-none w-full cursor-pointer px-2 py-1 text-xs leading-5 font-semibold rounded-full focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary text-center ${getStatusBadge(order.orderStatus)}`} aria-label={`שנה סטטוס עבור הזמנה ${order.orderNumber}`}>
-                                                {statusConfigs.sort((a,b) => a.orderIndex - b.orderIndex).map(config => (
-                                                    <option key={config.id} value={config.label}>{config.label}</option>
-                                                ))}
-                                            </select>
-                                            <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center px-1 text-inherit">
-                                                <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd"></path></svg>
-                                            </div>
-                                            {durationText && <p className="text-xs text-slate-500 mt-1 text-center">({durationText})</p>}
-                                        </div>
+                                    <td className="px-4 py-4 whitespace-nowrap text-sm font-bold text-red-600">
+                                        {isActiveDeal ? (
+                                            balanceDue > 1 ? (
+                                                <>
+                                                    <div className="text-red-600">{balanceDue.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                                                    <div className="text-[10px] text-red-400 font-normal">כולל מע"מ</div>
+                                                </>
+                                            ) : <span className="text-green-600 text-xs">שולם במלואו</span>
+                                        ) : (
+                                            <span className="text-slate-400 text-xs font-normal">לא לתשלום</span>
+                                        )}
                                     </td>
                                 </tr>
                             )
@@ -3766,18 +3906,24 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
                     </tbody>
                     <tfoot className="bg-slate-100 font-semibold border-t-2 border-slate-300 sticky bottom-0 z-10">
                         <tr>
-                            <td className="px-4 py-3 text-end align-top" colSpan={4}>סה"כ</td>
+                            <td className="px-4 py-3 text-end align-top" colSpan={5}>סה"כ</td>
                             <td className="px-4 py-3 text-start text-green-700 align-top">
                                 <div>{summaryTotals.totalAmount.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
                                 <div className="text-[10px] text-slate-500 font-normal">
                                     ({summaryTotals.totalAmountInclVat.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 2, maximumFractionDigits: 2 })} כולל מע"מ משוקלל)
                                 </div>
                             </td>
-                            <td className="px-4 py-3 text-start text-red-700 font-bold align-top">
-                                <div>{summaryTotals.totalBalance.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
-                                <div className="text-[10px] text-red-500 font-normal">
-                                    ({summaryTotals.totalBalanceInclVat.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 2, maximumFractionDigits: 2 })} כולל מע"מ משוקלל)
-                                </div>
+                            <td className="px-4 py-3 text-start text-slate-700 font-semibold align-top">
+                                {summaryTotals.totalCost > 0 ? (
+                                    <>
+                                        <div>{summaryTotals.totalCost.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                                        <div className="text-[10px] text-slate-500 font-normal">
+                                            ({summaryTotals.totalAmount > 0 ? ((summaryTotals.totalCost / summaryTotals.totalAmount) * 100).toFixed(1) : '0'}% ממחיר המכירה)
+                                        </div>
+                                    </>
+                                ) : (
+                                    '—'
+                                )}
                             </td>
                             <td className="px-4 py-3 text-start text-slate-800 align-top">
                                 <div>{summaryTotals.totalProfit.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
@@ -3785,7 +3931,13 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
                                     ({summaryTotals.totalCost > 0 ? ((summaryTotals.totalProfit / summaryTotals.totalCost) * 100).toFixed(1) : (summaryTotals.totalAmount > 0 ? '100' : '0')}% רווח מהעלות)
                                 </div>
                             </td>
-                            <td colSpan={3}></td>
+                            <td colSpan={2}></td>
+                            <td className="px-4 py-3 text-start text-red-700 font-bold align-top">
+                                <div>{summaryTotals.totalBalance.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                                <div className="text-[10px] text-red-500 font-normal">
+                                    ({summaryTotals.totalBalanceInclVat.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 2, maximumFractionDigits: 2 })} כולל מע"מ משוקלל)
+                                </div>
+                            </td>
                         </tr>
                     </tfoot>
                 </table>
@@ -3857,8 +4009,9 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
             {isModalOpen && (
                 <Modal 
                     title={editingOrder ? `עריכת הזמנה ${editingOrder.orderNumber}` : `הוספת הזמנה חדשה (${getNextOrderNumber()})`}
-                    onClose={() => setIsModalOpen(false)}
+                    onClose={() => { setOrderFormHeaderContent(null); setIsModalOpen(false); }}
                     size="5xl"
+                    headerEnd={orderFormHeaderContent}
                 >
                     <OrderForm 
                         key={editingOrder ? editingOrder.id : 'new'} 
@@ -3883,6 +4036,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
                         statusConfigs={statusConfigs}
                         getNextOrderNumber={getNextOrderNumber}
                         vatRate={vatRate}
+                        setHeaderContent={setOrderFormHeaderContent}
                     />
                 </Modal>
             )}

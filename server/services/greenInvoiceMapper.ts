@@ -76,10 +76,11 @@ export function mapOrderToInvoiceRequest(
             ? 'Paid' 
             : 'Not Paid';
     
-    // Format dates
+    // Format dates — "לתשלום עד" מתאריך אישור ההזמנה (dealStartDate) + תנאי תשלום
     const issueDate = order.date.toISOString().split('T')[0]; // YYYY-MM-DD
+    const dueDateBase = order.dealStartDate || order.date;
     const dueDate = order.paymentTerms 
-        ? calculateDueDate(order.date, order.paymentTerms).toISOString().split('T')[0]
+        ? calculateDueDate(dueDateBase, order.paymentTerms).toISOString().split('T')[0]
         : undefined;
     
     return {
@@ -115,7 +116,8 @@ export function mapOrderToDocumentRequest(
     vatRate: number,
     documentType: 'invoice' | 'receipt' | 'invoice_receipt' | 'credit_invoice' | 'estimate' | 'work_order' | 'delivery_note' | 'transaction_account',
     draft?: boolean,
-    paymentsOverride?: PaymentsOverrideItem[]
+    paymentsOverride?: PaymentsOverrideItem[],
+    sourceDocumentId?: string
 ): any {
     const { totalAmount, totalPaid } = calculateOrderTotals(order);
     // DocumentType – ממופה לפי green-invoice Python SDK / תיעוד API חשבונית ירוקה
@@ -192,22 +194,24 @@ export function mapOrderToDocumentRequest(
     const orderDateStr = getDateStringIsrael(order.date); // תאריך ההזמנה בישראל
     const orderDate = new Date(orderDateStr + 'T00:00:00+02:00'); // יצירת Date עבור תאריך ההזמנה בישראל
     const maxPastYears = 2;
-    
-    // #region agent log
-    fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'greenInvoiceMapper.ts:164',message:'Date calculation - before draft check',data:{draft,draftType:typeof draft,todayStr,todayISO:today.toISOString().split('T')[0],orderDateStr,orderDateISO:orderDate.toISOString().split('T')[0]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-    // #endregion
+    // בסיס ל"לתשלום עד": תנאי התשלום נספרים מרגע אישור ההזמנה (dealStartDate), אלא אם אין — אז מתאריך ההזמנה
+    const dueDateBase = order.dealStartDate || order.date;
+    const dueDateBaseStr = getDateStringIsrael(dueDateBase);
+    const dueDateBaseDate = new Date(dueDateBaseStr + 'T00:00:00+02:00');
     
     // עבור טיוטות, נשתמש בתאריך של היום (לא עתידי, לא ישן מדי)
-    // המשתמש יוכל לערוך את התאריך בחשבונית ירוקה
+    // עבור קבלה/חשבונית+קבלה — חשבונית ירוקה (2405) דורשת תאריך תקף לסוג מסמך: נשתמש תמיד ביום
+    const isReceiptType = documentType === 'receipt' || documentType === 'invoice_receipt';
     let validDate: Date;
     let date: string;
-    if (draft) {
-        console.log(`[Draft] Using today's date for draft document: ${todayStr} (user can edit in GreenInvoice)`);
+    if (draft || isReceiptType) {
+        if (isReceiptType) {
+            console.log(`[Receipt] Using today's date for receipt document: ${todayStr} (GreenInvoice 2405)`);
+        } else {
+            console.log(`[Draft] Using today's date for draft document: ${todayStr} (user can edit in GreenInvoice)`);
+        }
         validDate = today;
         date = todayStr; // ישירות את המחרוזת, לא דרך toISOString
-        // #region agent log
-        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'greenInvoiceMapper.ts:175',message:'Date calculation - draft=true, using today',data:{date,todayStr,validDateISO:validDate.toISOString().split('T')[0]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-        // #endregion
     } else {
         // בדיקה: חשבונית ירוקה לא מאפשרת תאריכים עתידיים (אפילו יום אחד) או ישנים מדי
         const maxPastDate = new Date(today);
@@ -230,12 +234,8 @@ export function mapOrderToDocumentRequest(
     }
     
     console.log(`[GreenInvoice] Using document date: ${date} (original: ${getDateStringIsrael(order.date)}, draft: ${draft})`);
-    // #region agent log
-    fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'greenInvoiceMapper.ts:196',message:'Date calculation - final date',data:{date,validDateISO:validDate.toISOString().split('T')[0],draft,originalDate:getDateStringIsrael(order.date)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-    // #endregion
     
-    // עבור טיוטות, לא נשלח dueDate עתידי - חשבונית ירוקה לא מאפשרת תאריכים עתידיים
-    // עבור מסמכים רגילים, נשלח dueDate רק אם הוא לא עתידי מדי
+    // "לתשלום עד" בחשבונית ירוקה: מחושב מתאריך אישור ההזמנה (dealStartDate) + תנאי תשלום. "עם סיום העבודה" = תשלום מיידי (אותו תאריך).
     let dueDate: string | undefined = undefined;
     if (order.paymentTerms) {
         if (draft) {
@@ -243,7 +243,7 @@ export function mapOrderToDocumentRequest(
             console.log(`[Draft] Not sending dueDate for draft - user will set it in GreenInvoice`);
             dueDate = undefined;
         } else {
-            const calculatedDueDate = calculateDueDate(validDate, order.paymentTerms);
+            const calculatedDueDate = calculateDueDate(dueDateBaseDate, order.paymentTerms);
             const calculatedDueDateStr = getDateStringIsrael(calculatedDueDate);
             // ודא שגם תאריך ה-dueDate לא עתידי מדי (מקסימום 90 יום קדימה)
             const maxDueDateDays = 90;
@@ -284,7 +284,7 @@ export function mapOrderToDocumentRequest(
         'מזומן': 1, 'צ\'ק': 2, 'כרטיס אשראי': 3, 'העברה בנקאית': 4, 'הוראת קבע': 4, 'Bit/PayBox': 10, 'אחר': 11
     };
 
-    const buildPayItem = (amount: number, dateStr: string, method: string, ref: string, isDraft: boolean): any => {
+    const buildPayItem = (amount: number, dateStr: string, method: string, ref: string, isDraft: boolean, repaymentDateStr?: string): any => {
         let paymentDateStr = dateStr;
         if (isDraft) paymentDateStr = todayStr;
         else {
@@ -296,8 +296,11 @@ export function mapOrderToDocumentRequest(
         const payType = paymentTypeMap[method] ?? 11;
         const payItem: any = { date: paymentDateStr, type: payType, price: amount, currency: 'ILS' };
         if (ref) {
-            if (payType === 2) payItem.chequeNum = ref;
-            else if (payType === 3) {
+            if (payType === 2) {
+                payItem.chequeNum = ref;
+                // חשבונית ירוקה 2443: נא למלא את פרטי הצ'ק — תאריך פירעון נדרש לצ'ק
+                if (repaymentDateStr) payItem.dueDate = repaymentDateStr;
+            } else if (payType === 3) {
                 const digits = ref.replace(/\D/g, '');
                 if (digits.length >= 4) payItem.cardNum = digits.slice(-4);
                 else if (/^\d{1,4}$/.test(digits)) payItem.cardNum = digits;
@@ -310,13 +313,14 @@ export function mapOrderToDocumentRequest(
     if (paymentsOverride && (documentType === 'receipt' || documentType === 'invoice_receipt') && !draft) {
         paymentsOverride.forEach((pay) => {
             const ref = (pay.reference && String(pay.reference).trim()) || '';
-            payment.push(buildPayItem(pay.amount, pay.date, pay.method, ref, false));
+            const repaymentStr = pay.repaymentDate ? (typeof pay.repaymentDate === 'string' ? pay.repaymentDate : (pay.repaymentDate instanceof Date ? pay.repaymentDate.toISOString().slice(0, 10) : String(pay.repaymentDate).slice(0, 10))) : undefined;
+            payment.push(buildPayItem(pay.amount, pay.date, pay.method, ref, false, repaymentStr));
         });
     } else if (order.paymentStatus === PaymentStatus.PAID || totalPaid >= totalAmount - 0.01) {
         order.payments?.forEach((pay) => {
             const payDateStr = getDateStringIsrael(pay.date);
             const ref = (pay.reference && String(pay.reference).trim()) || '';
-            payment.push(buildPayItem(pay.amount, payDateStr, pay.method, ref, !!draft));
+            payment.push(buildPayItem(pay.amount, payDateStr, pay.method, ref, !!draft, undefined));
         });
     }
     
@@ -357,15 +361,18 @@ export function mapOrderToDocumentRequest(
         return estimateRequest;
     }
     
-    // קבלה / חשבונית מס+קבלה ב-draft (פתיחת חלון לעריכה): אל נשלח payment.
-    // חשבונית ירוקה: "אם הלקוח משלם באשראי בלבד – משאירים את פירוט התקבולים ריק".
-    // https://www.greeninvoice.co.il/help-center/receipt-credit-debit/
-    // אחרת המסמך נחשב ממולא, "לחיוב באשראי" → "לחיוב הלקוח" לא זמין, וחלון הסליקה לא נפתח.
+    // קבלה / חשבונית מס+קבלה — API דורש לפחות שורת תקבולים אחת (2419).
+    // ב-draft: מוסיפים תשלום placeholder בסכום המסמך — המשתמש יכול למחוק ו"לחיוב באשראי".
     const isReceiptDraft = draft && (documentType === 'receipt' || documentType === 'invoice_receipt');
-    const includePayment = payment.length > 0 && !isReceiptDraft;
-    if (isReceiptDraft && payment.length > 0) {
-        console.log(`[Draft Receipt/Invoice+Receipt] Omitting payment (${payment.length} items) so פירוט התקבולים stays empty; user can use "לחיוב באשראי" → "לחיוב הלקוח" → סליקה`);
+    let paymentForRequest = payment;
+    if ((documentType === 'receipt' || documentType === 'invoice_receipt') && payment.length === 0) {
+        const placeholderAmount = totalAmount > 0 ? totalAmount : 1;
+        paymentForRequest = [buildPayItem(placeholderAmount, todayStr, 'העברה בנקאית', '', true)];
+        if (isReceiptDraft) {
+            console.log(`[Draft Receipt/Invoice+Receipt] API דורש שורת תקבולים — הוספנו placeholder (₪${placeholderAmount}). המשתמש יכול למחוק ולבחור "לחיוב באשראי".`);
+        }
     }
+    const includePayment = paymentForRequest.length > 0;
 
     const documentRequest: any = {
         type: typeMap[documentType] || 305,
@@ -378,7 +385,8 @@ export function mapOrderToDocumentRequest(
         signed: !draft, // טיוטה: לא חתום, המשתמש לוחץ "הפקת מסמך" בחשבונית ירוקה
         client: client,
         income: income,
-        ...(includePayment && { payment: payment })
+        ...(includePayment && { payment: paymentForRequest }),
+        ...(sourceDocumentId && (documentType === 'receipt' || documentType === 'credit_invoice') && { document: { id: sourceDocumentId } })
     };
     
     console.log(`[DOCUMENT] Document description includes order number: ${order.orderNumber}`);

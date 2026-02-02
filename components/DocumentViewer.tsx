@@ -2,18 +2,24 @@ import React, { useState, useEffect } from 'react';
 import { Order } from '../types';
 import { DownloadIcon, PlusIcon } from './icons';
 
+type DocumentInfoType = 'invoice' | 'invoice_receipt' | 'receipt' | 'credit' | 'estimate';
+
 interface DocumentViewerProps {
     order: Order;
-    onDownload?: (documentId: string, type: 'invoice' | 'receipt' | 'credit' | 'estimate') => void;
-    onOpenInGreenInvoice?: (documentId: string, type: 'invoice' | 'receipt' | 'credit' | 'estimate') => void;
-    /** פתיחת מודל: 'full' = כל הסוגים. 'from-document' + fromDocumentType = אופציות לפי סוג המסמך (הצעת מחיר vs חשבונית/קבלה) */
-    onOpenCreateModal?: (mode: 'full' | 'from-document', fromDocumentType?: 'invoice' | 'receipt' | 'credit' | 'estimate') => void;
-    onCancelDocument?: (documentId: string, type: 'invoice' | 'receipt' | 'credit' | 'estimate') => void;
+    onDownload?: (documentId: string, type: DocumentInfoType) => void;
+    onOpenInGreenInvoice?: (documentId: string, type: DocumentInfoType) => void;
+    /** פתיחת מודל: 'full' = כל הסוגים. 'from-document' + fromDocumentType + sourceDocumentId = אופציות לפי סוג המסמך */
+    onOpenCreateModal?: (mode: 'full' | 'from-document', fromDocumentType?: 'invoice' | 'receipt' | 'credit' | 'estimate', sourceDocumentId?: string) => void;
+    onCancelDocument?: (documentId: string, type: DocumentInfoType) => void;
+    /** שיוך מסמך מחשבונית ירוקה ידנית */
+    onLinkDocument?: (documentId: string) => Promise<void>;
+    /** מזהה הלקוח בחשבונית ירוקה — להצגת רשימת מסמכים לבחירה */
+    customerGreenInvoiceClientId?: string;
 }
 
 interface DocumentInfo {
     id: string;
-    type: 'invoice' | 'receipt' | 'credit' | 'estimate';
+    type: DocumentInfoType;
     label: string;
     status?: 'opened' | 'closed' | 'canceled' | 'draft';
     statusLabel?: string;
@@ -30,8 +36,8 @@ interface DocumentInfo {
     url?: string;
 }
 
-const apiTypeFromDoc = (t: 'invoice' | 'receipt' | 'credit' | 'estimate') =>
-    t === 'credit' ? 'credit_invoice' : t;
+const apiTypeFromDoc = (t: DocumentInfoType): 'invoice' | 'receipt' | 'credit_invoice' | 'estimate' =>
+    t === 'credit' ? 'credit_invoice' : t === 'invoice_receipt' ? 'invoice' : t;
 
 const PAYMENT_TYPE_LABELS: Record<number, string> = {
     1: 'מזומן',
@@ -55,28 +61,52 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({
     onDownload, 
     onOpenInGreenInvoice,
     onOpenCreateModal,
-    onCancelDocument
+    onCancelDocument,
+    onLinkDocument,
+    customerGreenInvoiceClientId
 }) => {
     const [documents, setDocuments] = useState<DocumentInfo[]>([]);
     const [loading, setLoading] = useState<boolean>(false);
-    const [previewDoc, setPreviewDoc] = useState<{ id: string; type: 'invoice' | 'receipt' | 'credit' | 'estimate'; label: string; blobUrl: string } | null>(null);
+    const [previewDoc, setPreviewDoc] = useState<{ id: string; type: DocumentInfoType; label: string; blobUrl: string } | null>(null);
     const [previewLoading, setPreviewLoading] = useState(false);
+    const [showLinkForm, setShowLinkForm] = useState(false);
+    const [linkDocId, setLinkDocId] = useState('');
+    const [linkLoading, setLinkLoading] = useState(false);
+    const [refreshTrigger, setRefreshTrigger] = useState(0);
+    const [customerDocs, setCustomerDocs] = useState<Array<{ id: string; type: number; number?: string; description?: string; amount?: number; date?: string }>>([]);
+    const [loadingCustomerDocs, setLoadingCustomerDocs] = useState(false);
 
-    // Fetch document details from API - both by ID and by order number search
+    // Fetch document details from API - stored IDs, OrderDocumentLinks, and search
     useEffect(() => {
         const fetchDocumentDetails = async () => {
             const docs: DocumentInfo[] = [];
-            const docIdsSeen = new Set<string>(); // Track seen document IDs to avoid duplicates
+            const docIdsSeen = new Set<string>();
             setLoading(true);
 
             try {
-                // First: Fetch documents by their stored IDs
-                const documentIds = [
-                    { id: order.greenInvoiceId, type: 'invoice' as const, label: 'חשבונית מס' },
-                    { id: order.greenInvoiceReceiptId, type: 'receipt' as const, label: 'קבלה' },
-                    { id: order.greenInvoiceCreditId, type: 'credit' as const, label: 'חשבונית זיכוי' },
-                    { id: order.greenInvoiceEstimateId, type: 'estimate' as const, label: 'הצעת מחיר' }
-                ].filter(doc => doc.id);
+                // Linked document IDs from OrderDocumentLink
+                let linkedIds: string[] = [];
+                if (order.id) {
+                    try {
+                        const r = await fetch(`/api/green-invoice/orders/${order.id}/document-links`, {
+                            headers: { Authorization: `Bearer ${localStorage.getItem('authToken')}` }
+                        });
+                        if (r.ok) {
+                            const { links } = await r.json();
+                            linkedIds = (links || []).map((l: any) => l.documentId).filter(Boolean);
+                        }
+                    } catch { /* ignore */ }
+                }
+
+                const storedIds = new Set([order.greenInvoiceId, order.greenInvoiceReceiptId, order.greenInvoiceCreditId, order.greenInvoiceEstimateId].filter(Boolean));
+                const documentIds: Array<{ id: string; type: DocumentInfoType; label: string }> = [
+                    { id: order.greenInvoiceId, type: 'invoice', label: 'חשבונית מס' },
+                    { id: order.greenInvoiceReceiptId, type: 'receipt', label: 'קבלה' },
+                    { id: order.greenInvoiceCreditId, type: 'credit', label: 'חשבונית זיכוי' },
+                    { id: order.greenInvoiceEstimateId, type: 'estimate', label: 'הצעת מחיר' }
+                ].filter((doc): doc is { id: string; type: DocumentInfoType; label: string } => !!doc.id).concat(
+                    linkedIds.filter(id => !storedIds.has(id)).map(id => ({ id, type: 'invoice' as DocumentInfoType, label: 'מסמך משויך' }))
+                );
 
                 for (const doc of documentIds) {
                     try {
@@ -101,10 +131,14 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({
                                     ? new Date(creationDate).toLocaleDateString('he-IL')
                                     : undefined;
                             const payMethod = paymentMethodFromRaw(rawDoc);
+                            // Infer type from raw doc (305=invoice, 320=invoice_receipt, 400=receipt, 330=credit, 10=estimate)
+                            const rawType = rawDoc.type;
+                            const inferredType: DocumentInfoType = rawType === 320 ? 'invoice_receipt' : rawType === 400 ? 'receipt' : rawType === 330 ? 'credit' : rawType === 10 ? 'estimate' : doc.type;
+                            const inferredLabel = rawType === 320 ? 'חשבונית מס + קבלה' : doc.label;
                             docs.push({
                                 id: doc.id,
-                                type: doc.type,
-                                label: doc.label,
+                                type: inferredType,
+                                label: inferredLabel,
                                 status: status === 0 ? 'opened' : status === 1 || status === 2 ? 'closed' : status === 4 ? 'canceled' : 'draft',
                                 statusLabel,
                                 date: dateStr,
@@ -170,7 +204,7 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({
                                 }
                                 
                                 // Determine document type from the document data
-                                let docType: 'invoice' | 'receipt' | 'credit' | 'estimate' = 'invoice';
+                                let docType: DocumentInfoType = 'invoice';
                                 let docLabel = 'מסמך';
                                 
                                 if (foundDoc.type === 10) {
@@ -180,7 +214,7 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({
                                     docType = 'invoice';
                                     docLabel = 'חשבונית מס';
                                 } else if (foundDoc.type === 320) {
-                                    docType = 'invoice';
+                                    docType = 'invoice_receipt';
                                     docLabel = 'חשבונית מס + קבלה';
                                 } else if (foundDoc.type === 400) {
                                     docType = 'receipt';
@@ -241,7 +275,31 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({
         if (order.orderNumber || order.greenInvoiceId || order.greenInvoiceReceiptId || order.greenInvoiceCreditId || order.greenInvoiceEstimateId) {
             fetchDocumentDetails();
         }
-    }, [order.orderNumber, order.greenInvoiceId, order.greenInvoiceReceiptId, order.greenInvoiceCreditId, order.greenInvoiceEstimateId]);
+    }, [order.id, order.orderNumber, order.greenInvoiceId, order.greenInvoiceReceiptId, order.greenInvoiceCreditId, order.greenInvoiceEstimateId, refreshTrigger]);
+
+    // Fetch customer documents when opening link form
+    useEffect(() => {
+        if (!showLinkForm || !customerGreenInvoiceClientId || !onLinkDocument) return;
+        setLoadingCustomerDocs(true);
+        fetch(`/api/green-invoice/documents/by-client/${customerGreenInvoiceClientId}`, {
+            headers: { Authorization: `Bearer ${localStorage.getItem('authToken')}` }
+        })
+            .then(r => r.ok ? r.json() : { documents: [] })
+            .then(data => setCustomerDocs(data.documents || []))
+            .catch(() => setCustomerDocs([]))
+            .finally(() => setLoadingCustomerDocs(false));
+    }, [showLinkForm, customerGreenInvoiceClientId, onLinkDocument]);
+
+    const docTypeLabel = (t: number) => {
+        if (t === 10) return 'הצעת מחיר';
+        if (t === 305) return 'חשבונית מס';
+        if (t === 320) return 'חשבונית מס+קבלה';
+        if (t === 330) return 'חשבונית זיכוי';
+        if (t === 400) return 'קבלה';
+        if (t === 200) return 'תעודת משלוח';
+        if (t === 300) return 'חשבון עסקה';
+        return 'מסמך';
+    };
 
     const handleQuickView = async (doc: DocumentInfo) => {
         setPreviewLoading(true);
@@ -303,8 +361,91 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({
 
     if (documents.length === 0) {
         return (
+            <div className="space-y-3">
+            <div className="flex items-center justify-between mb-3">
+                <h4 className="text-sm font-medium text-slate-700">מסמכים חשבונאיים:</h4>
+                <div className="flex items-center gap-1">
+                    {onLinkDocument && (
+                        <button
+                            type="button"
+                            onClick={() => setShowLinkForm(!showLinkForm)}
+                            className="p-1.5 text-emerald-600 hover:bg-emerald-50 rounded-md transition-colors text-xs font-medium"
+                            title="שייך מסמך מחשבונית ירוקה"
+                        >
+                            שייך מסמך
+                        </button>
+                    )}
+                    {onOpenCreateModal && (
+                        <button
+                            type="button"
+                            onClick={() => onOpenCreateModal('full')}
+                            className="p-1.5 text-primary hover:bg-primary/10 rounded-md transition-colors"
+                            title="צור מסמך חדש"
+                        >
+                            <PlusIcon className="w-5 h-5" />
+                        </button>
+                    )}
+                </div>
+            </div>
+            {onLinkDocument && showLinkForm && (
+                <div className="mb-3 p-3 bg-emerald-50 border border-emerald-200 rounded-lg space-y-3">
+                    {customerGreenInvoiceClientId && (
+                        <div>
+                            <label className="block text-xs font-bold text-emerald-800 mb-1">בחר מסמך מרשימת הלקוח</label>
+                            {loadingCustomerDocs ? (
+                                <div className="text-sm text-slate-500 py-2">טוען מסמכים...</div>
+                            ) : customerDocs.length > 0 ? (
+                                <select
+                                    value={linkDocId}
+                                    onChange={e => setLinkDocId(e.target.value)}
+                                    className="w-full text-sm border border-emerald-300 rounded px-2 py-1.5 bg-white"
+                                >
+                                    <option value="">-- בחר מסמך --</option>
+                                    {customerDocs.map(d => (
+                                        <option key={d.id} value={d.id}>
+                                            {docTypeLabel(Number(d.type))} #{d.number ?? d.id} — ₪{(d.amount ?? d.total ?? 0).toLocaleString()} — {(d.description || '').slice(0, 40)}
+                                        </option>
+                                    ))}
+                                </select>
+                            ) : (
+                                <div className="text-xs text-slate-500">לא נמצאו מסמכים או שהלקוח לא משויך בחשבונית ירוקה</div>
+                            )}
+                        </div>
+                    )}
+                    <div className="flex flex-wrap items-center gap-2">
+                        <input
+                            type="text"
+                            value={linkDocId}
+                            onChange={e => setLinkDocId(e.target.value)}
+                            placeholder="או הזן מזהה מסמך ידנית"
+                            className="flex-1 min-w-[120px] text-sm border border-emerald-300 rounded px-2 py-1.5"
+                        />
+                        <button
+                            type="button"
+                            onClick={async () => {
+                                const id = linkDocId.trim();
+                                if (!id) return;
+                                setLinkLoading(true);
+                                try {
+                                    await onLinkDocument(id);
+                                    setLinkDocId('');
+                                    setShowLinkForm(false);
+                                    setRefreshTrigger(t => t + 1);
+                                } finally {
+                                    setLinkLoading(false);
+                                }
+                            }}
+                            disabled={!linkDocId.trim() || linkLoading}
+                            className="px-3 py-1.5 bg-emerald-600 text-white text-sm rounded hover:bg-emerald-700 disabled:opacity-50"
+                        >
+                            {linkLoading ? 'משייך...' : 'שייך'}
+                        </button>
+                    </div>
+                </div>
+            )}
             <div className="text-center text-slate-400 text-sm py-4">
                 אין מסמכים חשבונאיים מקושרים להזמנה זו
+            </div>
             </div>
         );
     }
@@ -313,17 +454,85 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({
         <div className="space-y-3">
             <div className="flex items-center justify-between mb-3">
                 <h4 className="text-sm font-medium text-slate-700">מסמכים חשבונאיים:</h4>
-                {onOpenCreateModal && (
-                    <button
-                        type="button"
-                        onClick={() => onOpenCreateModal('full')}
-                        className="p-1.5 text-primary hover:bg-primary/10 rounded-md transition-colors"
-                        title="צור מסמך חדש"
-                    >
-                        <PlusIcon className="w-5 h-5" />
-                    </button>
-                )}
+                <div className="flex items-center gap-1">
+                    {onLinkDocument && (
+                        <button
+                            type="button"
+                            onClick={() => setShowLinkForm(!showLinkForm)}
+                            className="p-1.5 text-emerald-600 hover:bg-emerald-50 rounded-md transition-colors text-xs font-medium"
+                            title="שייך מסמך מחשבונית ירוקה"
+                        >
+                            שייך מסמך
+                        </button>
+                    )}
+                    {onOpenCreateModal && (
+                        <button
+                            type="button"
+                            onClick={() => onOpenCreateModal('full')}
+                            className="p-1.5 text-primary hover:bg-primary/10 rounded-md transition-colors"
+                            title="צור מסמך חדש"
+                        >
+                            <PlusIcon className="w-5 h-5" />
+                        </button>
+                    )}
+                </div>
             </div>
+            {onLinkDocument && showLinkForm && (
+                <div className="mb-3 p-3 bg-emerald-50 border border-emerald-200 rounded-lg space-y-3">
+                    {customerGreenInvoiceClientId && (
+                        <div>
+                            <label className="block text-xs font-bold text-emerald-800 mb-1">בחר מסמך מרשימת הלקוח</label>
+                            {loadingCustomerDocs ? (
+                                <div className="text-sm text-slate-500 py-2">טוען מסמכים...</div>
+                            ) : customerDocs.length > 0 ? (
+                                <select
+                                    value={linkDocId}
+                                    onChange={e => setLinkDocId(e.target.value)}
+                                    className="w-full text-sm border border-emerald-300 rounded px-2 py-1.5 bg-white"
+                                >
+                                    <option value="">-- בחר מסמך --</option>
+                                    {customerDocs.map(d => (
+                                        <option key={d.id} value={d.id}>
+                                            {docTypeLabel(Number(d.type))} #{d.number ?? d.id} — ₪{(d.amount ?? d.total ?? 0).toLocaleString()} — {(d.description || '').slice(0, 40)}
+                                        </option>
+                                    ))}
+                                </select>
+                            ) : (
+                                <div className="text-xs text-slate-500">לא נמצאו מסמכים או שהלקוח לא משויך בחשבונית ירוקה</div>
+                            )}
+                        </div>
+                    )}
+                    <div className="flex flex-wrap items-center gap-2">
+                        <input
+                            type="text"
+                            value={linkDocId}
+                            onChange={e => setLinkDocId(e.target.value)}
+                            placeholder="או הזן מזהה מסמך ידנית"
+                            className="flex-1 min-w-[120px] text-sm border border-emerald-300 rounded px-2 py-1.5"
+                        />
+                        <button
+                            type="button"
+                            onClick={async () => {
+                                const id = linkDocId.trim();
+                                if (!id) return;
+                                setLinkLoading(true);
+                                try {
+                                    await onLinkDocument(id);
+                                    setLinkDocId('');
+                                    setShowLinkForm(false);
+                                    setRefreshTrigger(t => t + 1);
+                                } finally {
+                                    setLinkLoading(false);
+                                }
+                            }}
+                            disabled={!linkDocId.trim() || linkLoading}
+                            className="px-3 py-1.5 bg-emerald-600 text-white text-sm rounded hover:bg-emerald-700 disabled:opacity-50"
+                        >
+                            {linkLoading ? 'משייך...' : 'שייך'}
+                        </button>
+                    </div>
+                </div>
+            )}
             {previewDoc && (
                 <div className="fixed inset-0 z-50 flex flex-col bg-black/70" role="dialog" aria-modal="true" aria-label="מבט מהיר במסמך">
                     <div className="flex items-center justify-between px-4 py-2 bg-slate-800 text-white shrink-0">
@@ -428,26 +637,31 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({
                                 פתח בחשבונית ירוקה
                             </button>
                         )}
-                        {onOpenCreateModal && (
+                        {onOpenCreateModal && (doc.type === 'estimate' || doc.type === 'invoice' || doc.type === 'invoice_receipt') && (
                             <button
                                 type="button"
-                                onClick={() => onOpenCreateModal('from-document', doc.type)}
+                                onClick={() => onOpenCreateModal('from-document', doc.type === 'invoice_receipt' ? 'invoice' : doc.type, doc.id)}
                                 className="px-3 py-1.5 text-sm bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors flex items-center gap-1"
-                                title={doc.type === 'estimate' ? 'הנפקה מהצעת מחיר (הזמנה עבודה, חשבון עסקה, חשבונית מס, קבלה)' : 'הנפקה (תעודת משלוח, חשבון עסקה, קבלה)'}
+                                title={doc.type === 'estimate' ? 'הנפקה מהצעת מחיר (הזמנה עבודה, חשבון עסקה, חשבונית מס, חשבונית מס/קבלה, קבלה)' : 'הנפקה מחשבונית (תעודת משלוח, חשבון עסקה, קבלה)'}
                             >
                                 <PlusIcon className="w-4 h-4" /> הנפקה
                             </button>
                         )}
-                        {onCancelDocument && doc.cancellable && doc.type === 'invoice' && (
+                        {onCancelDocument && doc.cancellable && (doc.type === 'invoice' || doc.type === 'invoice_receipt' || doc.type === 'receipt') && (
                             <button
                                 type="button"
                                 onClick={() => {
-                                    if (window.confirm('האם אתה בטוח שברצונך לבטל את המסמך? פעולה זו תיצור חשבונית זיכוי.')) {
+                                    const msg = doc.type === 'invoice'
+                                        ? 'האם אתה בטוח שברצונך לבטל את המסמך? פעולה זו תיצור חשבונית זיכוי.'
+                                        : doc.type === 'invoice_receipt'
+                                        ? 'האם אתה בטוח שברצונך לבטל את המסמך? ייפתח חלון חשבונית ירוקה ליצירת חשבונית זיכוי וקבלה שלילית.'
+                                        : 'האם אתה בטוח שברצונך לבטל את הקבלה? ייפתח חלון חשבונית ירוקה ליצירת קבלה שלילית.';
+                                    if (window.confirm(msg)) {
                                         onCancelDocument(doc.id, doc.type);
                                     }
                                 }}
                                 className="px-3 py-1.5 text-sm bg-red-600 text-white rounded-md hover:bg-red-700 transition-colors"
-                                title="ביטול מסמך (יצירת חשבונית זיכוי)"
+                                title={doc.type === 'invoice' ? 'ביטול מסמך (יצירת חשבונית זיכוי)' : doc.type === 'invoice_receipt' ? 'ביטול מסמך (חשבונית זיכוי + קבלה שלילית)' : 'ביטול קבלה (הפקת קבלה שלילית)'}
                             >
                                 ביטול
                             </button>

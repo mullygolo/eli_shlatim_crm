@@ -6,7 +6,8 @@ import {
     AttendanceRecord, ManualEvent, CallLog, EmployeeStatus, EmployeeRole,
     PriceListProduct, SalesHistoryEntry, AdHocProduct,
     LineItem, AdditionalService, SupplierPayment, TransactionStatus,
-    PaymentMethod, CustomerPayment, ReceivablePayment, DebtPayment
+    PaymentMethod, CustomerPayment, ReceivablePayment, DebtPayment,
+    OrderDocumentLink
 } from '../types.js';
 import { hashPassword } from '../utils/password.js';
 import { getTodayRangeIsrael, getDateStringIsrael } from '../utils/timezone.js';
@@ -182,20 +183,25 @@ export async function getCustomersPaginated(
         // Load all customers (we'll filter after to match searchTerm logic)
         const allCustomersDocs = await customersCollection.find({}).toArray();
         let allCustomers = allCustomersDocs.map(deserializeDates) as Customer[];
-        
-        // Apply search filter (matching client-side logic)
+        // Apply search filter (matching client-side logic); guard against missing contacts or null fields
         if (filters.searchTerm) {
             const lowercasedTerm = filters.searchTerm.toLowerCase();
             allCustomers = allCustomers.filter(customer => {
-                const nameMatch = customer.name.toLowerCase().includes(lowercasedTerm);
-                const hpMatch = customer.businessId?.toLowerCase().includes(lowercasedTerm);
-                if (nameMatch || hpMatch) return true;
-                
-                return customer.contacts.some(contact => 
-                    contact.name.toLowerCase().includes(lowercasedTerm) ||
-                    contact.email.toLowerCase().includes(lowercasedTerm) ||
-                    contact.phone.toLowerCase().includes(lowercasedTerm)
-                );
+                try {
+                    const nameMatch = (customer.name && typeof customer.name === 'string') && customer.name.toLowerCase().includes(lowercasedTerm);
+                    const hpMatch = customer.businessId?.toLowerCase().includes(lowercasedTerm);
+                    if (nameMatch || hpMatch) return true;
+                    const contacts = customer.contacts;
+                    if (!Array.isArray(contacts)) return false;
+                    return contacts.some(contact => {
+                        const n = contact?.name != null ? String(contact.name).toLowerCase().includes(lowercasedTerm) : false;
+                        const e = contact?.email != null ? String(contact.email).toLowerCase().includes(lowercasedTerm) : false;
+                        const p = contact?.phone != null ? String(contact.phone).toLowerCase().includes(lowercasedTerm) : false;
+                        return n || e || p;
+                    });
+                } catch {
+                    return false;
+                }
             });
         }
         
@@ -234,7 +240,6 @@ export async function getCustomersPaginated(
         const totalCount = customersWithDebt.length;
         const skip = (page - 1) * limit;
         const paginatedCustomers = customersWithDebt.slice(skip, skip + limit);
-        
         return {
             customers: paginatedCustomers,
             totalCount,
@@ -378,6 +383,69 @@ export async function deleteOrder(orderId: string): Promise<void> {
     }
 }
 
+// ==================== ORDER DOCUMENT LINKS (שיוך מסמכי חשבונית ירוקה) ====================
+export async function getOrderDocumentLinksByOrderId(orderId: string): Promise<OrderDocumentLink[]> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<OrderDocumentLink>('orderDocumentLinks');
+        const docs = await collection.find({ orderId }).toArray();
+        return docs.map(deserializeDates) as OrderDocumentLink[];
+    } catch (error) {
+        console.error('Error fetching order document links:', error);
+        throw error;
+    }
+}
+
+export async function getOrderDocumentLinksByDocumentId(documentId: string): Promise<OrderDocumentLink[]> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<OrderDocumentLink>('orderDocumentLinks');
+        const docs = await collection.find({ documentId }).toArray();
+        return docs.map(deserializeDates) as OrderDocumentLink[];
+    } catch (error) {
+        console.error('Error fetching document links by documentId:', error);
+        throw error;
+    }
+}
+
+export async function createOrderDocumentLink(link: OrderDocumentLink): Promise<OrderDocumentLink> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<OrderDocumentLink>('orderDocumentLinks');
+        const serialized = serializeDates(link);
+        await collection.insertOne(serialized);
+        return deserializeDates(serialized) as OrderDocumentLink;
+    } catch (error) {
+        console.error('Error creating order document link:', error);
+        throw error;
+    }
+}
+
+export async function deleteOrderDocumentLink(orderId: string, documentId: string): Promise<boolean> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<OrderDocumentLink>('orderDocumentLinks');
+        const result = await collection.deleteOne({ orderId, documentId });
+        return result.deletedCount > 0;
+    } catch (error) {
+        console.error('Error deleting order document link:', error);
+        throw error;
+    }
+}
+
+export async function getOrderDocumentLinksByDocumentIds(documentIds: string[]): Promise<OrderDocumentLink[]> {
+    if (!documentIds.length) return [];
+    try {
+        const database = await getDb();
+        const collection = database.collection<OrderDocumentLink>('orderDocumentLinks');
+        const docs = await collection.find({ documentId: { $in: documentIds } }).toArray();
+        return docs.map(deserializeDates) as OrderDocumentLink[];
+    } catch (error) {
+        console.error('Error fetching order document links by documentIds:', error);
+        throw error;
+    }
+}
+
 // Get orders with server-side filtering and pagination (IMPROVED VERSION)
 export async function getOrdersPaginated(filters: any, page: number = 1, limit: number = 50, vatRate: number = 0): Promise<any> {
     try {
@@ -430,17 +498,26 @@ export async function getOrdersPaginated(filters: any, page: number = 1, limit: 
             ];
         }
         
-        // Date filters
+        // Date filters (client sends YYYY-MM-DD from type="date" inputs; reject "undefined" or invalid)
         const dateFilterType = filters.dateFilterType || 'ORDER_DATE';
         const dateField = dateFilterType === 'DEAL_DATE' ? 'dealStartDate' : 'date';
-        
-        if (filters.startDateFilter || filters.endDateFilter) {
-            query[dateField] = {};
-            if (filters.startDateFilter) {
-                query[dateField].$gte = new Date(filters.startDateFilter);
-            }
-            if (filters.endDateFilter) {
-                query[dateField].$lte = new Date(filters.endDateFilter);
+        const isoDateOnly = /^\d{4}-\d{2}-\d{2}$/;
+        const rawStart = filters.startDateFilter != null ? String(filters.startDateFilter).trim() : '';
+        const rawEnd = filters.endDateFilter != null ? String(filters.endDateFilter).trim() : '';
+        const startDateStr = rawStart && isoDateOnly.test(rawStart) ? rawStart : '';
+        const endDateStr = rawEnd && isoDateOnly.test(rawEnd) ? rawEnd : '';
+        // #region agent log
+        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'server/services/mongoService.ts:getOrdersPaginated:filters',message:'date filters received',data:{startDateStr,endDateStr,dateField,hasStart:!!startDateStr,hasEnd:!!endDateStr},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H1,H2,H3'})}).catch(()=>{});
+        // #endregion
+        if (startDateStr || endDateStr) {
+            const gteStr = startDateStr ? startDateStr + 'T00:00:00.000Z' : '';
+            const lteStr = endDateStr ? endDateStr + 'T23:59:59.999Z' : '';
+            const gteValid = !!gteStr;
+            const lteValid = !!lteStr;
+            if (gteValid || lteValid) {
+                query[dateField] = {};
+                if (gteValid) query[dateField].$gte = gteStr;
+                if (lteValid) query[dateField].$lte = lteStr;
             }
         } else if (filters.monthFilter && filters.monthFilter !== 'all') {
             // Month/Year filter
@@ -528,8 +605,9 @@ export async function getOrdersPaginated(filters: any, page: number = 1, limit: 
         }
         
         // Calculate summary totals on ALL filtered orders (not just current page)
+        // Balance = same formula as client row: max(0, totalDueWithVat - totalPaid) for active deals
         const summaryTotals = allMatchingOrders.reduce((acc, order) => {
-            const { totalAmount, profit, totalCost } = calculateOrderTotals(order);
+            const { totalAmount, profit, totalCost, totalPaid } = calculateOrderTotals(order);
             const currentOrderVat = order.vatRate ?? vatRate;
             acc.totalAmount += totalAmount;
             acc.totalProfit += profit;
@@ -539,9 +617,11 @@ export async function getOrdersPaginated(filters: any, page: number = 1, limit: 
             const statusConfig = statusConfigs.find(c => c.label === order.orderStatus);
             const isActiveDeal = statusConfig ? statusConfig.isActiveDeal : true;
             if (isActiveDeal) {
-                const balance = order.paymentStatus === 'שולם' ? 0 : totalAmount;
-                acc.totalBalance += balance;
-                acc.totalBalanceInclVat += balance * (1 + currentOrderVat / 100);
+                const dueWithVat = totalAmount * (1 + currentOrderVat / 100);
+                const balanceWithoutVat = Math.max(0, totalAmount - totalPaid);
+                const balanceWithVat = Math.max(0, dueWithVat - totalPaid);
+                acc.totalBalance += balanceWithoutVat;
+                acc.totalBalanceInclVat += balanceWithVat;
             }
             return acc;
         }, { 

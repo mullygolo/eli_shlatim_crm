@@ -10,6 +10,7 @@ import * as mongoService from '../services/mongoService';
 interface CustomersPageProps {
     customers: Customer[];
     setCustomers: React.Dispatch<React.SetStateAction<Customer[]>>;
+    setCustomersLocal: (updater: (prev: Customer[]) => Customer[]) => void;
     orders: Order[];
     setOrders: React.Dispatch<React.SetStateAction<Order[]>>;
     addActivity: (description: string) => void;
@@ -31,6 +32,82 @@ const findDuplicateCustomer = (customers: Customer[], name: string, hp?: string,
         }
         return false;
     });
+};
+
+const LinkDocumentForm: React.FC<{
+    customer: Customer;
+    orderData: Array<Order & { gross: number; paid: number; remaining: number }>;
+    setOrders: React.Dispatch<React.SetStateAction<Order[]>>;
+    addActivity: (description: string) => void;
+    onClose: () => void;
+}> = ({ customer, orderData, setOrders, addActivity }) => {
+    const [documentId, setDocumentId] = useState('');
+    const [loading, setLoading] = useState(false);
+
+    const handleLink = async () => {
+        const id = documentId.trim();
+        if (!id || orderData.length === 0) return;
+        setLoading(true);
+        try {
+            const totalDebt = orderData.reduce((s, o) => s + o.remaining, 0);
+            const docRes = await fetch(`/api/green-invoice/documents/${id}/raw`, {
+                headers: { Authorization: `Bearer ${localStorage.getItem('authToken')}` }
+            });
+            if (!docRes.ok) throw new Error('מסמך לא נמצא בחשבונית ירוקה');
+            const doc = await docRes.json();
+            const docTotal = Number(doc.amount ?? doc.total ?? 0);
+            if (docTotal <= 0) throw new Error('סכום המסמך לא תקין');
+            let remainingToAlloc = Math.min(docTotal, totalDebt);
+            const allocations: Record<string, number> = {};
+            orderData.forEach(o => {
+                if (remainingToAlloc <= 0.01) allocations[o.id] = 0;
+                else {
+                    const amt = Math.min(o.remaining, remainingToAlloc);
+                    allocations[o.id] = Number(amt.toFixed(2));
+                    remainingToAlloc -= amt;
+                }
+            });
+            const res = await fetch('/api/green-invoice/documents/link-orders', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('authToken')}` },
+                body: JSON.stringify({ documentId: id, allocations })
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'שגיאה בשיוך');
+            if (data.updatedOrders?.length) {
+                setOrders(prev => prev.map(o => {
+                    const u = data.updatedOrders.find((uo: Order) => uo.id === o.id);
+                    return u || o;
+                }));
+            }
+            addActivity(`שויך מסמך חשבונית ירוקה ל־${Object.keys(allocations).filter(k => allocations[k] > 0).length} הזמנות`);
+            setDocumentId('');
+        } catch (e: any) {
+            alert(e.message || 'שגיאה בשיוך מסמך');
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    return (
+        <div className="flex flex-wrap items-center gap-2">
+            <input
+                type="text"
+                value={documentId}
+                onChange={e => setDocumentId(e.target.value)}
+                placeholder="מזהה מסמך (ID)"
+                className="flex-1 min-w-[100px] text-sm border border-emerald-300 rounded px-2 py-1.5"
+            />
+            <button
+                type="button"
+                onClick={handleLink}
+                disabled={!documentId.trim() || loading || orderData.length === 0}
+                className="px-3 py-1.5 bg-emerald-600 text-white text-sm rounded hover:bg-emerald-700 disabled:opacity-50"
+            >
+                {loading ? 'משייך...' : 'שייך מסמך'}
+            </button>
+        </div>
+    );
 };
 
 const CollectionCenterModal: React.FC<{
@@ -310,12 +387,26 @@ const CollectionCenterModal: React.FC<{
                     </div>
                 </div>
 
-                {/* Right Side: Payment Form */}
+                {/* Right Side: Payment Form + Link Document */}
                 <div className="w-full md:w-80 space-y-4">
+                    <div className="bg-emerald-50 p-4 rounded-2xl border border-emerald-200 shadow-sm space-y-3">
+                        <h4 className="font-black text-slate-800 border-b border-emerald-200 pb-2 text-sm flex items-center gap-2">
+                            <svg className="w-4 h-4 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" /></svg>
+                            שייך מסמך חשבונית ירוקה
+                        </h4>
+                        <p className="text-xs text-slate-600">הזן מזהה מסמך (קבלה/חשבונית) — הסכום יופץ אוטומטית לפי יתרות</p>
+                        <LinkDocumentForm
+                            customer={customer}
+                            orderData={orderData as Array<Order & { gross: number; paid: number; remaining: number }>}
+                            setOrders={setOrders}
+                            addActivity={addActivity}
+                            onClose={onClose}
+                        />
+                    </div>
                     <div className="bg-slate-50 p-5 rounded-2xl border border-slate-200 shadow-sm space-y-4">
                         <h4 className="font-black text-slate-800 border-b pb-3 flex items-center gap-2">
                             <CashIcon className="w-5 h-5 text-emerald-600"/>
-                            פרטי תקבול
+                            פרטי תקבול (ידני)
                         </h4>
                         
                         <div>
@@ -938,7 +1029,7 @@ const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, custo
     )
 };
 
-const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, orders, setOrders, addActivity, onNavigateToOrder, statusConfigs, vatRate }) => {
+const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, setCustomersLocal, orders, setOrders, addActivity, onNavigateToOrder, statusConfigs, vatRate }) => {
     const [isNewCustomerModalOpen, setIsNewCustomerModalOpen] = useState(false);
     const [isDetailModalOpen, setIsDetailModalOpen] = useState(false);
     const [isCollectionCenterOpen, setIsCollectionCenterOpen] = useState(false);
@@ -975,7 +1066,8 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
 
     // Load customers when search term or pagination changes; if customers already in props, show first page immediately then refetch in background
     useEffect(() => {
-        if (customers.length > 0 && paginatedCustomers.length === 0) {
+        // Only show in-memory slice when we have no active search (avoid showing unfiltered slice when search is applied)
+        if (customers.length > 0 && paginatedCustomers.length === 0 && !searchTerm) {
             const start = (currentPage - 1) * pageSize;
             const slice = customers.slice(start, start + pageSize);
             setPaginatedCustomers(slice);
@@ -986,6 +1078,11 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
             refetchCustomers();
         }
     }, [searchTerm, currentPage, pageSize]);
+
+    // Reset to page 1 when search term changes (avoid empty list / wrong range when filtered results have fewer pages)
+    useEffect(() => {
+        setCurrentPage(1);
+    }, [searchTerm]);
 
     // Use paginated customers for display
     const filteredCustomers = paginatedCustomers;
@@ -1144,9 +1241,17 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
         // Find previous state to check for changes
         const originalCustomer = customers.find(c => c.id === updatedCustomer.id);
         
-        setCustomers(prev => prev.map(c => c.id === updatedCustomer.id ? updatedCustomer : c));
-        // Refetch paginated customers after update
-        await refetchCustomers();
+        try {
+            await mongoService.updateCustomer(updatedCustomer);
+        } catch (error) {
+            console.error('Error saving customer:', error);
+            alert('שגיאה בשמירת הלקוח. אנא נסה שוב.');
+            return;
+        }
+        
+        setCustomersLocal(prev => prev.map(c => c.id === updatedCustomer.id ? updatedCustomer : c));
+        setPaginatedCustomers(prev => prev.map(c => c.id === updatedCustomer.id ? { ...c, ...updatedCustomer } : c));
+        refetchCustomers(true);
         
         // Automatic cascading update for Payment Terms
         if (originalCustomer && updatedCustomer.paymentTerms && originalCustomer.paymentTerms !== updatedCustomer.paymentTerms) {

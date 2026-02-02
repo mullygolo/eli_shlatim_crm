@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { Order, Customer, PaymentMethod } from '../types';
 import Modal from './Modal';
 import { PlusIcon, DeleteIcon } from './icons';
@@ -25,14 +25,16 @@ interface CreateDocumentModalProps {
     mode?: 'full' | 'from-document';
     /** כאשר mode === 'from-document': סוג המסמך שממנו נפתח (estimate → FROM_ESTIMATE, אחרת → FROM_DOCUMENT) */
     fromDocumentType?: 'invoice' | 'receipt' | 'credit' | 'estimate';
+    /** כאשר mode === 'from-document': מזהה המסמך שממנו נפתח (לקבלה מתוך חשבונית ספציפית) */
+    sourceDocumentId?: string;
     /** מצב טעינה - משבית את הכפתור בזמן יצירת מסמך */
     isLoading?: boolean;
 }
 
+// + הראשי — אין קבלה מתוך חשבונית (רק מתוך + של חשבונית קיימת)
 const FULL_TYPES: { value: GreenInvoiceDocumentType; label: string; description: string; disabled?: boolean }[] = [
     { value: 'estimate', label: 'הצעת מחיר', description: 'יצירת הצעת מחיר (טיוטה) - ניתן להמיר לחשבונית מאוחר יותר' },
     { value: 'invoice', label: 'חשבונית מס', description: 'יצירת חשבונית מס רגילה' },
-    { value: 'receipt', label: 'קבלה מתוך חשבונית', description: 'יצירת קבלה מתוך חשבונית קיימת', disabled: false },
     { value: 'invoice_receipt', label: 'חשבונית מס / קבלה', description: 'מסמך משולב של חשבונית מס וקבלה' },
     { value: 'credit_invoice', label: 'חשבונית זיכוי', description: 'יצירת חשבונית זיכוי מתוך חשבונית קיימת', disabled: false }
 ];
@@ -53,7 +55,7 @@ const FROM_ESTIMATE_TYPES: { value: GreenInvoiceDocumentType; label: string; des
     { value: 'receipt', label: 'קבלה', description: 'הנפקת קבלה' }
 ];
 
-const CreateDocumentModal: React.FC<CreateDocumentModalProps> = ({ order, customer, onClose, onCreate, mode = 'full', fromDocumentType, balanceDue = 0, isLoading = false }) => {
+const CreateDocumentModal: React.FC<CreateDocumentModalProps> = ({ order, customer, onClose, onCreate, mode = 'full', fromDocumentType, sourceDocumentId, balanceDue = 0, isLoading = false }) => {
     const [selectedType, setSelectedType] = useState<GreenInvoiceDocumentType | ''>('');
     const [selectedMethod, setSelectedMethod] = useState<'api' | 'window'>('api');
     const [receiptPayments, setReceiptPayments] = useState<ReceiptPaymentItem[]>([]);
@@ -66,12 +68,27 @@ const CreateDocumentModal: React.FC<CreateDocumentModalProps> = ({ order, custom
         if (fromEstimate) return { ...t, disabled: false };
         return {
             ...t,
-            disabled: t.disabled ?? (t.value === 'receipt' || t.value === 'credit_invoice' ? !order.greenInvoiceId : false)
+            disabled: t.disabled ?? (t.value === 'credit_invoice' ? !order.greenInvoiceId : false)
         };
     });
 
     const isReceiptOrInvoiceReceipt = selectedType === 'receipt' || selectedType === 'invoice_receipt';
-    const showReceiptPaymentsForm = mode === 'full' && isReceiptOrInvoiceReceipt && selectedMethod === 'api';
+    // קבלה מתוך חשבונית או חשבונית מס/קבלה מהכפתור הראשי — מציגים טופס פרטי תקבול
+    const showReceiptPaymentsForm =
+        (mode === 'full' && selectedType === 'invoice_receipt') ||
+        (mode === 'from-document' && fromDocumentType === 'invoice' && selectedType === 'receipt' && !!sourceDocumentId);
+
+    useEffect(() => {
+        if (!showReceiptPaymentsForm) {
+            setReceiptPayments([]);
+            return;
+        }
+        if (receiptPayments.length === 0) {
+            const defaultAmount = balanceDue > 0 ? balanceDue : 1;
+            setReceiptPayments([{ id: `rp_${Date.now()}`, amount: defaultAmount, date: new Date(), method: PaymentMethod.BANK_TRANSFER, reference: '', repaymentDate: undefined }]);
+        }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only add when entering form with empty
+    }, [showReceiptPaymentsForm, balanceDue]);
     const receiptsTotal = useMemo(() => receiptPayments.reduce((s, p) => s + (p.amount || 0), 0), [receiptPayments]);
     const receiptsRemaining = Math.max(0, balanceDue - receiptsTotal);
 
@@ -100,8 +117,11 @@ const CreateDocumentModal: React.FC<CreateDocumentModalProps> = ({ order, custom
 
     const handleCreate = () => {
         if (selectedType && selectedType !== '') {
-            const method = mode === 'from-document' ? 'api' : selectedMethod;
-            const override = showReceiptPaymentsForm ? receiptPayments : undefined;
+            // קבלה / חשבונית מס/קבלה — אם מילאו פרטי תקבול: שליחה ישירה (API). אחרת: פתיחת חלון.
+            const useApiWithPayments = showReceiptPaymentsForm && receiptPayments.length > 0 && receiptPayments.some(p => (p.amount || 0) > 0);
+            const useWindowForReceipt = (selectedType === 'receipt' || selectedType === 'invoice_receipt') && !useApiWithPayments;
+            const method = useApiWithPayments ? 'api' : (useWindowForReceipt ? 'window' : (mode === 'from-document' ? 'api' : selectedMethod));
+            const override = useApiWithPayments ? receiptPayments : undefined;
             onCreate(selectedType as GreenInvoiceDocumentType, method, override);
         }
     };
@@ -149,8 +169,8 @@ const CreateDocumentModal: React.FC<CreateDocumentModalProps> = ({ order, custom
                     </div>
                 </div>
 
-                {/* Creation Method Selection — רק במצב full; ב-from-document רק הנפקה ישירה (כמו + בחשבונית ירוקה) */}
-                {selectedType && mode === 'full' && (
+                {/* Creation Method Selection — רק במצב full; קבלה/חשבונית+קבלה תמיד פותחים חלון */}
+                {selectedType && mode === 'full' && !isReceiptOrInvoiceReceipt && (
                     <div>
                         <label className="block text-sm font-medium text-slate-700 mb-3">
                             בחר שיטת יצירה:
@@ -236,7 +256,7 @@ const CreateDocumentModal: React.FC<CreateDocumentModalProps> = ({ order, custom
                             <PlusIcon className="w-4 h-4" /> הוסף תשלום
                         </button>
                         <p className="text-xs text-emerald-700 mt-3 pt-3 border-t border-emerald-200">
-                            <strong>כרטיס אשראי + מסך סליקה:</strong> לחיוב באשראי עם עמוד הסליקה — בחר <strong>פתיחת חלון לעריכה</strong>, פתח את הטיוטה בחשבונית ירוקה, ולחץ &quot;לחיוב באשראי&quot; → &quot;לחיוב הלקוח&quot;. המסך נפתח מתוך המסמך בחשבונית ירוקה בלבד.
+                            <strong>כרטיס אשראי + מסך סליקה:</strong> מחק את שורת התקבול למעלה ולחץ &quot;צור מסמך&quot; — ייפתח חלון חשבונית ירוקה שם תוכל ללחוץ &quot;לחיוב באשראי&quot; → &quot;לחיוב הלקוח&quot; → מסך הסליקה.
                         </p>
                     </div>
                 )}

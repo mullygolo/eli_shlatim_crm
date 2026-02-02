@@ -24,7 +24,6 @@ router.get('/paginated', async (req, res) => {
         const page = parseInt(req.query.page as string) || 1;
         const limit = parseInt(req.query.limit as string) || 50;
         const filters = req.query.filters ? JSON.parse(req.query.filters as string) : {};
-        
         // Get vatRate from settings
         const settings = await getSettings();
         const vatRate = settings?.vatRate || 0;
@@ -201,11 +200,13 @@ router.post('/sync-from-greeninvoice', async (req, res) => {
                     }
                     const fullNotes = notesParts.length > 0 ? notesParts.join('\n') : existingCustomer.notes || '';
                     
-                    // Determine payment terms
+                    // תנאי תשלום — התוכנה גוברת: אם ללקוח יש תנאים מוגדרים, לא דורסים מחשבונית ירוקה
                     let paymentTerms = existingCustomer.paymentTerms || 'תשלום מיידי';
-                    if (giClient.paymentTerms) {
+                    if (!existingCustomer.paymentTerms && giClient.paymentTerms) {
                         if (typeof giClient.paymentTerms === 'number') {
-                            paymentTerms = giClient.paymentTerms === 0 ? 'תשלום מיידי' : `שוטף ${giClient.paymentTerms}`;
+                            if (giClient.paymentTerms === 0) paymentTerms = 'תשלום מיידי';
+                            else if (giClient.paymentTerms > 0) paymentTerms = `שוטף ${giClient.paymentTerms}`;
+                            else paymentTerms = 'שוטף'; // -1 (סוף חודש) או ערך שלילי — לא "שוטף -1"
                         } else {
                             paymentTerms = String(giClient.paymentTerms);
                         }
@@ -273,11 +274,13 @@ router.post('/sync-from-greeninvoice', async (req, res) => {
                     if (giClient.fax) notesParts.push(`פקס: ${giClient.fax}`);
                     const fullNotes = notesParts.join('\n');
                     
-                    // Determine payment terms
+                    // תנאי תשלום — ייבוא חדש: מחשבונית ירוקה. מטפלים ב־-1 (סוף חודש)
                     let paymentTerms = 'תשלום מיידי';
                     if (giClient.paymentTerms) {
                         if (typeof giClient.paymentTerms === 'number') {
-                            paymentTerms = giClient.paymentTerms === 0 ? 'תשלום מיידי' : `שוטף ${giClient.paymentTerms}`;
+                            if (giClient.paymentTerms === 0) paymentTerms = 'תשלום מיידי';
+                            else if (giClient.paymentTerms > 0) paymentTerms = `שוטף ${giClient.paymentTerms}`;
+                            else paymentTerms = 'שוטף'; // -1 (סוף חודש) — לא "שוטף -1"
                         } else {
                             paymentTerms = String(giClient.paymentTerms);
                         }

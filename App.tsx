@@ -374,7 +374,8 @@ const App: React.FC = () => {
             case 'Customers':
                 return <CustomersPage 
                             customers={customers} 
-                            setCustomers={setCustomersWithSync} 
+                            setCustomers={setCustomersWithSync}
+                            setCustomersLocal={setCustomersLocal} 
                             orders={orders} 
                             setOrders={setOrdersWithSync}
                             addActivity={addActivity} 
@@ -386,6 +387,7 @@ const App: React.FC = () => {
                 return <OrdersPage 
                             orders={orders} 
                             setOrders={setOrdersWithSync} 
+                            setOrdersLocal={setOrdersLocal}
                             customers={customers} 
                             setCustomers={setCustomersWithSync} 
                             suppliers={suppliers} 
@@ -495,7 +497,7 @@ const App: React.FC = () => {
             for (const customer of newCustomers) {
                 const existing = customers.find(c => c.id === customer.id);
                 if (existing) {
-                    await updateCustomer(customer);
+                    if (existing !== customer) await updateCustomer(customer);
                 } else {
                     await createCustomer(customer);
                 }
@@ -510,6 +512,14 @@ const App: React.FC = () => {
         }
     }, [customers]);
 
+    const setCustomersLocal = useCallback((updater: (prev: Customer[]) => Customer[]) => {
+        setCustomers(updater);
+    }, []);
+
+    const setOrdersLocal = useCallback((updater: (prev: Order[]) => Order[]) => {
+        setOrders(updater);
+    }, []);
+
     const setOrdersWithSync = useCallback(async (updater: Order[] | ((prev: Order[]) => Order[])) => {
         const newOrders = typeof updater === 'function' ? updater(orders) : updater;
         setOrders(newOrders);
@@ -517,7 +527,7 @@ const App: React.FC = () => {
             for (const order of newOrders) {
                 const existing = orders.find(o => o.id === order.id);
                 if (existing) {
-                    await updateOrder(order);
+                    if (existing !== order) await updateOrder(order);
                 } else {
                     await createOrder(order);
                 }
@@ -538,7 +548,7 @@ const App: React.FC = () => {
             for (const supplier of newSuppliers) {
                 const existing = suppliers.find(s => s.id === supplier.id);
                 if (existing) {
-                    await updateSupplier(supplier);
+                    if (existing !== supplier) await updateSupplier(supplier);
                 } else {
                     await createSupplier(supplier);
                 }
@@ -559,7 +569,7 @@ const App: React.FC = () => {
             for (const employee of newEmployees) {
                 const existing = employees.find(e => e.id === employee.id);
                 if (existing) {
-                    await updateEmployee(employee);
+                    if (existing !== employee) await updateEmployee(employee);
                 } else {
                     await createEmployee(employee);
                 }
@@ -590,7 +600,7 @@ const App: React.FC = () => {
             for (const expense of newExpenses) {
                 const existing = fixedExpenses.find(e => e.id === expense.id);
                 if (existing) {
-                    await updateFixedExpense(expense);
+                    if (existing !== expense) await updateFixedExpense(expense);
                 } else {
                     await createFixedExpense(expense);
                 }
@@ -611,7 +621,7 @@ const App: React.FC = () => {
             for (const expense of newExpenses) {
                 const existing = variableExpenses.find(e => e.id === expense.id);
                 if (existing) {
-                    await updateVariableExpense(expense);
+                    if (existing !== expense) await updateVariableExpense(expense);
                 } else {
                     await createVariableExpense(expense);
                 }
@@ -632,7 +642,7 @@ const App: React.FC = () => {
             for (const loan of newLoans) {
                 const existing = loans.find(l => l.id === loan.id);
                 if (existing) {
-                    await updateLoan(loan);
+                    if (existing !== loan) await updateLoan(loan);
                 } else {
                     await createLoan(loan);
                 }
@@ -653,7 +663,7 @@ const App: React.FC = () => {
             for (const debt of newDebts) {
                 const existing = debts.find(d => d.id === debt.id);
                 if (existing) {
-                    await updateDebt(debt);
+                    if (existing !== debt) await updateDebt(debt);
                 } else {
                     await createDebt(debt);
                 }
@@ -674,7 +684,7 @@ const App: React.FC = () => {
             for (const receivable of newReceivables) {
                 const existing = receivables.find(r => r.id === receivable.id);
                 if (existing) {
-                    await updateReceivable(receivable);
+                    if (existing !== receivable) await updateReceivable(receivable);
                 } else {
                     await createReceivable(receivable);
                 }
@@ -695,7 +705,7 @@ const App: React.FC = () => {
             for (const eq of newEquity) {
                 const existing = equity.find(e => e.id === eq.id);
                 if (existing) {
-                    await updateEquity(eq);
+                    if (existing !== eq) await updateEquity(eq);
                 } else {
                     await createEquity(eq);
                 }
@@ -716,7 +726,7 @@ const App: React.FC = () => {
             for (const record of newRecords) {
                 const existing = attendanceRecords.find(r => r.id === record.id);
                 if (existing) {
-                    await updateAttendanceRecord(record);
+                    if (existing !== record) await updateAttendanceRecord(record);
                 } else {
                     await createAttendanceRecord(record);
                 }

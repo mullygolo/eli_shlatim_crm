@@ -18,11 +18,13 @@ import {
     getDocumentEditUrl,
     testConnection,
     testConnectionWithClientCount,
-    debugClientsEndpoints
+    debugClientsEndpoints,
+    validateDocumentForOrders,
+    searchDocumentsByClientId
 } from '../services/greenInvoiceService.js';
 import { CreateInvoiceRequest, CreateClientRequest, RecordPaymentRequest, GreenInvoiceDocumentType } from '../types/greenInvoice.js';
 import { mapOrderToInvoiceRequest, mapOrderToDocumentRequest, mapCustomerToClient } from '../services/greenInvoiceMapper.js';
-import { getOrderById, getCustomerById, updateOrder, updateCustomer, getSettings } from '../services/mongoService.js';
+import { getOrderById, getCustomerById, updateOrder, updateCustomer, getSettings, getOrderDocumentLinksByDocumentId, getOrderDocumentLinksByOrderId, createOrderDocumentLink, deleteOrderDocumentLink } from '../services/mongoService.js';
 import { calculateOrderTotals } from '../utils/calculations.js';
 
 const router = Router();
@@ -182,20 +184,221 @@ router.get('/invoices/:id/sync-payments', async (req, res) => {
     }
 });
 
-// Invoice summary by order number (invoiced − credits) for ניהול גבייה. כולל מסמכים מזהים שמורים (greenInvoiceId וכו').
+// Invoice summary by order number (invoiced − credits) for ניהול גבייה. כולל מסמכים מזהים שמורים (greenInvoiceId) + OrderDocumentLink.
 router.get('/documents/invoice-summary/:orderNumber', async (req, res) => {
     try {
         const orderNumber = req.params.orderNumber;
-        const ids = {
+        const orderId = req.query.orderId as string | undefined;
+        const ids: { invoiceId?: string; receiptId?: string; creditId?: string; linkedDocumentIds?: string[] } = {
             invoiceId: (req.query.invoiceId as string) || undefined,
             receiptId: (req.query.receiptId as string) || undefined,
             creditId: (req.query.creditId as string) || undefined
         };
+        if (orderId) {
+            const links = await getOrderDocumentLinksByOrderId(orderId);
+            ids.linkedDocumentIds = links.map(l => l.documentId).filter(Boolean);
+        }
         const summary = await getInvoiceSummaryByOrderNumber(orderNumber, ids);
         res.json(summary);
     } catch (error: any) {
         console.error('Error fetching invoice summary:', error);
         res.status(500).json({ error: error.message || 'Failed to fetch invoice summary' });
+    }
+});
+
+// ==================== שיוך מסמכים ידני ====================
+
+// Validate document before linking
+router.get('/documents/:id/validate', async (req, res) => {
+    try {
+        const documentId = req.params.id;
+        const orderIds = (req.query.orderIds as string)?.split(',').filter(Boolean) || [];
+        if (orderIds.length === 0) {
+            return res.status(400).json({ error: 'נדרש לפחות orderId אחד' });
+        }
+        const raw = await getDocumentRaw(documentId);
+        const orders = await Promise.all(orderIds.map(id => getOrderById(id)));
+        const validOrders = orders.filter((o): o is NonNullable<typeof o> => !!o);
+        if (validOrders.length !== orderIds.length) {
+            return res.status(404).json({ error: 'הזמנה לא נמצאה' });
+        }
+        const customer = validOrders[0] ? await getCustomerById(validOrders[0].customerId) : null;
+        if (!customer) return res.status(404).json({ error: 'לקוח לא נמצא' });
+        const existingLinks = await getOrderDocumentLinksByDocumentId(documentId);
+        const newAllocations: Record<string, number> = {};
+        const docTotal = Number(raw?.amount ?? raw?.total ?? 0);
+        if (validOrders.length === 1) newAllocations[validOrders[0].id] = docTotal;
+        const result = await validateDocumentForOrders(raw, validOrders, customer, existingLinks, newAllocations);
+        res.json({ ...result, document: raw ? { id: raw.id, amount: docTotal, description: raw.description || raw.desc, type: raw.type } : null });
+    } catch (error: any) {
+        console.error('Error validating document:', error);
+        res.status(500).json({ error: error.message || 'Failed to validate' });
+    }
+});
+
+// Link document to single order
+router.post('/orders/:orderId/link-document', async (req, res) => {
+    try {
+        const { orderId } = req.params;
+        const { documentId, amount } = req.body as { documentId: string; amount?: number };
+        if (!documentId) return res.status(400).json({ error: 'נדרש documentId' });
+        const order = await getOrderById(orderId);
+        if (!order) return res.status(404).json({ error: 'הזמנה לא נמצאה' });
+        const customer = await getCustomerById(order.customerId);
+        if (!customer) return res.status(404).json({ error: 'לקוח לא נמצא' });
+        const raw = await getDocumentRaw(documentId);
+        const docTotal = Number(raw?.amount ?? raw?.total ?? 0);
+        const allocAmount = typeof amount === 'number' && amount > 0 ? amount : docTotal;
+        const existingLinks = await getOrderDocumentLinksByDocumentId(documentId);
+        const result = await validateDocumentForOrders(raw, [order], customer, existingLinks, { [orderId]: allocAmount });
+        if (!result.valid) return res.status(400).json({ error: result.errors[0] || 'ולידציה נכשלה', errors: result.errors });
+        const docType = result.documentType || 'receipt';
+        const link = await createOrderDocumentLink({
+            id: `odl_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
+            orderId,
+            documentId,
+            documentType: docType,
+            amount: allocAmount,
+            linkedAt: new Date()
+        });
+        const payments = await getDocumentPayments(documentId);
+        const orderPayments = order.payments || [];
+        const seen = new Set(orderPayments.map(p => `${p.amount}_${new Date(p.date).toISOString().split('T')[0]}`));
+        const PaymentMethod = (await import('../types.js')).PaymentMethod;
+        const methodMap: Record<string, string> = { 'Bank Transfer': 'העברה בנקאית', 'Credit Card': 'כרטיס אשראי', 'Cheque': 'צ\'ק', 'Cash': 'מזומן', 'Standing Order': 'הוראת קבע', 'Bit/PayBox': 'Bit/PayBox' };
+        let added = 0;
+        for (const p of payments) {
+            const key = `${p.amount}_${p.date}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            orderPayments.push({
+                id: `gi_pay_${Date.now()}_${added}`,
+                amount: p.amount,
+                date: new Date(p.date),
+                method: (methodMap[p.method || ''] || 'העברה בנקאית') as any,
+                reference: p.reference || '',
+                repaymentDate: p.method === 'Cheque' ? new Date(p.date) : undefined,
+                status: 'CLEARED',
+                notes: 'סונכרן מחשבונית ירוקה'
+            });
+            added++;
+        }
+        if (added > 0) await updateOrder({ ...order, payments: orderPayments });
+        res.json({ link, orderUpdates: { payments: orderPayments }, paymentsAdded: added });
+    } catch (error: any) {
+        console.error('Error linking document:', error);
+        res.status(500).json({ error: error.message || 'Failed to link document' });
+    }
+});
+
+// Link document to multiple orders (with allocations)
+router.post('/documents/link-orders', async (req, res) => {
+    try {
+        const { documentId, allocations } = req.body as { documentId: string; allocations: Record<string, number> };
+        if (!documentId || !allocations || typeof allocations !== 'object') {
+            return res.status(400).json({ error: 'נדרשים documentId ו־allocations' });
+        }
+        const orderIds = Object.keys(allocations).filter(id => (allocations[id] || 0) > 0);
+        if (orderIds.length === 0) return res.status(400).json({ error: 'נדרש לפחות הזמנה אחת עם סכום להקצאה' });
+        const raw = await getDocumentRaw(documentId);
+        const orders = await Promise.all(orderIds.map(id => getOrderById(id)));
+        const validOrders = orders.filter((o): o is NonNullable<typeof o> => !!o);
+        if (validOrders.length !== orderIds.length) return res.status(404).json({ error: 'הזמנה לא נמצאה' });
+        const customer = await getCustomerById(validOrders[0].customerId);
+        if (!customer) return res.status(404).json({ error: 'לקוח לא נמצא' });
+        const existingLinks = await getOrderDocumentLinksByDocumentId(documentId);
+        const newAlloc: Record<string, number> = {};
+        orderIds.forEach(id => { newAlloc[id] = allocations[id] || 0; });
+        const result = await validateDocumentForOrders(raw, validOrders, customer, existingLinks, newAlloc);
+        if (!result.valid) return res.status(400).json({ error: result.errors[0] || 'ולידציה נכשלה', errors: result.errors });
+        const docType = result.documentType || 'receipt';
+        const links: any[] = [];
+        const updatedOrders: any[] = [];
+        const payments = await getDocumentPayments(documentId);
+        const docTotal = Number(raw?.amount ?? raw?.total ?? 0);
+        const allocSum = Object.values(newAlloc).reduce((s, a) => s + a, 0);
+        const ratio = allocSum > 0 ? 1 : 0;
+        const PaymentMethod = (await import('../types.js')).PaymentMethod;
+        const methodMap: Record<string, string> = { 'Bank Transfer': 'העברה בנקאית', 'Credit Card': 'כרטיס אשראי', 'Cheque': 'צ\'ק', 'Cash': 'מזומן', 'Standing Order': 'הוראת קבע', 'Bit/PayBox': 'Bit/PayBox' };
+        for (const orderId of orderIds) {
+            const amt = newAlloc[orderId] || 0;
+            if (amt <= 0) continue;
+            const link = await createOrderDocumentLink({
+                id: `odl_${Date.now()}_${orderId}_${Math.random().toString(36).slice(2, 7)}`,
+                orderId,
+                documentId,
+                documentType: docType,
+                amount: amt,
+                linkedAt: new Date()
+            });
+            links.push(link);
+            const order = validOrders.find(o => o.id === orderId);
+            if (!order || payments.length === 0) continue;
+            const orderRatio = ratio > 0 ? amt / allocSum : 1 / orderIds.length;
+            const orderPayments = order.payments || [];
+            const seen = new Set(orderPayments.map((p: any) => `${p.amount}_${new Date(p.date).toISOString().split('T')[0]}`));
+            let added = 0;
+            for (const p of payments) {
+                const allocAmt = Math.round(p.amount * orderRatio * 100) / 100;
+                if (allocAmt <= 0) continue;
+                const key = `${allocAmt}_${p.date}`;
+                if (seen.has(key)) continue;
+                seen.add(key);
+                orderPayments.push({
+                    id: `gi_pay_${Date.now()}_${orderId}_${added}`,
+                    amount: allocAmt,
+                    date: new Date(p.date),
+                    method: (methodMap[p.method || ''] || 'העברה בנקאית') as any,
+                    reference: p.reference || '',
+                    repaymentDate: p.method === 'Cheque' ? new Date(p.date) : undefined,
+                    status: 'CLEARED',
+                    notes: 'סונכרן מחשבונית ירוקה'
+                });
+                added++;
+            }
+            if (added > 0) {
+                const updated = await updateOrder({ ...order, payments: orderPayments });
+                updatedOrders.push(updated);
+            }
+        }
+        res.json({ links, success: true, updatedOrders });
+    } catch (error: any) {
+        console.error('Error linking document to orders:', error);
+        res.status(500).json({ error: error.message || 'Failed to link document' });
+    }
+});
+
+// Get document links for an order
+router.get('/orders/:orderId/document-links', async (req, res) => {
+    try {
+        const links = await getOrderDocumentLinksByOrderId(req.params.orderId);
+        res.json({ links });
+    } catch (error: any) {
+        console.error('Error fetching document links:', error);
+        res.status(500).json({ error: error.message || 'Failed to fetch links' });
+    }
+});
+
+// Unlink document from order
+router.delete('/orders/:orderId/documents/:documentId', async (req, res) => {
+    try {
+        const deleted = await deleteOrderDocumentLink(req.params.orderId, req.params.documentId);
+        if (!deleted) return res.status(404).json({ error: 'שיוך לא נמצא' });
+        res.json({ success: true });
+    } catch (error: any) {
+        console.error('Error unlinking document:', error);
+        res.status(500).json({ error: error.message || 'Failed to unlink' });
+    }
+});
+
+// List documents by client (for "שייך מסמך" - select from customer's documents)
+router.get('/documents/by-client/:clientId', async (req, res) => {
+    try {
+        const docs = await searchDocumentsByClientId(req.params.clientId);
+        res.json({ documents: docs });
+    } catch (error: any) {
+        console.error('Error listing documents by client:', error);
+        res.status(500).json({ error: error.message || 'Failed to list documents' });
     }
 });
 
@@ -327,13 +530,29 @@ router.post('/orders/generate-draft-url', async (req, res) => {
 router.post('/orders/create-document', async (req, res) => {
     try {
         console.log('Received request to create document:', { body: req.body, path: req.path });
-        const { orderId, documentType, customerId, draft, paymentsOverride }: {
+        const { orderId, documentType, customerId, draft, paymentsOverride, sourceDocumentId }: {
             orderId: string; documentType: GreenInvoiceDocumentType; customerId: string; draft?: boolean;
             paymentsOverride?: Array<{ amount: number; date: string; method: string; reference?: string; repaymentDate?: string }>;
+            sourceDocumentId?: string;
         } = req.body;
         
         if (!orderId || !documentType || !customerId) {
             return res.status(400).json({ error: 'Missing required fields: orderId, documentType, or customerId' });
+        }
+
+        // חשבונית ירוקה 2443: נא למלא את פרטי הצ'ק — ולידציה לפני שליחה
+        if (Array.isArray(paymentsOverride) && (documentType === 'receipt' || documentType === 'invoice_receipt')) {
+            for (let i = 0; i < paymentsOverride.length; i++) {
+                const p = paymentsOverride[i];
+                if ((p.method && p.method.trim()) === 'צ\'ק') {
+                    if (!p.reference || !String(p.reference).trim()) {
+                        return res.status(400).json({ error: 'נא למלא מספר צ\'ק בשורת התקבול (תשלום בצ\'ק).' });
+                    }
+                    if (!p.repaymentDate || !String(p.repaymentDate).trim()) {
+                        return res.status(400).json({ error: 'נא למלא תאריך פירעון לצ\'ק בשורת התקבול.' });
+                    }
+                }
+            }
         }
 
         // Get order and customer
@@ -384,13 +603,14 @@ router.post('/orders/create-document', async (req, res) => {
         let invoice;
         
         if (documentType === 'receipt' || documentType === 'credit_invoice') {
-            // For receipt and credit_invoice, we need the original invoice ID
-            if (!order.greenInvoiceId) {
+            const invoiceId = sourceDocumentId || order.greenInvoiceId;
+            if (!invoiceId) {
                 return res.status(400).json({ error: 'נדרשת חשבונית קיימת ליצירת קבלה או זיכוי' });
             }
         }
         
         // Use new document format (based on Python SDK structure). draft → signed: false.
+        // sourceDocumentId: חשבונית ספציפית שממנה נפתח (קבלה מתוך חשבונית).
         // paymentsOverride: תקבולים מהמודל יצירת קבלה (שליחה ישירה) — רק ל-receipt/invoice_receipt, לא ל-draft.
         const documentRequest = mapOrderToDocumentRequest(
             order,
@@ -401,10 +621,14 @@ router.post('/orders/create-document', async (req, res) => {
             !!draft,
             (documentType === 'receipt' || documentType === 'invoice_receipt') && !draft && Array.isArray(paymentsOverride) && paymentsOverride.length > 0
                 ? paymentsOverride
-                : undefined
+                : undefined,
+            sourceDocumentId || order.greenInvoiceId || undefined
         );
         
         console.log('Creating document with new format:', JSON.stringify(documentRequest, null, 2));
+        if ((documentType === 'receipt' || documentType === 'credit_invoice') && sourceDocumentId) {
+            console.log(`[Document Request] receipt/credit from document: sourceDocumentId=${sourceDocumentId}, document.id in request:`, (documentRequest as any).document);
+        }
         console.log(`[Document Request] date: ${documentRequest.date}, dueDate: ${documentRequest.dueDate || 'none'}, draft: ${draft}, signed: ${documentRequest.signed}`);
         if (documentRequest.payment && documentRequest.payment.length > 0) {
             console.log(`[Document Request] payment dates:`, documentRequest.payment.map((p: any) => p.date));
@@ -418,7 +642,26 @@ router.post('/orders/create-document', async (req, res) => {
             }
         }
         
-        invoice = await createInvoice(documentRequest, documentType);
+        try {
+            invoice = await createInvoice(documentRequest, documentType);
+        } catch (createError: any) {
+            const msg = createError?.message || '';
+            if (msg.includes('404') || msg.includes('Not Found')) {
+                // API לא זמין (תוכנית Best נדרשת) — מחזירים URL לפתיחה ידנית
+                const fallbackUrl = generateGreenInvoiceUrl(documentType, {
+                    clientId: greenInvoiceClientId || undefined,
+                    clientName: customer.name,
+                    invoiceId: order.greenInvoiceId || undefined,
+                    orderNumber: order.orderNumber,
+                    description: order.description || undefined
+                });
+                return res.status(503).json({
+                    error: 'יצירת מסמכים דרך API זמינה למנויי Best ומעלה בחשבונית ירוקה. פתחנו עבורך את חשבונית ירוקה — צור את המסמך ידנית.',
+                    fallbackUrl
+                });
+            }
+            throw createError;
+        }
         
         // Verify the created invoice is a draft
         if (draft) {

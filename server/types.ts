@@ -231,6 +231,17 @@ export interface Order {
     greenInvoiceEstimateId?: string; // ID of estimate in GreenInvoice
 }
 
+/** שיוך מסמך חשבונית ירוקה להזמנה — טבלת קישור many-to-many */
+export interface OrderDocumentLink {
+    id: string;
+    orderId: string;
+    documentId: string;      // מזהה בחשבונית ירוקה
+    documentType: 'invoice' | 'invoice_receipt' | 'receipt' | 'credit_invoice' | 'estimate';
+    amount?: number;         // הקצאה להזמנה (מסמך מכסה מספר הזמנות)
+    linkedAt: Date;
+    linkedBy?: string;
+}
+
 export type EmployeeRole = 'ADMIN' | 'MANAGER' | 'EMPLOYEE';
 export type EmployeeStatus = 'ACTIVE' | 'INACTIVE';
 

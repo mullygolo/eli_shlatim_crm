@@ -521,16 +521,11 @@ export async function createInvoice(invoiceData: CreateInvoiceRequest | any, doc
         // Estimates use the same /documents endpoint with type 300
         // Adjust endpoints based on base URL
         // For draft documents (signed=false), prioritize draft-specific endpoints
+        // תיעוד: https://www.greeninvoice.co.il/api-docs — endpoint עובד: /api/v1/documents (אימות: 400 = קיים, דורש lang)
         const adjustedEndpoints: { [key: string]: string[] } = {
-                [GREENINVOICE_API_V1]: invoiceData.signed === false 
-                    ? ['/documents/draft', '/documents']  // Try draft endpoint first for PHP SDK
-                    : ['/documents'],  // PHP SDK: base is /api/v1, endpoint is /documents
-                [GREENINVOICE_API_URL]: invoiceData.signed === false
-                    ? ['/v1/documents/draft', '/v1/documents', '/documents']  // Try draft endpoint first for Python SDK
-                    : ['/v1/documents', '/documents'],  // Python SDK: base is /api, endpoint is /v1/documents
-                [GREENINVOICE_API_BASE]: invoiceData.signed === false
-                    ? ['/api/v1/documents/draft', '/api/v1/documents', '/api/documents']
-                    : ['/api/v1/documents', '/api/documents']
+                [GREENINVOICE_API_V1]: ['/documents'],  // https://api.greeninvoice.co.il/api/v1/documents
+                [GREENINVOICE_API_URL]: ['/v1/documents'],  // https://api.greeninvoice.co.il/api/v1/documents
+                [GREENINVOICE_API_BASE]: ['/api/v1/documents']
             };
         
         // #region agent log
@@ -980,6 +975,63 @@ export async function searchDocumentsByOrderNumber(orderNumber: string): Promise
     }
 }
 
+/**
+ * List documents by customer (client) from GreenInvoice.
+ * Tries POST search with client filter, falls back to GET + filter by client.
+ */
+export async function searchDocumentsByClientId(greenInvoiceClientId: string): Promise<any[]> {
+    try {
+        const token = await authenticate();
+        const headers: Record<string, string> = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+        // Try POST search with client filter (common API patterns)
+        const searchBodies = [
+            { client: greenInvoiceClientId, page: 1, pageSize: 100 },
+            { clientId: greenInvoiceClientId, page: 1, pageSize: 100 },
+            { client_id: greenInvoiceClientId, page: 1, pageSize: 100 }
+        ];
+        for (const body of searchBodies) {
+            try {
+                const res = await fetch(`${GREENINVOICE_API_URL}/v1/documents/search`, {
+                    method: 'POST',
+                    headers,
+                    body: JSON.stringify(body)
+                });
+                if (res.ok) {
+                    const data = (await res.json()) as any;
+                    const items = data?.items ?? data?.documents ?? data?.incomes ?? (Array.isArray(data) ? data : data?.data ?? []);
+                    if (Array.isArray(items) && items.length > 0) {
+                        return items;
+                    }
+                }
+            } catch { /* try next */ }
+        }
+
+        // Fallback: GET /v1/incomes or /v1/documents and filter by client (GreenInvoice incomes = documents)
+        for (const endpoint of ['/v1/incomes', '/v1/documents', '/incomes', '/documents']) {
+            try {
+                const res = await fetch(`${GREENINVOICE_API_URL}${endpoint}`, { method: 'GET', headers });
+                if (res.ok) {
+                    const data = (await res.json()) as any;
+                    const raw = data?.items ?? data?.documents ?? data?.incomes ?? (Array.isArray(data) ? data : data?.data ?? []);
+                    const all = Array.isArray(raw) ? raw : [];
+                    const filtered = all.filter((d: any) => {
+                        const cid = d.client?.id ?? d.client ?? d.clientId ?? d.client_id;
+                        return cid && String(cid) === String(greenInvoiceClientId);
+                    });
+                    if (filtered.length > 0) {
+                        return filtered;
+                    }
+                }
+            } catch { /* try next */ }
+        }
+        return [];
+    } catch (error) {
+        console.error('Error searching documents by client:', error);
+        return [];
+    }
+}
+
 /** DocumentType (API): 10=estimate, 200=delivery, 300=transaction, 305=invoice, 320=invoice_receipt, 330=refund, 400=receipt */
 const TYPE_INVOICE = 305;
 const TYPE_INVOICE_RECEIPT = 320;
@@ -990,6 +1042,8 @@ export interface InvoiceSummaryIds {
     invoiceId?: string;
     receiptId?: string;
     creditId?: string;
+    /** מסמכים משויכים דרך OrderDocumentLink */
+    linkedDocumentIds?: string[];
 }
 
 /**
@@ -1040,6 +1094,17 @@ export async function getInvoiceSummaryByOrderNumber(
             if (raw?.id) addDoc(raw);
         } catch {
             /* ignore */
+        }
+    }
+    if (ids?.linkedDocumentIds && Array.isArray(ids.linkedDocumentIds)) {
+        for (const docId of ids.linkedDocumentIds) {
+            if (!docId) continue;
+            try {
+                const raw = await getDocumentRaw(docId);
+                if (raw?.id) addDoc(raw);
+            } catch {
+                /* ignore */
+            }
         }
     }
 
@@ -1109,6 +1174,93 @@ export async function getDocumentPayments(documentId: string): Promise<Array<{
         out.push({ amount, date, method, reference });
     }
     return out;
+}
+
+/** GreenInvoice doc type (numeric) → our documentType */
+const DOC_TYPE_MAP: Record<number, string> = {
+    10: 'estimate',
+    200: 'delivery_note',
+    300: 'transaction_account',
+    305: 'invoice',
+    320: 'invoice_receipt',
+    330: 'credit_invoice',
+    400: 'receipt'
+};
+
+export interface ValidateDocumentResult {
+    valid: boolean;
+    errors: string[];
+    warnings: string[];
+    documentType?: 'invoice' | 'invoice_receipt' | 'receipt' | 'credit_invoice' | 'estimate';
+}
+
+/**
+ * ולידציה חכמה: בדיקת התאמת מסמך חשבונית ירוקה להזמנה/ות.
+ * כולל: לקוח תואם, מספר הזמנה בתיאור, סכום לא חורג.
+ */
+export async function validateDocumentForOrders(
+    document: any,
+    orders: Array<{ id: string; orderNumber: string; customerId: string }>,
+    customer: { id: string; greenInvoiceClientId?: string; contacts?: Array<{ email?: string }>; name?: string },
+    existingLinks: Array<{ orderId: string; amount?: number }>,
+    newAllocations: Record<string, number>
+): Promise<ValidateDocumentResult> {
+    const errors: string[] = [];
+    const warnings: string[] = [];
+
+    if (!document?.id) {
+        errors.push('המסמך לא נמצא בחשבונית ירוקה');
+        return { valid: false, errors, warnings };
+    }
+
+    const docTotal = Number(document.amount ?? document.total ?? 0);
+    const docTypeNum = Number(document.type);
+    const documentType = DOC_TYPE_MAP[docTypeNum];
+    if (!documentType || !['invoice', 'invoice_receipt', 'receipt', 'credit_invoice', 'estimate'].includes(documentType)) {
+        warnings.push(`סוג המסמך (${docTypeNum}) לא מזוהה — ייתכן שלא יתאים לדוחות`);
+    }
+
+    // Customer match
+    const docClientId = document.client?.id || document.client;
+    const docClientEmail = Array.isArray(document.client?.emails)
+        ? document.client.emails[0]
+        : document.client?.email || '';
+    const docClientName = document.client?.name || '';
+    const custGIId = customer.greenInvoiceClientId;
+    const custEmail = customer.contacts?.[0]?.email || '';
+    const custName = customer.name || '';
+    const clientMatch =
+        (docClientId && custGIId && String(docClientId) === String(custGIId)) ||
+        (docClientEmail && custEmail && String(docClientEmail).toLowerCase() === String(custEmail).toLowerCase()) ||
+        (docClientName && custName && String(docClientName).trim() === String(custName).trim());
+    if (!clientMatch) {
+        errors.push('הלקוח במסמך לא תואם ללקוח בהזמנה');
+    }
+
+    // Order number in description (warning)
+    const desc = document.description || document.desc || '';
+    const orderNumbersInDesc = orders.filter(o => desc.includes(`[${o.orderNumber}]`));
+    if (orderNumbersInDesc.length === 0 && orders.length > 0) {
+        warnings.push(`מספר ההזמנה לא מופיע בתיאור המסמך — ייתכן שמדובר במסמך אחר`);
+    }
+
+    // Amount: sum(existing) + sum(new) <= document.total
+    const existingSum = existingLinks.reduce((s, l) => s + (Number(l.amount) || 0), 0);
+    const newSum = Object.values(newAllocations).reduce((s, a) => s + (Number(a) || 0), 0);
+    const totalAllocated = existingSum + newSum;
+    if (totalAllocated > docTotal + 0.01) {
+        errors.push(`הסכום המוקצה (₪${totalAllocated.toFixed(2)}) חורג מסכום המסמך (₪${docTotal.toFixed(2)})`);
+    }
+    if (existingSum >= docTotal - 0.01 && newSum > 0.01) {
+        errors.push(`המסמך כבר משויך במלואו (₪${existingSum.toFixed(2)} מתוך ₪${docTotal.toFixed(2)}) — לא ניתן לשייך סכום נוסף`);
+    }
+
+    return {
+        valid: errors.length === 0,
+        errors,
+        warnings,
+        documentType: documentType as ValidateDocumentResult['documentType']
+    };
 }
 
 /**

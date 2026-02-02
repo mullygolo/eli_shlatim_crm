@@ -19,6 +19,7 @@ import { useAsyncAction } from '../hooks/useAsyncAction';
 interface OrdersPageProps {
     orders: Order[];
     setOrders: React.Dispatch<React.SetStateAction<Order[]>>;
+    setOrdersLocal: (updater: (prev: Order[]) => Order[]) => void;
     customers: Customer[];
     setCustomers: React.Dispatch<React.SetStateAction<Customer[]>>;
     suppliers: Supplier[];
@@ -701,29 +702,24 @@ const OrderForm: React.FC<{
         mongoService.getPreparationStatusSuggestions().then(setPreparationStatusSuggestions).catch(() => setPreparationStatusSuggestions([]));
     }, []);
 
-    const [isAddingPayment, setIsAddingPayment] = useState(false);
     const [paymentIdToDelete, setPaymentIdToDelete] = useState<string | null>(null); 
-    const [newPaymentData, setNewPaymentData] = useState<Partial<CustomerPayment>>({
-        amount: 0,
-        date: new Date(),
-        method: PaymentMethod.BANK_TRANSFER,
-        reference: '',
-        repaymentDate: undefined
-    });
-    const [newPaymentAttachments, setNewPaymentAttachments] = useState<Attachment[]>([]);
     const [viewingPaymentDocuments, setViewingPaymentDocuments] = useState<Attachment[] | null>(null);
     const [isCreateDocumentModalOpen, setIsCreateDocumentModalOpen] = useState(false);
     const [createDocumentModalMode, setCreateDocumentModalMode] = useState<'full' | 'from-document'>('full');
     const [createDocumentModalFromType, setCreateDocumentModalFromType] = useState<'invoice' | 'receipt' | 'credit' | 'estimate' | undefined>(undefined);
+    const [createDocumentModalSourceId, setCreateDocumentModalSourceId] = useState<string | undefined>(undefined);
     const [invoiceSummary, setInvoiceSummary] = useState<{ invoicedAmount: number; creditsAmount: number; netInvoiced: number; hasInvoices: boolean; hasReceipts: boolean } | null>(null);
+    const [collectionInfoExpanded, setCollectionInfoExpanded] = useState(false);
 
     // GreenInvoice document creation handlers
     const handleCreateDocumentInternal = async (
         documentType: 'invoice' | 'receipt' | 'invoice_receipt' | 'credit_invoice' | 'estimate' | 'work_order' | 'delivery_note' | 'transaction_account',
         method: 'api' | 'window',
-        paymentsOverride?: Array<{ id: string; amount: number; date: Date; method: string; reference?: string; repaymentDate?: Date }>
+        paymentsOverride?: Array<{ id: string; amount: number; date: Date; method: string; reference?: string; repaymentDate?: Date }>,
+        options?: { sourceDocumentId?: string }
     ) => {
         const documentTypeForApi = documentType;
+        const sourceId = options?.sourceDocumentId ?? createDocumentModalSourceId;
         if (!order || !order.id) {
             throw new Error('שגיאה: לא נמצאה הזמנה');
         }
@@ -737,7 +733,8 @@ const OrderForm: React.FC<{
             const body: Record<string, unknown> = {
                 orderId: order.id,
                 documentType: documentTypeForApi,
-                customerId: selectedCustomer.id
+                customerId: selectedCustomer.id,
+                ...(sourceId && (documentTypeForApi === 'receipt' || documentTypeForApi === 'credit_invoice') && { sourceDocumentId: sourceId })
             };
             if (paymentsOverride && (documentTypeForApi === 'receipt' || documentTypeForApi === 'invoice_receipt')) {
                 body.paymentsOverride = paymentsOverride.map((p) => ({
@@ -758,13 +755,19 @@ const OrderForm: React.FC<{
             });
 
             if (!response.ok) {
-                let errorMessage = 'שגיאה ביצירת מסמך';
+                let errorBody: { error?: string; fallbackUrl?: string } = {};
                 try {
-                    const error = await response.json();
-                    errorMessage = error.error || error.message || error.detail || errorMessage;
-                } catch (e) {
-                    errorMessage = `שגיאה ${response.status}: ${response.statusText}`;
+                    errorBody = await response.json();
+                } catch (_) {}
+                if (errorBody.fallbackUrl) {
+                    const newWindow = window.open(errorBody.fallbackUrl, 'greeninvoice_fallback', 'width=1200,height=800,scrollbars=yes,resizable=yes');
+                    if (newWindow) newWindow.focus();
+                    addActivity(`יצירת מסמך דרך API אינה זמינה — נפתחה חשבונית ירוקה ליצירה ידנית (הזמנה ${order.orderNumber})`);
+                    setIsCreateDocumentModalOpen(false);
+                    alert((errorBody.error || 'יצירת מסמכים דרך API זמינה למנויי Best ומעלה. פתחנו עבורך את חשבונית ירוקה — צור את המסמך ידנית.') + (newWindow ? '' : '\n\nאם החלון נחסם, אפשר לפתוח ידנית: ' + errorBody.fallbackUrl));
+                    return;
                 }
+                const errorMessage = errorBody.error || errorBody.message || (errorBody as any).detail || `שגיאה ${response.status}: ${response.statusText}`;
                 throw new Error(errorMessage);
             }
 
@@ -781,6 +784,13 @@ const OrderForm: React.FC<{
             setIsCreateDocumentModalOpen(false);
             alert('המסמך נוצר בהצלחה בחשבונית ירוקה!');
         } else {
+            // קבלה מתוך חשבונית + פתח חלון: פותחים את החשבונית המקורית בחשבונית ירוקה — המשתמש לוחץ שם על + להנפקת קבלה (הקבלה תהיה מקושרת לחשבונית)
+            if (documentTypeForApi === 'receipt' && sourceId) {
+                handleOpenInGreenInvoice(sourceId, 'invoice');
+                addActivity(`נפתחה החשבונית בחשבונית ירוקה — לחץ על + להנפקת קבלה מתוך החשבונית (הזמנה ${order.orderNumber})`);
+                setIsCreateDocumentModalOpen(false);
+                return;
+            }
             // פתיחת חלון לעריכה: יוצרים טיוטה ממולאת (פריטים, לקוח, פרטי הזמנה) ב-API, פותחים לעריכה בחשבונית ירוקה — המשתמש לוחץ "הפקת מסמך" כשמוכן
             const response = await fetch('/api/green-invoice/orders/create-document', {
                 method: 'POST',
@@ -792,16 +802,25 @@ const OrderForm: React.FC<{
                     orderId: order.id,
                     documentType: documentTypeForApi,
                     customerId: selectedCustomer.id,
-                    draft: true
+                    draft: true,
+                    ...(sourceId && (documentTypeForApi === 'receipt' || documentTypeForApi === 'credit_invoice') && { sourceDocumentId: sourceId })
                 })
             });
 
             if (!response.ok) {
-                let errMsg = 'שגיאה ביצירת טיוטה';
+                let errorBody: { error?: string; fallbackUrl?: string } = {};
                 try {
-                    const err = await response.json();
-                    errMsg = err.error || err.message || err.detail || errMsg;
+                    errorBody = await response.json();
                 } catch (_) {}
+                if (errorBody.fallbackUrl) {
+                    const newWindow = window.open(errorBody.fallbackUrl, 'greeninvoice_fallback', 'width=1200,height=800,scrollbars=yes,resizable=yes');
+                    if (newWindow) newWindow.focus();
+                    addActivity(`יצירת מסמך דרך API אינה זמינה — נפתחה חשבונית ירוקה ליצירה ידנית (הזמנה ${order.orderNumber})`);
+                    setIsCreateDocumentModalOpen(false);
+                    alert((errorBody.error || 'יצירת מסמכים דרך API זמינה למנויי Best ומעלה. פתחנו עבורך את חשבונית ירוקה — צור את המסמך ידנית.') + (newWindow ? '' : '\n\nאם החלון נחסם, אפשר לפתוח ידנית: ' + errorBody.fallbackUrl));
+                    return;
+                }
+                const errMsg = errorBody.error || errorBody.message || (errorBody as any).detail || 'שגיאה ביצירת טיוטה';
                 throw new Error(errMsg);
             }
 
@@ -851,9 +870,14 @@ const OrderForm: React.FC<{
         handleCreateDocumentInternal,
         {
             preventDoubleClick: true,
-            onError: (error) => {
+            onError: (error: any) => {
                 console.error('Error creating document:', error);
-                alert(`שגיאה ביצירת מסמך: ${error.message || 'שגיאה לא ידועה'}`);
+                const msg = error?.message || 'שגיאה לא ידועה';
+                const isNetworkError = msg === 'Failed to fetch' || msg.includes('NetworkError') || msg.includes('Load failed');
+                const hint = isNetworkError
+                    ? '\n\nבדוק: שהשרת רץ (פורט 3002), שאין חסימת חומת אש, ושהפרוקסי של Vite פעיל.'
+                    : '';
+                alert(`שגיאה ביצירת מסמך: ${msg}${hint}`);
             }
         }
     );
@@ -922,7 +946,7 @@ const OrderForm: React.FC<{
         }
     };
 
-    const handleOpenInGreenInvoice = (documentId: string, type: 'invoice' | 'receipt' | 'credit' | 'estimate') => {
+    const handleOpenInGreenInvoice = (documentId: string, type: 'invoice' | 'invoice_receipt' | 'receipt' | 'credit' | 'estimate') => {
         const baseUrl = 'https://app.greeninvoice.co.il';
         // /invoice/id ו-/#/invoice/id פתחו עמוד ראשי. /incomes עובד — מנסים /incomes/{id} ו-/estimates/{id}
         const path = type === 'estimate' ? `estimates/${documentId}` : `incomes/${documentId}`;
@@ -1041,6 +1065,7 @@ const OrderForm: React.FC<{
             try {
                 const token = localStorage.getItem('authToken');
                 const q = new URLSearchParams();
+                if (order.id) q.set('orderId', order.id);
                 if (order.greenInvoiceId) q.set('invoiceId', order.greenInvoiceId);
                 if (order.greenInvoiceReceiptId) q.set('receiptId', order.greenInvoiceReceiptId);
                 if (order.greenInvoiceCreditId) q.set('creditId', order.greenInvoiceCreditId);
@@ -1057,7 +1082,7 @@ const OrderForm: React.FC<{
             }
         };
         fetchSummary();
-    }, [order?.orderNumber, order?.greenInvoiceId, order?.greenInvoiceReceiptId, order?.greenInvoiceCreditId]);
+    }, [order?.id, order?.orderNumber, order?.greenInvoiceId, order?.greenInvoiceReceiptId, order?.greenInvoiceCreditId]);
 
     const minDealDate = useMemo(() => {
         try {
@@ -1177,150 +1202,6 @@ const OrderForm: React.FC<{
         if (name === 'dealStartDate') {
              setDealStartDateString(value);
         }
-    };
-
-    const handlePaymentFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-        if (e.target.files && e.target.files.length > 0) {
-            const files: File[] = Array.from(e.target.files);
-            const filePromises = files.map(file => {
-                return new Promise<Attachment>((resolve) => {
-                    const reader = new FileReader();
-                    reader.onload = (event) => {
-                        if (event.target?.result) {
-                            resolve({
-                                id: `pay_att_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
-                                fileName: file.name,
-                                dataUrl: event.target.result as string,
-                                type: file.type,
-                                category: 'DOCUMENTS'
-                            });
-                        }
-                    };
-                    reader.readAsDataURL(file);
-                });
-            });
-            Promise.all(filePromises).then(attachments => {
-                setNewPaymentAttachments(prev => [...prev, ...attachments]);
-            });
-        }
-        e.target.value = ''; 
-    };
-
-    const removePaymentAttachment = (id: string) => {
-        const attachment = newPaymentAttachments.find(att => att.id === id);
-        const fileName = attachment?.fileName || 'קובץ';
-        if (!window.confirm(`האם אתה בטוח שברצונך למחוק את הקובץ "${fileName}"?`)) {
-            return;
-        }
-        setNewPaymentAttachments(prev => prev.filter(att => att.id !== id));
-    };
-
-    const handleAddPayment = async () => {
-        if (!newPaymentData.amount || newPaymentData.amount <= 0) {
-            alert("אנא הזן סכום חיובי");
-            return;
-        }
-
-        if (newPaymentData.method === PaymentMethod.CHECK) {
-            if (!newPaymentData.reference) {
-                alert("חובה להזין מספר צ'ק בשדה אסמכתא");
-                return;
-            }
-            if (!newPaymentData.repaymentDate) {
-                alert("חובה לבחור תאריך פירעון לצ'ק");
-                return;
-            }
-        }
-        
-        const payment: CustomerPayment = {
-            id: `pay_${Date.now()}`,
-            amount: newPaymentData.amount,
-            date: new Date(newPaymentData.date || new Date()),
-            method: newPaymentData.method || PaymentMethod.BANK_TRANSFER,
-            reference: newPaymentData.reference || '',
-            repaymentDate: newPaymentData.method === PaymentMethod.CHECK ? new Date(newPaymentData.repaymentDate || new Date()) : undefined,
-            status: 'PENDING', 
-            attachments: newPaymentAttachments, 
-            attachment: newPaymentAttachments.length > 0 ? newPaymentAttachments[0] : undefined
-        };
-
-        setFormData(prev => ({
-            ...prev,
-            payments: [...prev.payments, payment],
-        }));
-
-        setIsAddingPayment(false);
-        setNewPaymentData({ amount: 0, date: new Date(), method: PaymentMethod.BANK_TRANSFER, reference: '', repaymentDate: undefined });
-        setNewPaymentAttachments([]);
-        
-        const logContent = `התקבל תשלום בסך ₪${payment.amount.toLocaleString()} (${payment.method})`;
-        setFormData(prev => ({
-            ...prev,
-            timeline: [{
-                id: `log_pay_${Date.now()}`,
-                timestamp: new Date(),
-                user: 'מערכת',
-                type: 'LOG',
-                content: logContent
-            }, ...prev.timeline]
-        }));
-
-        // Sync payment to GreenInvoice if invoice exists
-        if (order?.greenInvoiceId) {
-            try {
-                const token = localStorage.getItem('authToken');
-                const response = await fetch(`/api/green-invoice/invoices/${order.greenInvoiceId}/payments`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${token}`
-                    },
-                    body: JSON.stringify({
-                        payment_date: payment.date.toISOString().split('T')[0],
-                        amount_paid: payment.amount,
-                        payment_method: mapPaymentMethodToGreenInvoice(payment.method)
-                    })
-                });
-
-                if (response.ok) {
-                    // Check if payment is full - mark invoice as paid
-                    const { totalAmount, totalPaid } = calculateOrderTotals({
-                        ...formData,
-                        payments: [...formData.payments, payment]
-                    });
-                    const orderVatRate = formData.vatRate ?? vatRate;
-                    const gross = totalAmount * (1 + orderVatRate / 100);
-                    
-                    if (totalPaid + payment.amount >= gross - 0.01) {
-                        // Mark invoice as paid
-                        await fetch(`/api/green-invoice/invoices/${order.greenInvoiceId}/mark-paid`, {
-                            method: 'GET',
-                            headers: {
-                                'Authorization': `Bearer ${token}`
-                            }
-                        });
-                    }
-                    
-                    addActivity(`תשלום סונכרן לחשבונית ירוקה`);
-                }
-            } catch (error) {
-                console.error('Error syncing payment to GreenInvoice:', error);
-                // Don't show error to user - payment was saved locally
-            }
-        }
-    };
-
-    const mapPaymentMethodToGreenInvoice = (method: string): string => {
-        const methodMap: Record<string, string> = {
-            'העברה בנקאית': 'Bank Transfer',
-            'כרטיס אשראי': 'Credit Card',
-            'צ\'ק': 'Cheque',
-            'מזומן': 'Cash',
-            'הוראת קבע': 'Standing Order',
-            'Bit/PayBox': 'Bit/PayBox',
-            'אחר': 'Others'
-        };
-        return methodMap[method] || 'Others';
     };
 
     const confirmDeletePayment = () => {
@@ -2179,6 +2060,7 @@ const OrderForm: React.FC<{
                     balanceDue={balanceDue}
                     mode={createDocumentModalMode}
                     fromDocumentType={createDocumentModalFromType}
+                    sourceDocumentId={createDocumentModalSourceId}
                     isLoading={isCreatingDocument}
                 />
             )}
@@ -2305,43 +2187,48 @@ const OrderForm: React.FC<{
                             </div>
                         </div>
                     ) : selectedCustomer ? (
-                        <div className="space-y-4">
-                            <SmartCustomerSearch
-                                customers={customers}
-                                selectedCustomerId={formData.customerId}
-                                onSelect={(id) => setFormData(prev => ({ ...prev, customerId: id, contactId: '' }))}
-                                showAddNewOption={!isEditMode && !formData.parentOrderId}
-                                onAddNewCustomer={(name) => {
-                                    setNewCustomerData(prev => ({ ...prev, name }));
-                                    setCustomerMode('NEW');
-                                    setShowNewCustomerForm(true);
-                                    setFormData(prev => ({ ...prev, customerId: '', contactId: '' }));
-                                }}
-                            />
-                            <div>
-                                <label className="block text-sm font-medium text-slate-700">איש קשר</label>
-                                <select name="contactId" value={formData.contactId || ''} onChange={handleMasterChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" disabled={!selectedCustomer}>
-                                    <option value="">בחר איש קשר</option>
-                                    {selectedCustomer?.contacts.map(c => <option key={c.id} value={c.id}>{c.name} {c.isDefault ? '(★ ברירת מחדל)' : ''}</option>)}
-                                </select>
-                            </div>
-                            <div>
-                                <label className="block text-sm font-medium text-slate-700">תנאי תשלום</label>
-                                <div className="relative">
-                                    <input type="text" value={formData.paymentTerms || ''} readOnly className="mt-1 block w-full rounded-md border-slate-300 bg-slate-100 text-slate-500 shadow-sm sm:text-sm cursor-not-allowed pr-8" />
-                                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                                        <LockIcon className="h-4 w-4 text-slate-400" />
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div className="space-y-4">
+                                <SmartCustomerSearch
+                                    customers={customers}
+                                    selectedCustomerId={formData.customerId}
+                                    onSelect={(id) => setFormData(prev => ({ ...prev, customerId: id, contactId: '' }))}
+                                    showAddNewOption={!isEditMode && !formData.parentOrderId}
+                                    onAddNewCustomer={(name) => {
+                                        setNewCustomerData(prev => ({ ...prev, name }));
+                                        setCustomerMode('NEW');
+                                        setShowNewCustomerForm(true);
+                                        setFormData(prev => ({ ...prev, customerId: '', contactId: '' }));
+                                    }}
+                                />
+                                <div>
+                                    <label className="block text-sm font-medium text-slate-700">איש קשר</label>
+                                    <select name="contactId" value={formData.contactId || ''} onChange={handleMasterChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" disabled={!selectedCustomer}>
+                                        <option value="">בחר איש קשר</option>
+                                        {selectedCustomer?.contacts.map(c => <option key={c.id} value={c.id}>{c.name} {c.isDefault ? '(★ ברירת מחדל)' : ''}</option>)}
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-slate-700">תנאי תשלום</label>
+                                    <div className="relative">
+                                        <input type="text" value={formData.paymentTerms || ''} readOnly className="mt-1 block w-full rounded-md border-slate-300 bg-slate-100 text-slate-500 shadow-sm sm:text-sm cursor-not-allowed pr-8" />
+                                        <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                                            <LockIcon className="h-4 w-4 text-slate-400" />
+                                        </div>
                                     </div>
+                                    <p className="text-[10px] text-slate-400 mt-1">{selectedCustomer ? `(מוגדר עבור ${selectedCustomer.name})` : 'מוגדר בכרטיס לקוח'}</p>
                                 </div>
-                                <p className="text-[10px] text-slate-400 mt-1">{selectedCustomer ? `(מוגדר עבור ${selectedCustomer.name})` : 'מוגדר בכרטיס לקוח'}</p>
                             </div>
-                            {selectedContact && (
-                                <div className="mt-2 text-xs text-slate-500 bg-white p-2 rounded border border-slate-100">
-                                    <p><strong>תפקיד:</strong> {selectedContact.role}</p>
-                                    <p><strong>טלפון:</strong> {selectedContact.phone}</p>
-                                    <p><strong>מייל:</strong> {selectedContact.email}</p>
-                                </div>
-                            )}
+                            <div className="space-y-4">
+                                {selectedContact && (
+                                    <div className="bg-white p-4 rounded-lg border border-slate-200 shadow-sm">
+                                        <h5 className="text-sm font-semibold text-slate-800 mb-2">פרטי איש קשר</h5>
+                                        <p className="text-xs text-slate-700"><strong>תפקיד:</strong> {selectedContact.role}</p>
+                                        <p className="text-xs text-slate-700"><strong>טלפון:</strong> {selectedContact.phone}</p>
+                                        <p className="text-xs text-slate-700"><strong>מייל:</strong> {selectedContact.email}</p>
+                                    </div>
+                                )}
+                            </div>
                         </div>
                     ) : (
                         <SmartCustomerSearch
@@ -2725,76 +2612,74 @@ const OrderForm: React.FC<{
                     </div>
                     <div className="p-4">
                         {invoiceSummary && (
-                            <div className="mb-4 p-4 bg-white border border-slate-200 rounded-xl shadow-sm">
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-3">
-                                    <div className="flex flex-col gap-1.5">
-                                        <span className="text-xs font-bold text-slate-500 uppercase tracking-wide">סטטוס חשבונית</span>
+                            <div className="mb-3 p-3 bg-white border border-slate-200 rounded-lg">
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-2">
+                                    <div className="flex flex-col gap-1">
+                                        <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wide">סטטוס חשבונית</span>
                                         {!invoiceSummary.hasInvoices ? (
-                                            <span className="inline-flex items-center gap-2 w-fit px-3 py-1.5 rounded-lg bg-red-100 text-red-800 font-bold text-sm border border-red-200">
-                                                <span className="w-2 h-2 rounded-full bg-red-500" /> לא הוצאה
+                                            <span className="inline-flex items-center gap-1.5 w-fit px-2 py-1 rounded bg-red-100 text-red-800 font-semibold text-xs border border-red-200">
+                                                <span className="w-1.5 h-1.5 rounded-full bg-red-500" /> לא הוצאה
                                             </span>
                                         ) : invoiceSummary.netInvoiced >= totalDueWithVat - 1 ? (
-                                            <span className="inline-flex items-center gap-2 w-fit px-3 py-1.5 rounded-lg bg-green-100 text-green-800 font-bold text-sm border border-green-200">
-                                                <span className="w-2 h-2 rounded-full bg-green-500" /> הוצאה מלאה
+                                            <span className="inline-flex items-center gap-1.5 w-fit px-2 py-1 rounded bg-green-100 text-green-800 font-semibold text-xs border border-green-200">
+                                                <span className="w-1.5 h-1.5 rounded-full bg-green-500" /> הוצאה מלאה
                                             </span>
                                         ) : (
-                                            <div className="flex flex-col gap-1">
-                                                <span className="inline-flex items-center gap-2 w-fit px-3 py-1.5 rounded-lg bg-amber-100 text-amber-900 font-bold text-sm border border-amber-300">
-                                                    <span className="w-2 h-2 rounded-full bg-amber-500" /> חלקי
+                                            <div className="flex flex-col gap-0.5">
+                                                <span className="inline-flex items-center gap-1.5 w-fit px-2 py-1 rounded bg-amber-100 text-amber-900 font-semibold text-xs border border-amber-300">
+                                                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500" /> חלקי
                                                 </span>
-                                                <span className="text-xs text-slate-600">₪{invoiceSummary.netInvoiced.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} חויב מתוך ₪{totalDueWithVat.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} הזמנה</span>
+                                                <span className="text-[10px] text-slate-600">₪{invoiceSummary.netInvoiced.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} חויב / ₪{totalDueWithVat.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} הזמנה</span>
                                             </div>
                                         )}
                                     </div>
-                                    <div className="flex flex-col gap-1.5">
-                                        <span className="text-xs font-bold text-slate-500 uppercase tracking-wide">סטטוס קבלה</span>
+                                    <div className="flex flex-col gap-1">
+                                        <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wide">סטטוס קבלה</span>
                                         {totalPaid <= 0 ? (
-                                            <span className="inline-flex items-center gap-2 w-fit px-3 py-1.5 rounded-lg bg-red-100 text-red-800 font-bold text-sm border border-red-200">
-                                                <span className="w-2 h-2 rounded-full bg-red-500" /> לא הוצאה
+                                            <span className="inline-flex items-center gap-1.5 w-fit px-2 py-1 rounded bg-red-100 text-red-800 font-semibold text-xs border border-red-200">
+                                                <span className="w-1.5 h-1.5 rounded-full bg-red-500" /> לא הוצאה
                                             </span>
                                         ) : totalPaid >= (invoiceSummary.netInvoiced || totalDueWithVat) - 1 ? (
-                                            <span className="inline-flex items-center gap-2 w-fit px-3 py-1.5 rounded-lg bg-green-100 text-green-800 font-bold text-sm border border-green-200">
-                                                <span className="w-2 h-2 rounded-full bg-green-500" /> הוצאה מלאה
+                                            <span className="inline-flex items-center gap-1.5 w-fit px-2 py-1 rounded bg-green-100 text-green-800 font-semibold text-xs border border-green-200">
+                                                <span className="w-1.5 h-1.5 rounded-full bg-green-500" /> הוצאה מלאה
                                             </span>
                                         ) : (
-                                            <div className="flex flex-col gap-1">
-                                                <span className="inline-flex items-center gap-2 w-fit px-3 py-1.5 rounded-lg bg-amber-100 text-amber-900 font-bold text-sm border border-amber-300">
-                                                    <span className="w-2 h-2 rounded-full bg-amber-500" /> חלקי
+                                            <div className="flex flex-col gap-0.5">
+                                                <span className="inline-flex items-center gap-1.5 w-fit px-2 py-1 rounded bg-amber-100 text-amber-900 font-semibold text-xs border border-amber-300">
+                                                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500" /> חלקי
                                                 </span>
-                                                <span className="text-xs text-slate-600">קבלות על ₪{totalPaid.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                                                <span className="text-[10px] text-slate-600">קבלות ₪{totalPaid.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                                             </div>
                                         )}
                                     </div>
                                 </div>
                                 {(invoiceSummary.netInvoiced < totalDueWithVat - 0.01 || totalPaid < invoiceSummary.netInvoiced - 0.01) && (
-                                    <div className="flex flex-wrap gap-3 pt-3 border-t border-slate-200 text-sm">
+                                    <div className="flex flex-wrap gap-2 pt-2 border-t border-slate-200 text-xs">
                                         {invoiceSummary.netInvoiced < totalDueWithVat - 0.01 && (
-                                            <span className="inline-flex items-center px-3 py-1.5 rounded-lg bg-amber-50 text-amber-800 font-semibold border border-amber-200">
-                                                יתרה להנפקת חשבונית: ₪{(totalDueWithVat - invoiceSummary.netInvoiced).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                            <span className="inline-flex items-center px-2 py-1 rounded bg-amber-50 text-amber-800 font-semibold border border-amber-200">
+                                                יתרה להנפקה: ₪{(totalDueWithVat - invoiceSummary.netInvoiced).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                                             </span>
                                         )}
                                         {totalPaid < invoiceSummary.netInvoiced - 0.01 && (
-                                            <span className="inline-flex items-center px-3 py-1.5 rounded-lg bg-red-50 text-red-800 font-semibold border border-red-200">
-                                                יתרה לתשלום (על החיוב): ₪{(invoiceSummary.netInvoiced - totalPaid).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                            <span className="inline-flex items-center px-2 py-1 rounded bg-red-50 text-red-800 font-semibold border border-red-200">
+                                                יתרה לתשלום: ₪{(invoiceSummary.netInvoiced - totalPaid).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                                             </span>
                                         )}
                                     </div>
                                 )}
                             </div>
                         )}
-                        <div className="mb-6">
-                            <div className="flex justify-between text-sm mb-1">
-                                <span className="font-medium text-green-700">שולם: ₪{totalPaid.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
-                                <span className="font-medium text-red-600">יתרה לתשלום: ₪{balanceDue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                        <div className="mb-4">
+                            <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-xs mb-1.5">
+                                <span className="text-slate-600">שולם ₪{totalPaid.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} · יתרה ₪{balanceDue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} · סה״כ ₪{totalDueWithVat.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                                {(formData.payments || []).length === 0 && <span className="text-slate-400">טרם התקבלו תשלומים</span>}
                             </div>
-                            <div className="w-full bg-red-100 rounded-full h-3 overflow-hidden relative">
+                            <div className="w-full bg-red-100 rounded-full h-2 overflow-hidden relative">
                                 <div 
                                     className="bg-green-500 h-full transition-all duration-500" 
                                     style={{ width: `${Math.min(100, (totalPaid / (totalDueWithVat || 1)) * 100)}%` }}
                                 ></div>
-                                <div className="absolute top-0 right-0 h-full w-px bg-white opacity-50"></div>
                             </div>
-                            <div className="text-xs text-slate-400 mt-1 text-center">סה"כ לתשלום (כולל מע"מ): ₪{totalDueWithVat.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
                         </div>
                         {(formData.payments || []).length > 0 ? (
                             <div className="mb-4 overflow-x-auto">
@@ -2875,104 +2760,18 @@ const OrderForm: React.FC<{
                                     </tbody>
                                 </table>
                             </div>
-                        ) : (
-                            <p className="text-center text-slate-400 text-sm mb-4 bg-slate-50 p-2 rounded">טרם התקבלו תשלומים.</p>
-                        )}
-                        {formData.greenInvoiceId && (
-                            <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg text-sm text-blue-800">
-                                <p className="font-medium mb-1">💡 תשלומים מסונכרנים אוטומטית</p>
-                                <p className="text-xs mb-2">תשלומים שנוספים בחשבונית ירוקה (כולל מקבלות) מסונכרנים לכאן עם פרטים מלאים — אמצעי תשלום, אסמכתא (מס׳ צ׳ק / 4 ספרות). צ׳קים מופיעים בניהול צ׳קים נכנסים ובדוחות כספיים.</p>
-                                <p className="text-xs font-medium text-blue-900">תקבולים ביצירת קבלה:</p>
-                                <p className="text-xs">התשלומים שמופיעים כאן (מסונכרנים או שמוסיפים בהזמנה) נשלחים לקבלה/חשבונית+קבלה ב&quot;שליחה ישירה&quot;. שומרים את ההזמנה ואז יוצרים את המסמך.</p>
-                            </div>
-                        )}
-                        {!formData.greenInvoiceId && (
-                            <div className="mt-3 p-2 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-600">
-                                <strong>תקבולים ביצירת קבלה/חשבונית+קבלה:</strong> תשלומים שמוסיפים כאן (הוסף תשלום חדש) נשלחים אוטומטית ב&quot;שליחה ישירה&quot;. יש לשמור את ההזמנה לפני יצירת המסמך.
-                            </div>
-                        )}
-                        {!isAddingPayment ? (
-                            <button 
-                                type="button" 
-                                onClick={() => { setIsAddingPayment(true); setNewPaymentData(prev => ({ ...prev, amount: balanceDue })); }}
-                                className="w-full py-2 border-2 border-dashed border-slate-300 rounded-lg text-slate-500 hover:border-emerald-500 hover:text-emerald-600 hover:bg-emerald-50 transition-colors text-sm font-medium flex items-center justify-center gap-2"
-                            >
-                                <PlusIcon className="w-4 h-4"/>
-                                הוסף תשלום חדש
+                        ) : null}
+                        <div className="mt-3 p-2.5 bg-blue-50/80 border border-blue-200/80 rounded-lg text-xs text-blue-800">
+                            <button type="button" onClick={() => setCollectionInfoExpanded(!collectionInfoExpanded)} className="flex items-center gap-2 w-full text-right hover:text-blue-900">
+                                <span>💡 מלא פרטי תקבול ביצירת &quot;חשבונית מס/קבלה&quot; או &quot;קבלה מתוך חשבונית&quot; — תשלומים מסונכרנים מחשבונית ירוקה</span>
+                                <span className="shrink-0 text-blue-600">{collectionInfoExpanded ? '▲' : '▼'}</span>
                             </button>
-                        ) : (
-                            <div className="bg-slate-50 p-4 rounded-lg border border-slate-200 animate-fadeIn">
-                                <h5 className="text-sm font-bold text-slate-700 mb-3">פרטי תשלום חדש</h5>
-                                <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-3">
-                                    <div>
-                                        <label className="block text-xs font-medium text-slate-600 mb-1">סכום</label>
-                                        <input type="number" value={newPaymentData.amount} onChange={e => setNewPaymentData({...newPaymentData, amount: parseFloat(e.target.value)})} className="w-full text-sm border-slate-300 rounded focus:ring-emerald-500 focus:border-emerald-500" />
-                                    </div>
-                                    <div>
-                                        <label className="block text-xs font-medium text-slate-600 mb-1">תאריך קבלה</label>
-                                        <input type="date" value={newPaymentData.date ? new Date(newPaymentData.date).toISOString().split('T')[0] : ''} onChange={e => setNewPaymentData({...newPaymentData, date: new Date(e.target.value)})} className="w-full text-sm border-slate-300 rounded focus:ring-emerald-500 focus:border-emerald-500" />
-                                    </div>
-                                    <div>
-                                        <label className="block text-xs font-medium text-slate-600 mb-1">אמצעי תשלום</label>
-                                        <select value={newPaymentData.method} onChange={e => setNewPaymentData({...newPaymentData, method: e.target.value as PaymentMethod})} className="w-full text-sm border-slate-300 rounded focus:ring-emerald-500 focus:border-emerald-500 bg-white">
-                                            {Object.values(PaymentMethod).map(m => <option key={m} value={m}>{m}</option>)}
-                                        </select>
-                                    </div>
-                                    <div>
-                                        <label className="block text-xs font-medium text-slate-600 mb-1">
-                                            {newPaymentData.method === PaymentMethod.CHECK ? 'מספר צ\'ק' : 'אסמכתא (4 ספרות)'}
-                                            {newPaymentData.method === PaymentMethod.CHECK && <span className="text-red-500">*</span>}
-                                        </label>
-                                        <input type="text" value={newPaymentData.reference} onChange={e => setNewPaymentData({...newPaymentData, reference: e.target.value})} className={`w-full text-sm border-slate-300 rounded focus:ring-emerald-500 focus:border-emerald-500 ${newPaymentData.method === PaymentMethod.CHECK && !newPaymentData.reference ? 'border-red-300' : ''}`} placeholder={newPaymentData.method === PaymentMethod.CHECK ? 'חובה להזין' : ''} />
-                                    </div>
+                            {collectionInfoExpanded && (
+                                <div className="mt-2 pt-2 border-t border-blue-200/60 space-y-1 text-blue-700">
+                                    <p>תשלומים שנוספים בחשבונית ירוקה (כולל מקבלות וחשבוניות מס+קבלה) מסונכרנים לכאן עם פרטים מלאים — אמצעי תשלום, אסמכתא (מס׳ צ׳ק / 4 ספרות). צ׳קים מופיעים בניהול צ׳קים נכנסים ובדוחות כספיים.</p>
                                 </div>
-                                {newPaymentData.method === PaymentMethod.CHECK && (
-                                    <div className="mb-3 p-2 bg-yellow-50 border border-yellow-200 rounded">
-                                        <label className="block text-xs font-bold text-yellow-800 mb-1">תאריך פירעון הצ'ק (חובה)</label>
-                                        <input type="date" value={newPaymentData.repaymentDate ? new Date(newPaymentData.repaymentDate).toISOString().split('T')[0] : ''} onChange={e => setNewPaymentData({...newPaymentData, repaymentDate: new Date(e.target.value)})} className="w-full md:w-1/2 text-sm border-yellow-300 rounded focus:ring-yellow-500 focus:border-yellow-500" required />
-                                    </div>
-                                )}
-                                <div className="mb-4">
-                                    <label className="block text-xs font-medium text-slate-600 mb-1">
-                                        {newPaymentData.method === PaymentMethod.CHECK ? 'צילום הצ\'ק (תמונה/PDF)' : 'אסמכתא (תמונה/PDF)'}
-                                    </label>
-                                    <div className="flex items-center gap-2">
-                                        <label className="cursor-pointer bg-white border border-slate-300 hover:bg-slate-50 px-3 py-1.5 rounded text-xs font-medium flex items-center gap-1 text-slate-600">
-                                            <PlusIcon className="w-3 h-3"/>
-                                            בחר קבצים
-                                            <input type="file" multiple className="hidden" onChange={handlePaymentFileChange} accept="image/*,.pdf" />
-                                        </label>
-                                        <span className="text-[10px] text-slate-400">ניתן להעלות מספר קבצים</span>
-                                    </div>
-                                    {newPaymentAttachments.length > 0 && (
-                                        <div className="flex gap-2 mt-2 overflow-x-auto pb-2">
-                                            {newPaymentAttachments.map(file => (
-                                                <div key={file.id} className="relative group w-16 h-16 shrink-0 border rounded bg-white overflow-hidden">
-                                                    {file.type.startsWith('image/') ? (
-                                                        <img src={file.dataUrl} alt="Preview" className="w-full h-full object-cover" />
-                                                    ) : (
-                                                        <div className="w-full h-full flex items-center justify-center bg-slate-100 text-[9px] text-slate-500 font-bold p-1 text-center break-all">
-                                                            {file.fileName}
-                                                        </div>
-                                                    )}
-                                                    <button 
-                                                        type="button" 
-                                                        onClick={(e) => { e.stopPropagation(); removePaymentAttachment(file.id); }}
-                                                        className="absolute top-0 right-0 bg-red-500 text-white rounded-bl p-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
-                                                    >
-                                                        <DeleteIcon className="w-3 h-3"/>
-                                                    </button>
-                                                </div>
-                                            ))}
-                                        </div>
-                                    )}
-                                </div>
-                                <div className="flex justify-end gap-2 border-t border-slate-200 pt-3">
-                                    <button type="button" onClick={() => { setIsAddingPayment(false); setNewPaymentAttachments([]); }} className="px-3 py-1.5 text-xs font-medium text-slate-600 bg-white border border-slate-300 rounded hover:bg-slate-50">ביטול</button>
-                                    <button type="button" onClick={handleAddPayment} className="px-3 py-1.5 text-xs font-medium text-white bg-emerald-600 rounded hover:bg-emerald-700 shadow-sm">שמור תשלום</button>
-                                </div>
-                            </div>
-                        )}
+                            )}
+                        </div>
                     </div>
                 </div>
             </div>
@@ -2984,21 +2783,49 @@ const OrderForm: React.FC<{
                     <div className="bg-slate-50 p-4 rounded-lg border border-slate-200">
                         <DocumentViewer
                             order={order}
+                            customerGreenInvoiceClientId={customers.find(c => c.id === order.customerId)?.greenInvoiceClientId}
                             onDownload={handleDownloadDocument}
                             onOpenInGreenInvoice={handleOpenInGreenInvoice}
-                            onOpenCreateModal={(mode, fromDocumentType) => {
+                            onOpenCreateModal={(mode, fromDocumentType, sourceDocumentId) => {
                                 setCreateDocumentModalMode(mode);
                                 setCreateDocumentModalFromType(fromDocumentType);
+                                setCreateDocumentModalSourceId(sourceDocumentId);
                                 setIsCreateDocumentModalOpen(true);
                             }}
                             onCancelDocument={async (documentId, type) => {
-                                // Create credit invoice for cancellation
-                                try {
-                                    await handleCreateDocument('credit_invoice', 'api');
-                                    addActivity(`נוצרה חשבונית זיכוי עבור ${type}`);
-                                } catch (error: any) {
-                                    alert(`שגיאה ביצירת חשבונית זיכוי: ${error.message || error}`);
+                                if (type === 'invoice') {
+                                    // חשבונית מס: יצירת חשבונית זיכוי דרך API
+                                    try {
+                                        await handleCreateDocument('credit_invoice', 'api', undefined, { sourceDocumentId: documentId });
+                                        addActivity('נוצרה חשבונית זיכוי');
+                                        alert('המסמך נוצר בהצלחה בחשבונית ירוקה!');
+                                    } catch (error: any) {
+                                        alert(`שגיאה ביצירת חשבונית זיכוי: ${error.message || error}`);
+                                    }
+                                } else if (type === 'invoice_receipt') {
+                                    // חשבונית מס+קבלה: דורש חשבונית זיכוי + קבלה שלילית — נפתח בחשבונית ירוקה (זרימה מלאה)
+                                    handleOpenInGreenInvoice(documentId, type);
+                                    addActivity('נפתח מסמך בחשבונית ירוקה לביטול (חשבונית זיכוי + קבלה שלילית)');
+                                } else if (type === 'receipt') {
+                                    // קבלה: ביטול = הפקת קבלה שלילית — נפתח בחשבונית ירוקה
+                                    handleOpenInGreenInvoice(documentId, type);
+                                    addActivity('נפתח מסמך בחשבונית ירוקה לביטול קבלה (הפקת קבלה שלילית)');
                                 }
+                            }}
+                            onLinkDocument={async (documentId) => {
+                                if (!order?.id) return;
+                                const token = localStorage.getItem('authToken');
+                                const res = await fetch(`/api/green-invoice/orders/${order.id}/link-document`, {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                                    body: JSON.stringify({ documentId })
+                                });
+                                const data = await res.json();
+                                if (!res.ok) throw new Error(data.error || 'שגיאה בשיוך מסמך');
+                                if (data.orderUpdates?.payments) {
+                                    setFormData(prev => ({ ...prev, payments: data.orderUpdates.payments }));
+                                }
+                                addActivity(`שויך מסמך חשבונית ירוקה להזמנה (${data.paymentsAdded || 0} תשלומים)`);
                             }}
                         />
                     </div>
@@ -3324,7 +3151,7 @@ const OrderForm: React.FC<{
     );
 };
 
-const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, setCustomers, suppliers, setSuppliers, employees, addActivity, initialOpenOrderId, onOrderOpened, openNewOrderRequest, onClearedOpenNewOrderRequest, statusConfigs, getNextOrderNumber, vatRate }) => {
+const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLocal, customers, setCustomers, suppliers, setSuppliers, employees, addActivity, initialOpenOrderId, onOrderOpened, openNewOrderRequest, onClearedOpenNewOrderRequest, statusConfigs, getNextOrderNumber, vatRate }) => {
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingOrder, setEditingOrder] = useState<Order | null>(null);
     const [orderFormHeaderContent, setOrderFormHeaderContent] = useState<React.ReactNode>(null);
@@ -3424,17 +3251,17 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
         try {
             // Update on server
             await mongoService.updateOrder(updatedOrder);
-            // Update local state
-            setOrders(prevOrders => {
+            // Update local state (no double sync)
+            setOrdersLocal(prevOrders => {
                 const orderIndex = prevOrders.findIndex(o => o.id === orderId);
                 if (orderIndex === -1) return prevOrders;
-            const newOrders = [...prevOrders];
-            newOrders[orderIndex] = updatedOrder;
-            return newOrders;
-        });
+                const newOrders = [...prevOrders];
+                newOrders[orderIndex] = updatedOrder;
+                return newOrders;
+            });
             addActivity(`סטטוס הזמנה ${originalOrder.orderNumber} שונה ל: ${newStatus}`);
-            // Refetch paginated data
-            await refetchOrders();
+            setPaginatedOrders(prev => prev.map(o => o.id === orderId ? updatedOrder : o));
+            refetchOrders(true);
         } catch (error) {
             console.error('Error updating order status:', error);
             alert('שגיאה בעדכון סטטוס הזמנה');
@@ -3464,7 +3291,6 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
                 isCollectionMode,
                 showCompletedOrders
             };
-            
             const result = await mongoService.getOrdersPaginated(filters, currentPage, pageSize);
             setPaginatedOrders(result.orders);
             setTotalCount(result.totalCount);
@@ -3494,9 +3320,16 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
                     acc.totalAmount += t.totalAmount;
                     acc.totalCost += t.totalCost;
                     acc.totalProfit += t.profit;
+                    const config = statusConfigs?.find(c => c.label === order.orderStatus);
+                    const isActiveDeal = config ? config.isActiveDeal : true;
+                    if (isActiveDeal) {
+                        const dueWithVat = t.totalAmount * (1 + (vatRate || 0) / 100);
+                        acc.totalBalance += Math.max(0, t.totalAmount - t.totalPaid);
+                        acc.totalBalanceInclVat += Math.max(0, dueWithVat - t.totalPaid);
+                    }
                     return acc;
                 },
-                { totalAmount: 0, totalCost: 0, totalProfit: 0 }
+                { totalAmount: 0, totalCost: 0, totalProfit: 0, totalBalance: 0, totalBalanceInclVat: 0 }
             );
             setSummaryTotals(prev => ({
                 ...prev,
@@ -3504,6 +3337,8 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
                 totalCost: totals.totalCost,
                 totalProfit: totals.totalProfit,
                 totalAmountInclVat: totals.totalAmount * (1 + (vatRate || 0) / 100),
+                totalBalance: totals.totalBalance,
+                totalBalanceInclVat: totals.totalBalanceInclVat,
             }));
             setLoading(false);
             refetchOrders(true);
@@ -3547,18 +3382,25 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
                 addActivity(`הזמנה חדשה נוספה: ${order.description}`);
             }
             
-            // Update local state
-            setOrders(prevOrders => {
+            // Update local state immediately (no wait; avoid double API call via setOrdersLocal)
+            setOrdersLocal(prevOrders => {
                 const exists = prevOrders.some(o => o.id === savedOrder.id);
                 if (exists) {
                     return prevOrders.map(o => o.id === savedOrder.id ? savedOrder : o);
                 } else {
                     return [savedOrder, ...prevOrders];
-            }
-        });
-            
-            // Refetch paginated data
-            await refetchOrders();
+                }
+            });
+            // Update current page list so table reflects save without waiting for refetch
+            setPaginatedOrders(prev => {
+                if (prev.some(o => o.id === savedOrder.id))
+                    return prev.map(o => o.id === savedOrder.id ? savedOrder : o);
+                if (!exists && currentPage === 1) return [savedOrder, ...prev].slice(0, pageSize);
+                return prev;
+            });
+            if (!exists) setTotalCount(c => c + 1);
+            // Refresh totals and list in background (non-blocking)
+            refetchOrders(true);
             
         if (keepOpen) {
                 setEditingOrder(savedOrder);

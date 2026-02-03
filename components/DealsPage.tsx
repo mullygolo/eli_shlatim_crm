@@ -112,7 +112,7 @@ interface DealsPageProps {
     setDeals: React.Dispatch<React.SetStateAction<Deal[]>>;
     customers: Customer[];
     handleUpdateDealStage: (dealId: string, newStage: DealStage) => void;
-    addActivity: (description: string) => void;
+    addActivity: (description: string, options?: import('../types').AddActivityOptions) => void;
 }
 
 const DealsPage: React.FC<DealsPageProps> = ({ deals, setDeals, customers, handleUpdateDealStage, addActivity }) => {

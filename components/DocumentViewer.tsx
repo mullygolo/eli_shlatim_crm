@@ -21,7 +21,7 @@ interface DocumentInfo {
     id: string;
     type: DocumentInfoType;
     label: string;
-    status?: 'opened' | 'closed' | 'canceled' | 'draft';
+    status?: 'opened' | 'closed' | 'canceled' | 'draft' | 'unavailable';
     statusLabel?: string;
     date?: string;
     amount?: number;
@@ -84,8 +84,10 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({
             setLoading(true);
 
             try {
-                // Linked document IDs from OrderDocumentLink
-                let linkedIds: string[] = [];
+                // Linked documents from OrderDocumentLink (includes documentType for fallback when raw fetch fails)
+                const linkTypeToLabel: Record<string, string> = { invoice: 'חשבונית מס', receipt: 'קבלה', credit_invoice: 'חשבונית זיכוי', invoice_receipt: 'חשבונית מס + קבלה', estimate: 'הצעת מחיר' };
+                const linkTypeToDocType: Record<string, DocumentInfoType> = { invoice: 'invoice', receipt: 'receipt', credit_invoice: 'credit', invoice_receipt: 'invoice_receipt', estimate: 'estimate' };
+                let linkedDocs: Array<{ id: string; type: DocumentInfoType; label: string }> = [];
                 if (order.id) {
                     try {
                         const r = await fetch(`/api/green-invoice/orders/${order.id}/document-links`, {
@@ -93,7 +95,12 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({
                         });
                         if (r.ok) {
                             const { links } = await r.json();
-                            linkedIds = (links || []).map((l: any) => l.documentId).filter(Boolean);
+                            linkedDocs = (links || [])
+                                .filter((l: any) => l.documentId)
+                                .map((l: any) => {
+                                    const linkType = l.documentType || 'invoice';
+                                    return { id: l.documentId, type: linkTypeToDocType[linkType] || 'invoice', label: linkTypeToLabel[linkType] || 'מסמך משויך' };
+                                });
                         }
                     } catch { /* ignore */ }
                 }
@@ -105,7 +112,7 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({
                     { id: order.greenInvoiceCreditId, type: 'credit', label: 'חשבונית זיכוי' },
                     { id: order.greenInvoiceEstimateId, type: 'estimate', label: 'הצעת מחיר' }
                 ].filter((doc): doc is { id: string; type: DocumentInfoType; label: string } => !!doc.id).concat(
-                    linkedIds.filter(id => !storedIds.has(id)).map(id => ({ id, type: 'invoice' as DocumentInfoType, label: 'מסמך משויך' }))
+                    linkedDocs.filter(ld => !storedIds.has(ld.id))
                 );
 
                 for (const doc of documentIds) {
@@ -131,10 +138,10 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({
                                     ? new Date(creationDate).toLocaleDateString('he-IL')
                                     : undefined;
                             const payMethod = paymentMethodFromRaw(rawDoc);
-                            // Infer type from raw doc (305=invoice, 320=invoice_receipt, 400=receipt, 330=credit, 10=estimate)
+                            // Infer type & label from raw doc (305=invoice, 320=invoice_receipt, 400=receipt, 330=credit, 10=estimate)
                             const rawType = rawDoc.type;
-                            const inferredType: DocumentInfoType = rawType === 320 ? 'invoice_receipt' : rawType === 400 ? 'receipt' : rawType === 330 ? 'credit' : rawType === 10 ? 'estimate' : doc.type;
-                            const inferredLabel = rawType === 320 ? 'חשבונית מס + קבלה' : doc.label;
+                            const inferredType: DocumentInfoType = rawType === 320 ? 'invoice_receipt' : rawType === 400 ? 'receipt' : rawType === 330 ? 'credit' : rawType === 10 ? 'estimate' : rawType === 305 ? 'invoice' : doc.type;
+                            const inferredLabel = rawType === 320 ? 'חשבונית מס + קבלה' : rawType === 400 ? 'קבלה' : rawType === 330 ? 'חשבונית זיכוי' : rawType === 10 ? 'הצעת מחיר' : rawType === 305 ? 'חשבונית מס' : doc.label;
                             docs.push({
                                 id: doc.id,
                                 type: inferredType,
@@ -157,8 +164,8 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({
                                 id: doc.id,
                                 type: doc.type,
                                 label: doc.label,
-                                status: 'draft',
-                                statusLabel: 'טיוטה',
+                                status: 'unavailable',
+                                statusLabel: 'לא נטען',
                                 number: undefined,
                                 date: undefined,
                                 description: undefined,
@@ -173,8 +180,8 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({
                             id: doc.id,
                             type: doc.type,
                             label: doc.label,
-                            status: 'draft',
-                            statusLabel: 'טיוטה',
+                            status: 'unavailable',
+                            statusLabel: 'לא נטען',
                             number: undefined,
                             date: undefined,
                             description: undefined,
@@ -347,6 +354,7 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({
             case 'closed': return 'bg-green-100 text-green-800';
             case 'canceled': return 'bg-red-100 text-red-800';
             case 'draft': return 'bg-yellow-100 text-yellow-800';
+            case 'unavailable': return 'bg-slate-100 text-slate-600';
             default: return 'bg-slate-100 text-slate-800';
         }
     };
@@ -577,7 +585,7 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({
                                 {doc.statusLabel && (
                                     <span
                                         className={`text-xs px-2 py-1 rounded font-medium ${getStatusColor(doc.status)}`}
-                                        title={doc.statusLabel === 'טיוטה' ? 'פרטי המסמך לא נטענו – ייתכן טיוטה או שגיאה. נסה לפתוח בחשבונית ירוקה.' : undefined}
+                                        title={doc.statusLabel === 'לא נטען' || doc.statusLabel === 'טיוטה' ? 'פרטי המסמך לא נטענו מחשבונית ירוקה. ייתכן בעיית הרשאות או שהמסמך לא זמין. נסה לפתוח בחשבונית ירוקה.' : undefined}
                                     >
                                         {doc.statusLabel}
                                     </span>

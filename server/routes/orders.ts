@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { getOrders, createOrder, updateOrder, deleteOrder, getOrdersPaginated, getSettings, getOrderById, getOrdersByParentId, getPayableItems, getPreparationStatusSuggestions } from '../services/mongoService.js';
+import { buildImportPreview, executeImport } from '../services/orderImportService.js';
 
 const router = Router();
 
@@ -77,6 +78,39 @@ router.get('/parent/:parentId', async (req, res) => {
     } catch (error) {
         console.error('Error fetching orders by parent ID:', error);
         res.status(500).json({ error: 'Failed to fetch child orders' });
+    }
+});
+
+// CSV import: preview (match customers/suppliers/statuses, list new and missing)
+router.post('/import/preview', async (req, res) => {
+    try {
+        const rows = req.body?.rows;
+        if (!Array.isArray(rows) || rows.length === 0) {
+            res.status(400).json({ error: 'Expected body.rows (array of row objects)' });
+            return;
+        }
+        const result = await buildImportPreview(rows);
+        res.json(result);
+    } catch (error) {
+        console.error('Error in orders import preview:', error);
+        res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to build import preview' });
+    }
+});
+
+// CSV import: execute (create statuses, suppliers, update contacts, create orders)
+router.post('/import/execute', async (req, res) => {
+    try {
+        const rows = req.body?.rows;
+        const skipExisting = req.body?.skipExistingOrderNumbers !== false;
+        if (!Array.isArray(rows) || rows.length === 0) {
+            res.status(400).json({ error: 'Expected body.rows (array of row objects)' });
+            return;
+        }
+        const result = await executeImport(rows, { skipExistingOrderNumbers: skipExisting });
+        res.json(result);
+    } catch (error) {
+        console.error('Error in orders import execute:', error);
+        res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to execute import' });
     }
 });
 

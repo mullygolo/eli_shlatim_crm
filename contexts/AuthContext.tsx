@@ -29,15 +29,15 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     const [user, setUser] = useState<Omit<Employee, 'passwordHash'> | null>(null);
     const [isLoading, setIsLoading] = useState<boolean>(true);
 
-    // Check if user is authenticated on mount (with timeout so we don't hang on white/loading)
-    useEffect(() => {
+        // Check if user is authenticated on mount (with timeout so we don't hang on white/loading)
+        useEffect(() => {
         let cancelled = false;
-        const AUTH_CHECK_TIMEOUT_MS = 8000;
+        const AUTH_CHECK_TIMEOUT_MS = 4000;
 
-        // Safety: force loading false after 10s no matter what (e.g. if Promise.race doesn't resolve)
+        // Safety: force loading false after 6s no matter what (e.g. if Promise.race doesn't resolve)
         const forceDoneTimer = setTimeout(() => {
             if (!cancelled) setIsLoading(false);
-        }, 10000);
+        }, 6000);
 
         const checkAuth = async () => {
             try {

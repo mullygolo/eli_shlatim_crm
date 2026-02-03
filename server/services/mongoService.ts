@@ -1,7 +1,7 @@
 import { MongoClient, Db } from 'mongodb';
 import fs from 'fs';
 import {
-    Customer, Order, Supplier, Employee, Activity, OrderStatusConfiguration,
+    Customer, Order, Supplier, Employee, Activity, ActivityFilters, ActivitiesResult, OrderStatusConfiguration,
     FixedExpense, VariableExpense, Loan, Debt, Receivable, EquityInvestment,
     AttendanceRecord, ManualEvent, CallLog, EmployeeStatus, EmployeeRole,
     PriceListProduct, SalesHistoryEntry, AdHocProduct,
@@ -128,10 +128,19 @@ export async function createCustomer(customer: Customer): Promise<Customer> {
     try {
         const database = await getDb();
         const collection = database.collection<Customer>('customers');
+        const key = customerLogicalKey(customer);
+        const existing = await collection.find({}).toArray();
+        const duplicate = (existing.map(deserializeDates) as Customer[]).find(c => customerLogicalKey(c) === key);
+        if (duplicate) {
+            const err = new Error('DUPLICATE_CUSTOMER') as Error & { code?: string };
+            err.code = 'DUPLICATE_CUSTOMER';
+            throw err;
+        }
         const serialized = serializeDates(customer);
         await collection.insertOne(serialized);
         return deserializeDates(serialized) as Customer;
     } catch (error) {
+        if (error instanceof Error && (error as Error & { code?: string }).code === 'DUPLICATE_CUSTOMER') throw error;
         console.error('Error creating customer:', error);
         throw error;
     }
@@ -165,7 +174,13 @@ export async function deleteCustomer(customerId: string): Promise<void> {
     }
 }
 
-// Get customers with server-side filtering, pagination, and debt calculation
+// Logical key for customer deduplication (name + businessId, normalized)
+function customerLogicalKey(c: Customer): string {
+    return (c.name || '').trim().toLowerCase() + '|' + (c.businessId || '').trim().toLowerCase();
+}
+
+// Get customers with server-side filtering, pagination, and debt calculation.
+// Duplicates (same name + businessId) are merged into one row; debt is summed across all duplicate IDs.
 export async function getCustomersPaginated(
     filters: { searchTerm?: string },
     page: number = 1,
@@ -233,13 +248,32 @@ export async function getCustomersPaginated(
             };
         });
         
+        // Deduplicate by logical key (name + businessId): keep one row per key, sum debt
+        const byKey = new Map<string, (Customer & { debt: number })[]>();
+        for (const c of customersWithDebt) {
+            const key = customerLogicalKey(c);
+            if (!byKey.has(key)) byKey.set(key, []);
+            byKey.get(key)!.push(c);
+        }
+        const dedupedCustomers: (Customer & { debt: number })[] = [];
+        for (const group of byKey.values()) {
+            if (group.length === 0) continue;
+            // Prefer representative with greenInvoiceClientId, else first
+            const representative = group.find(c => c.greenInvoiceClientId) || group[0];
+            const mergedDebt = group.reduce((sum, c) => sum + c.debt, 0);
+            dedupedCustomers.push({
+                ...representative,
+                debt: Number(mergedDebt.toFixed(2))
+            });
+        }
+        
         // Sort customers (by name by default)
-        customersWithDebt.sort((a, b) => a.name.localeCompare(b.name, 'he'));
+        dedupedCustomers.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'he'));
         
         // Paginate
-        const totalCount = customersWithDebt.length;
+        const totalCount = dedupedCustomers.length;
         const skip = (page - 1) * limit;
-        const paginatedCustomers = customersWithDebt.slice(skip, skip + limit);
+        const paginatedCustomers = dedupedCustomers.slice(skip, skip + limit);
         return {
             customers: paginatedCustomers,
             totalCount,
@@ -260,36 +294,6 @@ export async function getOrders(): Promise<Order[]> {
         const collection = database.collection<Order>('orders');
         const docs = await collection.find({}).toArray();
         const orders = docs.map(deserializeDates) as Order[];
-        
-        // #region agent log - Hypothesis F: Server-side orders check
-        try {
-            const fs = await import('fs');
-            const path = await import('path');
-            const logPath = path.join(process.cwd(), '.cursor', 'debug.log');
-            orders.forEach((order) => {
-                const logEntry = {
-                    location: 'mongoService.ts:128',
-                    message: 'Server-side order check',
-                    data: {
-                        orderNumber: order.orderNumber,
-                        hasPayments: !!order.payments,
-                        paymentsCount: order.payments?.length || 0,
-                        paymentsType: typeof order.payments,
-                        paymentsIsArray: Array.isArray(order.payments),
-                        paymentsSample: order.payments?.slice(0, 2).map((p: any) => ({ id: p.id, amount: p.amount, date: p.date })) || []
-                    },
-                    timestamp: Date.now(),
-                    sessionId: 'debug-session',
-                    runId: 'run3-server',
-                    hypothesisId: 'F'
-                };
-                fs.appendFileSync(logPath, JSON.stringify(logEntry) + '\n', 'utf8');
-            });
-        } catch (logError) {
-            // Ignore log errors
-        }
-        // #endregion
-        
         return orders;
     } catch (error) {
         console.error('Error fetching orders:', error);
@@ -461,12 +465,13 @@ export async function getOrdersPaginated(filters: any, page: number = 1, limit: 
         // Build MongoDB query from filters
         const query: any = {};
         
-        // Collection mode filter (must be applied first)
+        // Collection mode / collection center: unpaid orders
         const isCollectionMode = filters.isCollectionMode === true;
-        if (isCollectionMode) {
-            // Only active deals that are not paid
+        const isCollectionCenterView = filters.collectionCenterView === true;
+        if (isCollectionMode || isCollectionCenterView) {
             query.paymentStatus = { $ne: 'שולם' };
-            // We'll filter by isActiveDeal after fetching (requires statusConfigs)
+            // isCollectionMode: we'll filter by isActiveDeal after fetching
+            // collectionCenterView: show ALL unpaid orders for the customer (no isActiveDeal filter)
         }
         
         // Payment status filter (only if not in collection mode)
@@ -506,9 +511,6 @@ export async function getOrdersPaginated(filters: any, page: number = 1, limit: 
         const rawEnd = filters.endDateFilter != null ? String(filters.endDateFilter).trim() : '';
         const startDateStr = rawStart && isoDateOnly.test(rawStart) ? rawStart : '';
         const endDateStr = rawEnd && isoDateOnly.test(rawEnd) ? rawEnd : '';
-        // #region agent log
-        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'server/services/mongoService.ts:getOrdersPaginated:filters',message:'date filters received',data:{startDateStr,endDateStr,dateField,hasStart:!!startDateStr,hasEnd:!!endDateStr},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H1,H2,H3'})}).catch(()=>{});
-        // #endregion
         if (startDateStr || endDateStr) {
             const gteStr = startDateStr ? startDateStr + 'T00:00:00.000Z' : '';
             const lteStr = endDateStr ? endDateStr + 'T23:59:59.999Z' : '';
@@ -567,15 +569,22 @@ export async function getOrdersPaginated(filters: any, page: number = 1, limit: 
         let allMatchingOrders = allMatchingDocs.map(deserializeDates) as Order[];
         
         // Apply post-query filters that require statusConfigs or other complex logic
-        if (isCollectionMode) {
+        // Collection center view: show all unpaid for customer; collection mode (e.g. Reports): only active deals
+        if (isCollectionMode && !isCollectionCenterView) {
             allMatchingOrders = allMatchingOrders.filter(order => {
                 const config = statusConfigs.find(c => c.label === order.orderStatus);
                 const isActive = config ? config.isActiveDeal : false;
                 return isActive;
             });
         }
+        // Defensive: when customerFilter is set, ensure only that customer's orders are returned
+        if (filters.customerFilter && filters.customerFilter.length > 0) {
+            const allowedIds = new Set(filters.customerFilter);
+            allMatchingOrders = allMatchingOrders.filter(o => o.customerId && allowedIds.has(o.customerId));
+        }
         
-        if (!filters.showCompletedOrders && !isCollectionMode) {
+        // Hide completed-by-status orders only when not in collection center (there we show all unpaid for customer)
+        if (!filters.showCompletedOrders && !isCollectionMode && !isCollectionCenterView) {
             allMatchingOrders = allMatchingOrders.filter(order => {
                 const config = statusConfigs.find(c => c.label === order.orderStatus);
                 return !config?.isCompleted;
@@ -603,6 +612,24 @@ export async function getOrdersPaginated(filters: any, page: number = 1, limit: 
                 return true;
             });
         }
+        
+        // Deduplicate by orderNumber (keep one per order number — latest by date). Normalize key (trim + uppercase) so "ORD-1005" and "ord-1005" merge.
+        const dateKeyForDedup = dateFilterType === 'DEAL_DATE' ? 'dealStartDate' : 'date';
+        const seenByOrderNumber = new Map<string, Order>();
+        for (const order of allMatchingOrders) {
+            const raw = (order.orderNumber != null && order.orderNumber !== '') ? String(order.orderNumber).trim() : '';
+            const key = raw !== '' ? raw.toUpperCase() : (order.id || '');
+            if (!key) continue;
+            const existing = seenByOrderNumber.get(key);
+            if (!existing) {
+                seenByOrderNumber.set(key, order);
+            } else {
+                const dNew = order[dateKeyForDedup] ? new Date(order[dateKeyForDedup]!).getTime() : 0;
+                const dOld = existing[dateKeyForDedup] ? new Date(existing[dateKeyForDedup]!).getTime() : 0;
+                if (dNew >= dOld) seenByOrderNumber.set(key, order);
+            }
+        }
+        allMatchingOrders = Array.from(seenByOrderNumber.values());
         
         // Calculate summary totals on ALL filtered orders (not just current page)
         // Balance = same formula as client row: max(0, totalDueWithVat - totalPaid) for active deals
@@ -1265,6 +1292,44 @@ export async function getActivities(): Promise<Activity[]> {
         return docs.map(deserializeDates) as Activity[];
     } catch (error) {
         console.error('Error fetching activities:', error);
+        throw error;
+    }
+}
+
+export async function getActivitiesFiltered(filters: ActivityFilters): Promise<ActivitiesResult> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<Activity>('activities');
+        const match: Record<string, unknown> = {};
+        if (filters.from || filters.to) {
+            const dateMatch: Record<string, Date> = {};
+            if (filters.from) dateMatch.$gte = new Date(filters.from);
+            if (filters.to) {
+                const toDate = new Date(filters.to);
+                toDate.setHours(23, 59, 59, 999);
+                dateMatch.$lte = toDate;
+            }
+            match.timestamp = dateMatch;
+        }
+        if (filters.userId) match.userId = filters.userId;
+        if (filters.entityType) match.entityType = filters.entityType;
+        if (filters.action) match.action = filters.action;
+        if (filters.search && filters.search.trim()) {
+            match.description = { $regex: filters.search.trim(), $options: 'i' };
+        }
+        const page = Math.max(1, filters.page ?? 1);
+        const limit = Math.min(500, Math.max(1, filters.limit ?? 100));
+        const skip = (page - 1) * limit;
+        const [docs, total] = await Promise.all([
+            collection.find(match).sort({ timestamp: -1 }).skip(skip).limit(limit).toArray(),
+            collection.countDocuments(match),
+        ]);
+        return {
+            activities: docs.map(d => deserializeDates(d) as Activity),
+            total,
+        };
+    } catch (error) {
+        console.error('Error fetching filtered activities:', error);
         throw error;
     }
 }

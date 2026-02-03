@@ -185,6 +185,7 @@ router.get('/invoices/:id/sync-payments', async (req, res) => {
 });
 
 // Invoice summary by order number (invoiced − credits) for ניהול גבייה. כולל מסמכים מזהים שמורים (greenInvoiceId) + OrderDocumentLink.
+// When orderId is provided, auto-links documents that mention this order in description ([ORD-XXXX] or [XXXX]) and aren't linked yet.
 router.get('/documents/invoice-summary/:orderNumber', async (req, res) => {
     try {
         const orderNumber = req.params.orderNumber;
@@ -195,7 +196,63 @@ router.get('/documents/invoice-summary/:orderNumber', async (req, res) => {
             creditId: (req.query.creditId as string) || undefined
         };
         if (orderId) {
-            const links = await getOrderDocumentLinksByOrderId(orderId);
+            let links = await getOrderDocumentLinksByOrderId(orderId);
+            const linkedDocumentIds = new Set(links.map(l => l.documentId).filter(Boolean));
+            const order = await getOrderById(orderId);
+            const customer = order ? await getCustomerById(order.customerId) : null;
+            if (order && customer) {
+                const searchDocs = await searchDocumentsByOrderNumber(orderNumber);
+                const methodMap: Record<string, string> = { 'Bank Transfer': 'העברה בנקאית', 'Credit Card': 'כרטיס אשראי', 'Cheque': 'צ\'ק', 'Cash': 'מזומן', 'Standing Order': 'הוראת קבע', 'Bit/PayBox': 'Bit/PayBox' };
+                let orderPayments = order.payments ? [...order.payments] : [];
+                const seen = new Set(orderPayments.map((p: any) => `${p.amount}_${new Date(p.date).toISOString().split('T')[0]}`));
+                for (const doc of searchDocs) {
+                    const docId = doc?.id;
+                    if (!docId || linkedDocumentIds.has(docId)) continue;
+                    try {
+                        const raw = await getDocumentRaw(docId);
+                        const docTotal = Number(raw?.amount ?? raw?.total ?? 0);
+                        const existingLinksDoc = await getOrderDocumentLinksByDocumentId(docId);
+                        const result = await validateDocumentForOrders(raw, [order], customer, existingLinksDoc, { [orderId]: docTotal });
+                        if (!result.valid) continue;
+                        const docType = result.documentType || 'receipt';
+                        await createOrderDocumentLink({
+                            id: `odl_${Date.now()}_${docId.slice(0, 8)}_${Math.random().toString(36).slice(2, 7)}`,
+                            orderId,
+                            documentId: docId,
+                            documentType: docType,
+                            amount: docTotal,
+                            linkedAt: new Date()
+                        });
+                        linkedDocumentIds.add(docId);
+                        const payments = await getDocumentPayments(docId);
+                        let added = 0;
+                        for (const p of payments) {
+                            const key = `${p.amount}_${p.date}`;
+                            if (seen.has(key)) continue;
+                            seen.add(key);
+                            const repaymentDateStr = p.repaymentDate || (p.method === 'Cheque' ? p.date : undefined);
+                            orderPayments.push({
+                                id: `gi_pay_${Date.now()}_${docId.slice(0, 6)}_${added}`,
+                                amount: p.amount,
+                                date: new Date(p.date),
+                                method: (methodMap[p.method || ''] || 'העברה בנקאית') as any,
+                                reference: p.reference || '',
+                                repaymentDate: repaymentDateStr ? new Date(repaymentDateStr) : undefined,
+                                status: 'CLEARED',
+                                notes: 'סונכרן מחשבונית ירוקה (שיוך אוטומטי)'
+                            });
+                            added++;
+                        }
+                        if (added > 0) {
+                            await updateOrder({ ...order, payments: orderPayments });
+                            order.payments = orderPayments;
+                        }
+                    } catch (err: any) {
+                        console.warn(`[invoice-summary] Auto-link doc ${docId} failed:`, err?.message || err);
+                    }
+                }
+            }
+            links = await getOrderDocumentLinksByOrderId(orderId);
             ids.linkedDocumentIds = links.map(l => l.documentId).filter(Boolean);
         }
         const summary = await getInvoiceSummaryByOrderNumber(orderNumber, ids);
@@ -271,13 +328,14 @@ router.post('/orders/:orderId/link-document', async (req, res) => {
             const key = `${p.amount}_${p.date}`;
             if (seen.has(key)) continue;
             seen.add(key);
+            const repaymentDateStr = p.repaymentDate || (p.method === 'Cheque' ? p.date : undefined);
             orderPayments.push({
                 id: `gi_pay_${Date.now()}_${added}`,
                 amount: p.amount,
                 date: new Date(p.date),
                 method: (methodMap[p.method || ''] || 'העברה בנקאית') as any,
                 reference: p.reference || '',
-                repaymentDate: p.method === 'Cheque' ? new Date(p.date) : undefined,
+                repaymentDate: repaymentDateStr ? new Date(repaymentDateStr) : undefined,
                 status: 'CLEARED',
                 notes: 'סונכרן מחשבונית ירוקה'
             });
@@ -344,13 +402,14 @@ router.post('/documents/link-orders', async (req, res) => {
                 const key = `${allocAmt}_${p.date}`;
                 if (seen.has(key)) continue;
                 seen.add(key);
+                const repaymentDateStr = p.repaymentDate || (p.method === 'Cheque' ? p.date : undefined);
                 orderPayments.push({
                     id: `gi_pay_${Date.now()}_${orderId}_${added}`,
                     amount: allocAmt,
                     date: new Date(p.date),
                     method: (methodMap[p.method || ''] || 'העברה בנקאית') as any,
                     reference: p.reference || '',
-                    repaymentDate: p.method === 'Cheque' ? new Date(p.date) : undefined,
+                    repaymentDate: repaymentDateStr ? new Date(repaymentDateStr) : undefined,
                     status: 'CLEARED',
                     notes: 'סונכרן מחשבונית ירוקה'
                 });

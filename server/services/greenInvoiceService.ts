@@ -892,10 +892,11 @@ export async function searchDocumentsByOrderNumber(orderNumber: string): Promise
                         documents = data.data;
                     }
                     
-                    // Filter documents that contain the order number in description
+                    // Filter documents that contain the order number in description ([1008] or [ORD-1008])
+                    const patternOrd = `[ORD-${orderNumber}]`;
                     const matchingDocs = documents.filter((doc: any) => {
                         const description = doc.description || doc.desc || '';
-                        return description.includes(searchPattern);
+                        return description.includes(searchPattern) || description.includes(patternOrd);
                     });
                     
                     if (matchingDocs.length > 0) {
@@ -975,20 +976,41 @@ export async function searchDocumentsByOrderNumber(orderNumber: string): Promise
     }
 }
 
+/** Helper: filter documents by GreenInvoice client ID (API may return unfiltered results). */
+function filterDocumentsByClient(docs: any[], greenInvoiceClientId: string): any[] {
+    if (!Array.isArray(docs) || !greenInvoiceClientId) return [];
+    const target = String(greenInvoiceClientId);
+    return docs.filter((d: any) => {
+        const cid = d.client?.id ?? d.client ?? d.clientId ?? d.client_id;
+        return cid != null && String(cid) === target;
+    });
+}
+
+/** Helper: sort documents newest first (מהחדש לישן). */
+function sortDocumentsNewestFirst(docs: any[]): any[] {
+    return [...docs].sort((a, b) => {
+        const dateA = a.documentDate ?? a.date ?? a.issue_date ?? a.createdDate ?? a.createdAt ?? a.issueDate ?? '';
+        const dateB = b.documentDate ?? b.date ?? b.issue_date ?? b.createdDate ?? b.createdAt ?? b.issueDate ?? '';
+        const tsA = new Date(String(dateA)).getTime();
+        const tsB = new Date(String(dateB)).getTime();
+        return tsB - tsA; // descending: newest first
+    });
+}
+
 /**
  * List documents by customer (client) from GreenInvoice.
- * Tries POST search with client filter, falls back to GET + filter by client.
+ * Always filters by client ID — API may ignore client filter and return all documents.
  */
 export async function searchDocumentsByClientId(greenInvoiceClientId: string): Promise<any[]> {
     try {
         const token = await authenticate();
         const headers: Record<string, string> = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
 
-        // Try POST search with client filter (common API patterns)
+        // Try POST search with client filter (API may still return all — we filter anyway)
         const searchBodies = [
-            { client: greenInvoiceClientId, page: 1, pageSize: 100 },
-            { clientId: greenInvoiceClientId, page: 1, pageSize: 100 },
-            { client_id: greenInvoiceClientId, page: 1, pageSize: 100 }
+            { client: greenInvoiceClientId, page: 1, pageSize: 500 },
+            { clientId: greenInvoiceClientId, page: 1, pageSize: 500 },
+            { client_id: greenInvoiceClientId, page: 1, pageSize: 500 }
         ];
         for (const body of searchBodies) {
             try {
@@ -1000,28 +1022,21 @@ export async function searchDocumentsByClientId(greenInvoiceClientId: string): P
                 if (res.ok) {
                     const data = (await res.json()) as any;
                     const items = data?.items ?? data?.documents ?? data?.incomes ?? (Array.isArray(data) ? data : data?.data ?? []);
-                    if (Array.isArray(items) && items.length > 0) {
-                        return items;
-                    }
+                    const filtered = filterDocumentsByClient(Array.isArray(items) ? items : [], greenInvoiceClientId);
+                    if (filtered.length > 0) return sortDocumentsNewestFirst(filtered);
                 }
             } catch { /* try next */ }
         }
 
-        // Fallback: GET /v1/incomes or /v1/documents and filter by client (GreenInvoice incomes = documents)
+        // Fallback: GET and filter by client
         for (const endpoint of ['/v1/incomes', '/v1/documents', '/incomes', '/documents']) {
             try {
                 const res = await fetch(`${GREENINVOICE_API_URL}${endpoint}`, { method: 'GET', headers });
                 if (res.ok) {
                     const data = (await res.json()) as any;
                     const raw = data?.items ?? data?.documents ?? data?.incomes ?? (Array.isArray(data) ? data : data?.data ?? []);
-                    const all = Array.isArray(raw) ? raw : [];
-                    const filtered = all.filter((d: any) => {
-                        const cid = d.client?.id ?? d.client ?? d.clientId ?? d.client_id;
-                        return cid && String(cid) === String(greenInvoiceClientId);
-                    });
-                    if (filtered.length > 0) {
-                        return filtered;
-                    }
+                    const filtered = filterDocumentsByClient(Array.isArray(raw) ? raw : [], greenInvoiceClientId);
+                    if (filtered.length > 0) return sortDocumentsNewestFirst(filtered);
                 }
             } catch { /* try next */ }
         }
@@ -1144,19 +1159,22 @@ const PAYMENT_TYPE_TO_METHOD: Record<number, string> = {
 /**
  * Get per-payment details from a document (invoice/receipt/invoice_receipt) for sync to CRM.
  * Uses raw document `payment[]`; maps chequeNum (צ'ק), cardNum (אשראי) to reference for ניהול צ'קים.
+ * For Cheque (type 2), the single "תאריך" field in GreenInvoice is the due date (תאריך פירעון) — returned as repaymentDate.
  */
 export async function getDocumentPayments(documentId: string): Promise<Array<{
     amount: number;
     date: string;
     method?: string;
     reference?: string;
+    /** תאריך פירעון — for Cheque, the single date in the payment row is the due date */
+    repaymentDate?: string;
 }>> {
     const raw = await getDocumentRaw(documentId);
     const pay = raw?.payment;
     if (!Array.isArray(pay) || pay.length === 0) {
         return [];
     }
-    const out: Array<{ amount: number; date: string; method?: string; reference?: string }> = [];
+    const out: Array<{ amount: number; date: string; method?: string; reference?: string; repaymentDate?: string }> = [];
     for (const p of pay) {
         const type = Number(p.type);
         const method = PAYMENT_TYPE_TO_METHOD[type] ?? 'Others';
@@ -1171,7 +1189,9 @@ export async function getDocumentPayments(documentId: string): Promise<Array<{
         const date = p.date ? String(p.date).slice(0, 10) : new Date().toISOString().slice(0, 10);
         const amount = Number(p.price ?? p.amount ?? 0);
         if (amount <= 0) continue;
-        out.push({ amount, date, method, reference });
+        // צ'ק: השדה היחיד "תאריך" בחשבונית ירוקה = תאריך פירעון. אם API מחזיר dueDate — להשתמש בו.
+        const repaymentDate = type === 2 ? (p.dueDate ? String(p.dueDate).slice(0, 10) : date) : undefined;
+        out.push({ amount, date, method, reference, repaymentDate });
     }
     return out;
 }

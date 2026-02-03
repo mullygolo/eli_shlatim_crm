@@ -38,7 +38,15 @@ router.get('/paginated', async (req, res) => {
 
 router.post('/', async (req, res) => {
     try {
-        const customer = await createCustomer(req.body);
+        let customer;
+        try {
+            customer = await createCustomer(req.body);
+        } catch (err: any) {
+            if (err?.code === 'DUPLICATE_CUSTOMER') {
+                return res.status(409).json({ error: 'לקוח עם אותו שם ו/או ח.פ כבר קיים במערכת.', code: 'DUPLICATE_CUSTOMER' });
+            }
+            throw err;
+        }
         
         // Sync to GreenInvoice if enabled
         if (process.env.GREENINVOICE_SYNC_ENABLED === 'true' && !customer.greenInvoiceClientId) {
@@ -156,12 +164,14 @@ router.post('/sync-from-greeninvoice', async (req, res) => {
                 console.log('Sample client data:', JSON.stringify(giClient, null, 2));
             }
             try {
+                const displayNameNorm = (displayName || '').trim().toLowerCase();
                 let existingCustomer = existingCustomers.find(c => c.greenInvoiceClientId === giClient.id);
                 if (!existingCustomer) {
-                    existingCustomer = existingCustomers.find(c =>
-                        c.name.toLowerCase() === displayName.toLowerCase() ||
-                        (c.businessId && displayName.includes(c.businessId))
-                    );
+                    existingCustomer = existingCustomers.find(c => {
+                        const nameMatch = (c.name || '').trim().toLowerCase() === displayNameNorm;
+                        const hpMatch = c.businessId && (giClient as any).taxId && String((giClient as any).taxId).trim() === (c.businessId || '').trim();
+                        return nameMatch || hpMatch;
+                    });
                 }
 
                 if (existingCustomer) {

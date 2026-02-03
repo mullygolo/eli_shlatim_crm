@@ -37,6 +37,18 @@
         <p class="text-slate-400 text-sm">אם ההודעה לא נעלמת אחרי כמה שניות, פתח קונסולה (F12) ובדוק שגיאות.</p>
       </div>
     </div>
+    <script>
+      // If React hasn't replaced #root after 8s, show a hint (script error or server down)
+      setTimeout(function() {
+        var root = document.getElementById('root');
+        if (root && root.querySelector('p') && root.querySelector('p').textContent.indexOf('טוען') !== -1) {
+          root.innerHTML = '<div class="min-h-screen flex flex-col items-center justify-center gap-3 p-6" style="font-family: Rubik, sans-serif;" dir="rtl">' +
+            '<p class="text-amber-700 font-medium">הטעינה לא הושלמה.</p>' +
+            '<p class="text-slate-500 text-sm text-center max-w-md">ודא שהשרת רץ (run-server.bat, פורט 3002) ופתח את הקונסולה (F12) לשגיאות.</p>' +
+            '<button onclick="location.reload()" class="mt-2 px-4 py-2 bg-primary text-white rounded-md">רענן דף</button></div>';
+        }
+      }, 8000);
+    </script>
     <script type="module" src="/index.tsx"></script>
   </body>
 </html>

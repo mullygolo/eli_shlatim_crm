@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
-import { getEmployees, updateEmployee, getDb, deserializeDates } from '../services/mongoService.js';
+import { getEmployees, updateEmployee, getDb, deserializeDates, createActivity } from '../services/mongoService.js';
 import { hashPassword, verifyPassword } from '../utils/password.js';
 import { Employee } from '../types.js';
 import { verifyToken, requireRole, AuthRequest } from '../middleware/auth.js';
@@ -80,6 +80,22 @@ router.post('/login', async (req: Request, res: Response) => {
         };
         await updateEmployee(updatedEmployee);
 
+        // Audit: log successful login
+        try {
+            await createActivity({
+                id: `act_${Date.now()}`,
+                description: 'התחברות למערכת',
+                timestamp: new Date(),
+                userId: employee.id,
+                username: employee.username,
+                action: 'login',
+                entityType: 'system',
+                metadata: req.ip ? { ip: req.ip } : undefined,
+            });
+        } catch (auditErr) {
+            console.error('Audit log login failed:', auditErr);
+        }
+
         // Return token and employee data (without passwordHash)
         res.json({
             token,
@@ -91,10 +107,24 @@ router.post('/login', async (req: Request, res: Response) => {
     }
 });
 
-// POST /api/auth/logout
-router.post('/logout', async (req: Request, res: Response) => {
-    // JWT is stateless, so logout is handled client-side
-    // This endpoint exists for consistency and future token blacklisting if needed
+// POST /api/auth/logout (optional: pass token to log logout server-side)
+router.post('/logout', verifyToken, async (req: AuthRequest, res: Response) => {
+    try {
+        if (req.user) {
+            await createActivity({
+                id: `act_${Date.now()}`,
+                description: 'התנתקות מהמערכת',
+                timestamp: new Date(),
+                userId: req.user.employeeId,
+                username: req.user.username,
+                action: 'logout',
+                entityType: 'system',
+                metadata: req.ip ? { ip: req.ip } : undefined,
+            });
+        }
+    } catch (auditErr) {
+        console.error('Audit log logout failed:', auditErr);
+    }
     res.json({ message: 'התנתקות בוצעה בהצלחה' });
 });
 

@@ -10,7 +10,7 @@ import * as mongoService from '../services/mongoService';
 interface SuppliersPageProps {
     suppliers: Supplier[];
     setSuppliers: React.Dispatch<React.SetStateAction<Supplier[]>>;
-    addActivity: (description: string) => void;
+    addActivity: (description: string, options?: import('../types').AddActivityOptions) => void;
     orders: Order[];
     setOrders: React.Dispatch<React.SetStateAction<Order[]>>; // New prop
     transactions?: Transaction[]; // Optional, for completeness if used
@@ -412,7 +412,7 @@ const SuppliersPage: React.FC<SuppliersPageProps> = ({ suppliers, setSuppliers, 
             .map(s => s.id === veteranId ? updatedVeteran : s)
         );
 
-        addActivity(`ספק ${victim.name} מוזג לתוך ${veteran.name}`);
+        addActivity(`ספק ${victim.name} מוזג לתוך ${veteran.name}`, { entityType: 'supplier', entityId: veteran.id, action: 'merge', metadata: { victimName: victim.name, targetName: veteran.name } });
         setDuplicateFound(null);
         setPendingNewSupplier(null);
         setIsMergeModalOpen(false);
@@ -424,7 +424,7 @@ const SuppliersPage: React.FC<SuppliersPageProps> = ({ suppliers, setSuppliers, 
     const handleSaveSupplier = async (supplier: Supplier) => {
         if (editingSupplier) {
             setSuppliers(prev => prev.map(s => s.id === supplier.id ? supplier : s));
-            addActivity(`ספק עודכן: ${supplier.name}`);
+            addActivity(`ספק עודכן: ${supplier.name}`, { entityType: 'supplier', entityId: supplier.id, action: 'update', metadata: { name: supplier.name } });
             setIsModalOpen(false);
             setEditingSupplier(null);
             // Refresh paginated suppliers after update
@@ -440,7 +440,7 @@ const SuppliersPage: React.FC<SuppliersPageProps> = ({ suppliers, setSuppliers, 
                 // Do NOT close modal yet, show warning
             } else {
                 setSuppliers(prev => [...prev, supplier]);
-                addActivity(`ספק חדש נוסף: ${supplier.name}`);
+                addActivity(`ספק חדש נוסף: ${supplier.name}`, { entityType: 'supplier', entityId: supplier.id, action: 'create', metadata: { name: supplier.name } });
                 setIsModalOpen(false);
                 setEditingSupplier(null);
                 // Refresh paginated suppliers after create
@@ -626,7 +626,7 @@ const SuppliersPage: React.FC<SuppliersPageProps> = ({ suppliers, setSuppliers, 
                             <button 
                                 onClick={() => {
                                     setSuppliers(prev => [...prev, pendingNewSupplier]);
-                                    addActivity(`ספק חדש נוסף: ${pendingNewSupplier.name} (למרות כפילות)`);
+                                    addActivity(`ספק חדש נוסף: ${pendingNewSupplier.name} (למרות כפילות)`, { entityType: 'supplier', entityId: pendingNewSupplier.id, action: 'create', metadata: { name: pendingNewSupplier.name } });
                                     setDuplicateFound(null);
                                     setPendingNewSupplier(null);
                                     setIsModalOpen(false);
@@ -643,7 +643,7 @@ const SuppliersPage: React.FC<SuppliersPageProps> = ({ suppliers, setSuppliers, 
                                         contacts: [...duplicateFound.contacts, ...pendingNewSupplier.contacts]
                                     };
                                     setSuppliers(prev => prev.map(s => s.id === duplicateFound.id ? updatedVeteran : s));
-                                    addActivity(`ספק חדש מוזג לתוך הקיים: ${duplicateFound.name}`);
+                                    addActivity(`ספק חדש מוזג לתוך הקיים: ${duplicateFound.name}`, { entityType: 'supplier', entityId: duplicateFound.id, action: 'merge', metadata: { name: duplicateFound.name } });
                                     setDuplicateFound(null);
                                     setPendingNewSupplier(null);
                                     setIsModalOpen(false);

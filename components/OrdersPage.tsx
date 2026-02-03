@@ -8,6 +8,7 @@ import SendItemToSuppliersModal from './SendItemToSuppliersModal';
 import SendOrderToSuppliersModal from './SendOrderToSuppliersModal';
 import CreateDocumentModal from './CreateDocumentModal';
 import DocumentViewer from './DocumentViewer';
+import OrdersImportModal from './OrdersImportModal';
 import { calculateOrderTotals, calculateDueDate } from '../utils/calculations';
 import MultiSelectFilter from './MultiSelectFilter';
 import * as mongoService from '../services/mongoService';
@@ -25,7 +26,7 @@ interface OrdersPageProps {
     suppliers: Supplier[];
     setSuppliers: React.Dispatch<React.SetStateAction<Supplier[]>>;
     employees: Employee[];
-    addActivity: (description: string) => void;
+    addActivity: (description: string, options?: import('../types').AddActivityOptions) => void;
     initialOpenOrderId?: string | null;
     onOrderOpened?: () => void;
     openNewOrderRequest?: boolean;
@@ -614,7 +615,7 @@ const OrderForm: React.FC<{
     onSave: (order: Order, keepOpen?: boolean) => void;
     onDraftCreate: (order: Order) => void;
     onCancel: () => void;
-    addActivity: (description: string) => void;
+    addActivity: (description: string, options?: import('../types').AddActivityOptions) => void;
     onSwitchOrder: (orderId: string) => void; 
     statusConfigs: OrderStatusConfiguration[];
     getNextOrderNumber: () => string;
@@ -772,15 +773,23 @@ const OrderForm: React.FC<{
             }
 
             const result = await response.json();
-            
-            // Update order with document IDs
+            const docLabel = getDocumentTypeLabel(documentType);
+            const docLogEvent: TimelineEvent = {
+                id: `log_doc_${Date.now()}`,
+                timestamp: new Date(),
+                user: employees.find(emp => emp.id === order.employeeId)?.name || 'מערכת',
+                type: 'LOG',
+                content: `נוצר מסמך ${docLabel} בחשבונית ירוקה`
+            };
+            // Update order with document IDs and add timeline event
             const updatedOrder: Order = {
                 ...order,
-                ...result.orderUpdates
+                ...result.orderUpdates,
+                timeline: [docLogEvent, ...(order.timeline || [])]
             };
 
             await onSave(updatedOrder, true);
-            addActivity(`נוצר מסמך ${getDocumentTypeLabel(documentType)} בחשבונית ירוקה`);
+            addActivity(`נוצר מסמך ${docLabel} בחשבונית ירוקה`, { entityType: 'order', entityId: order.id, action: 'update', metadata: { orderNumber: order.orderNumber, docType: docLabel } });
             setIsCreateDocumentModalOpen(false);
             alert('המסמך נוצר בהצלחה בחשבונית ירוקה!');
         } else {
@@ -825,7 +834,19 @@ const OrderForm: React.FC<{
             }
 
             const result = await response.json();
-            const updatedOrder: Order = { ...order, ...result.orderUpdates };
+            const draftDocLabel = getDocumentTypeLabel(documentType);
+            const draftLogEvent: TimelineEvent = {
+                id: `log_draft_${Date.now()}`,
+                timestamp: new Date(),
+                user: employees.find(emp => emp.id === order.employeeId)?.name || 'מערכת',
+                type: 'LOG',
+                content: `נוצרה טיוטת מסמך ${draftDocLabel} בחשבונית ירוקה`
+            };
+            const updatedOrder: Order = {
+                ...order,
+                ...result.orderUpdates,
+                timeline: [draftLogEvent, ...(order.timeline || [])]
+            };
             await onSave(updatedOrder, true);
 
             if (result.editUrl) {
@@ -1043,7 +1064,7 @@ const OrderForm: React.FC<{
                         payments: [...(prev.payments || []), ...newPayments]
                     }));
                     
-                    addActivity(`סונכרנו ${newPayments.length} תשלומים מחשבונית ירוקה`);
+                    addActivity(`סונכרנו ${newPayments.length} תשלומים מחשבונית ירוקה`, { entityType: 'order', entityId: order.id, action: 'sync', metadata: { orderNumber: order.orderNumber, paymentsCount: newPayments.length } });
                 }
             } catch (error) {
                 console.error('Error syncing payments from GreenInvoice:', error);
@@ -1209,6 +1230,11 @@ const OrderForm: React.FC<{
         
         const targetPayment = formData.payments.find(p => p.id === paymentIdToDelete);
         const user = employees.find(emp => emp.id === formData.employeeId)?.name || 'מערכת';
+        const payDateStr = targetPayment?.date ? new Date(targetPayment.date).toLocaleDateString('he-IL') : '';
+        const parts = [`תשלום הוסר: ₪${targetPayment?.amount.toLocaleString()} (${targetPayment?.method})`, payDateStr];
+        if (targetPayment?.reference) parts.push(`אסמכתא: ${targetPayment.reference}`);
+        if (targetPayment?.repaymentDate) parts.push(`תאריך פירעון: ${new Date(targetPayment.repaymentDate).toLocaleDateString('he-IL')}`);
+        const content = parts.join(' · ');
 
         setFormData(prev => ({
             ...prev,
@@ -1218,7 +1244,7 @@ const OrderForm: React.FC<{
                 timestamp: new Date(),
                 user,
                 type: 'LOG',
-                content: `תשלום הוסר: ₪${targetPayment?.amount.toLocaleString()} (${targetPayment?.method})`
+                content
             }, ...prev.timeline]
         }));
         setPaymentIdToDelete(null);
@@ -1634,6 +1660,16 @@ const OrderForm: React.FC<{
             const newContact = customer?.contacts.find(c => c.id === newOrder.contactId)?.name || 'לא נבחר';
             changes.push({ field: 'contactId', label: 'איש קשר', oldValue: oldContact, newValue: newContact, action: 'UPDATED' });
         }
+        if (oldOrder.customerId !== newOrder.customerId) {
+            const oldC = customers.find(c => c.id === oldOrder.customerId)?.name || 'לא נבחר';
+            const newC = customers.find(c => c.id === newOrder.customerId)?.name || 'לא נבחר';
+            changes.push({ field: 'customerId', label: 'לקוח', oldValue: oldC, newValue: newC, action: 'UPDATED' });
+        }
+        if ((oldOrder.supplierId ?? '') !== (newOrder.supplierId ?? '')) {
+            const oldS = suppliers.find(s => s.id === oldOrder.supplierId)?.name || 'לא נבחר';
+            const newS = suppliers.find(s => s.id === newOrder.supplierId)?.name || 'לא נבחר';
+            changes.push({ field: 'supplierId', label: 'ספק ראשי', oldValue: oldS, newValue: newS, action: 'UPDATED' });
+        }
         
         if (new Date(oldOrder.date).toDateString() !== new Date(newOrder.date).toDateString()) {
             changes.push({ 
@@ -1650,6 +1686,21 @@ const OrderForm: React.FC<{
             if (oldVal !== newVal) {
                 changes.push({ field: 'dealStartDate', label: 'תאריך אישור עסקה', oldValue: oldVal, newValue: newVal, action: 'UPDATED' });
             }
+        }
+
+        // GreenInvoice document links (show "שויך" / "לא שויך" only, not document IDs)
+        const gi = (v: string | undefined) => (v && v.trim() ? 'שויך' : 'לא שויך');
+        if ((oldOrder.greenInvoiceId ?? '') !== (newOrder.greenInvoiceId ?? '')) {
+            changes.push({ field: 'greenInvoiceId', label: 'חשבונית ירוקה – חשבונית', oldValue: gi(oldOrder.greenInvoiceId), newValue: gi(newOrder.greenInvoiceId), action: 'UPDATED' });
+        }
+        if ((oldOrder.greenInvoiceReceiptId ?? '') !== (newOrder.greenInvoiceReceiptId ?? '')) {
+            changes.push({ field: 'greenInvoiceReceiptId', label: 'חשבונית ירוקה – קבלה', oldValue: gi(oldOrder.greenInvoiceReceiptId), newValue: gi(newOrder.greenInvoiceReceiptId), action: 'UPDATED' });
+        }
+        if ((oldOrder.greenInvoiceCreditId ?? '') !== (newOrder.greenInvoiceCreditId ?? '')) {
+            changes.push({ field: 'greenInvoiceCreditId', label: 'חשבונית ירוקה – זיכוי', oldValue: gi(oldOrder.greenInvoiceCreditId), newValue: gi(newOrder.greenInvoiceCreditId), action: 'UPDATED' });
+        }
+        if ((oldOrder.greenInvoiceEstimateId ?? '') !== (newOrder.greenInvoiceEstimateId ?? '')) {
+            changes.push({ field: 'greenInvoiceEstimateId', label: 'חשבונית ירוקה – הערכה', oldValue: gi(oldOrder.greenInvoiceEstimateId), newValue: gi(newOrder.greenInvoiceEstimateId), action: 'UPDATED' });
         }
 
         const oldItemsMap = new Map(oldOrder.lineItems.map(i => [i.id, i]));
@@ -1756,6 +1807,99 @@ const OrderForm: React.FC<{
         oldOrder.attachments.forEach(att => {
             if (!newAttsSet.has(att.id)) {
                 changes.push({ field: 'attachments', label: 'קובץ הוסר', oldValue: att.fileName, action: 'REMOVED' });
+            }
+        });
+
+        // Payments: add/remove/update with full detail (amount, method, reference, repaymentDate, date)
+        const paymentDateStr = (d: Date | string | undefined) => d ? new Date(d).toLocaleDateString('he-IL') : '—';
+        const paymentSummary = (p: CustomerPayment) => {
+            const parts = [`₪${(p.amount ?? 0).toLocaleString()}`, p.method || '—', paymentDateStr(p.date)];
+            if (p.reference) parts.push(`אסמכתא: ${p.reference}`);
+            if (p.repaymentDate) parts.push(`פירעון: ${paymentDateStr(p.repaymentDate)}`);
+            return parts.join(', ');
+        };
+        const oldPayments = oldOrder.payments || [];
+        const newPayments = newOrder.payments || [];
+        const oldPayMap = new Map(oldPayments.map(p => [p.id, p]));
+        const newPayMap = new Map(newPayments.map(p => [p.id, p]));
+
+        oldPayments.forEach(oldPay => {
+            const newPay = newPayMap.get(oldPay.id);
+            if (!newPay) {
+                changes.push({
+                    field: 'payments',
+                    label: 'תשלום הוסר',
+                    oldValue: paymentSummary(oldPay),
+                    action: 'REMOVED'
+                });
+            } else {
+                if (oldPay.amount !== newPay.amount) {
+                    changes.push({
+                        field: 'payments',
+                        label: 'תשלום – סכום',
+                        subItemLabel: `₪${oldPay.amount.toLocaleString()} ${paymentDateStr(oldPay.date)}`,
+                        oldValue: `₪${oldPay.amount.toLocaleString()}`,
+                        newValue: `₪${newPay.amount.toLocaleString()}`,
+                        action: 'UPDATED'
+                    });
+                }
+                if ((oldPay.method ?? '') !== (newPay.method ?? '')) {
+                    changes.push({
+                        field: 'payments',
+                        label: 'תשלום – אמצעי תשלום',
+                        subItemLabel: `₪${oldPay.amount.toLocaleString()} ${paymentDateStr(oldPay.date)}`,
+                        oldValue: oldPay.method ?? '—',
+                        newValue: newPay.method ?? '—',
+                        action: 'UPDATED'
+                    });
+                }
+                const oldRef = (oldPay.reference ?? '').trim();
+                const newRef = (newPay.reference ?? '').trim();
+                if (oldRef !== newRef) {
+                    changes.push({
+                        field: 'payments',
+                        label: 'תשלום – אסמכתא (מס\' צ\'ק)',
+                        subItemLabel: `₪${oldPay.amount.toLocaleString()} ${paymentDateStr(oldPay.date)}`,
+                        oldValue: oldRef || '—',
+                        newValue: newRef || '—',
+                        action: 'UPDATED'
+                    });
+                }
+                const oldRep = oldPay.repaymentDate ? new Date(oldPay.repaymentDate).toISOString().split('T')[0] : '';
+                const newRep = newPay.repaymentDate ? new Date(newPay.repaymentDate).toISOString().split('T')[0] : '';
+                if (oldRep !== newRep) {
+                    changes.push({
+                        field: 'payments',
+                        label: 'תשלום – תאריך פירעון',
+                        subItemLabel: `₪${oldPay.amount.toLocaleString()} ${paymentDateStr(oldPay.date)}`,
+                        oldValue: paymentDateStr(oldPay.repaymentDate),
+                        newValue: paymentDateStr(newPay.repaymentDate),
+                        action: 'UPDATED'
+                    });
+                }
+                const oldDate = oldPay.date ? new Date(oldPay.date).toISOString().split('T')[0] : '';
+                const newDate = newPay.date ? new Date(newPay.date).toISOString().split('T')[0] : '';
+                if (oldDate !== newDate) {
+                    changes.push({
+                        field: 'payments',
+                        label: 'תשלום – תאריך',
+                        subItemLabel: `₪${oldPay.amount.toLocaleString()}`,
+                        oldValue: paymentDateStr(oldPay.date),
+                        newValue: paymentDateStr(newPay.date),
+                        action: 'UPDATED'
+                    });
+                }
+            }
+        });
+
+        newPayments.forEach(newPay => {
+            if (!oldPayMap.has(newPay.id)) {
+                changes.push({
+                    field: 'payments',
+                    label: 'תשלום נוסף',
+                    newValue: paymentSummary(newPay),
+                    action: 'ADDED'
+                });
             }
         });
 
@@ -2822,10 +2966,20 @@ const OrderForm: React.FC<{
                                 });
                                 const data = await res.json();
                                 if (!res.ok) throw new Error(data.error || 'שגיאה בשיוך מסמך');
-                                if (data.orderUpdates?.payments) {
-                                    setFormData(prev => ({ ...prev, payments: data.orderUpdates.payments }));
-                                }
-                                addActivity(`שויך מסמך חשבונית ירוקה להזמנה (${data.paymentsAdded || 0} תשלומים)`);
+                                const paymentsAdded = data.paymentsAdded ?? 0;
+                                const linkLogEvent: TimelineEvent = {
+                                    id: `log_link_${Date.now()}`,
+                                    timestamp: new Date(),
+                                    user: employees.find(emp => emp.id === order.employeeId)?.name || 'מערכת',
+                                    type: 'LOG',
+                                    content: `שויך מסמך חשבונית ירוקה להזמנה (${paymentsAdded} תשלומים)`
+                                };
+                                setFormData(prev => ({
+                                    ...prev,
+                                    ...(data.orderUpdates?.payments && { payments: data.orderUpdates.payments }),
+                                    timeline: [linkLogEvent, ...prev.timeline]
+                                }));
+                                addActivity(`שויך מסמך חשבונית ירוקה להזמנה (${paymentsAdded} תשלומים)`, { entityType: 'order', entityId: order.id, action: 'update', metadata: { orderNumber: order.orderNumber, paymentsAdded } });
                             }}
                         />
                     </div>
@@ -3153,6 +3307,7 @@ const OrderForm: React.FC<{
 
 const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLocal, customers, setCustomers, suppliers, setSuppliers, employees, addActivity, initialOpenOrderId, onOrderOpened, openNewOrderRequest, onClearedOpenNewOrderRequest, statusConfigs, getNextOrderNumber, vatRate }) => {
     const [isModalOpen, setIsModalOpen] = useState(false);
+    const [isImportModalOpen, setIsImportModalOpen] = useState(false);
     const [editingOrder, setEditingOrder] = useState<Order | null>(null);
     const [orderFormHeaderContent, setOrderFormHeaderContent] = useState<React.ReactNode>(null);
     const [searchTerm, setSearchTerm] = useState('');
@@ -3222,50 +3377,55 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
         const originalOrder = paginatedOrders.find(o => o.id === orderId) || orders.find(o => o.id === orderId);
         if (!originalOrder || originalOrder.orderStatus === newStatus) return;
         
-            const user = employees.find(emp => emp.id === originalOrder.employeeId)?.name || 'מערכת';
-            const config = statusConfigs.find(c => c.label === newStatus);
-            const isNowActiveDeal = config ? config.isActiveDeal : false;
-            let newDealStartDate = originalOrder.dealStartDate;
-            if (isNowActiveDeal && !newDealStartDate) {
-                newDealStartDate = new Date();
-            }
-            const logEvent: TimelineEvent = {
-                id: `log_${Date.now()}`,
-                timestamp: new Date(),
-                content: `שינוי סטטוס`,
-                user: user,
-                type: 'LOG',
-                changes: [
-                    { field: 'orderStatus', label: 'סטטוס', oldValue: originalOrder.orderStatus, newValue: newStatus, action: 'UPDATED' }
-                ]
-            };
-            const newStatusHistoryEntry = { status: newStatus, startDate: new Date() };
-            const updatedOrder: Order = {
-                ...originalOrder,
-                orderStatus: newStatus,
-                dealStartDate: newDealStartDate, 
-                timeline: [logEvent, ...originalOrder.timeline],
-                statusHistory: [...(originalOrder.statusHistory || []), newStatusHistoryEntry],
-            };
-        
-        try {
-            // Update on server
-            await mongoService.updateOrder(updatedOrder);
-            // Update local state (no double sync)
-            setOrdersLocal(prevOrders => {
-                const orderIndex = prevOrders.findIndex(o => o.id === orderId);
-                if (orderIndex === -1) return prevOrders;
-                const newOrders = [...prevOrders];
-                newOrders[orderIndex] = updatedOrder;
-                return newOrders;
-            });
-            addActivity(`סטטוס הזמנה ${originalOrder.orderNumber} שונה ל: ${newStatus}`);
-            setPaginatedOrders(prev => prev.map(o => o.id === orderId ? updatedOrder : o));
-            refetchOrders(true);
-        } catch (error) {
-            console.error('Error updating order status:', error);
-            alert('שגיאה בעדכון סטטוס הזמנה');
+        const user = employees.find(emp => emp.id === originalOrder.employeeId)?.name || 'מערכת';
+        const config = statusConfigs.find(c => c.label === newStatus);
+        const isNowActiveDeal = config ? config.isActiveDeal : false;
+        let newDealStartDate = originalOrder.dealStartDate;
+        if (isNowActiveDeal && !newDealStartDate) {
+            newDealStartDate = new Date();
         }
+        const logEvent: TimelineEvent = {
+            id: `log_${Date.now()}`,
+            timestamp: new Date(),
+            content: `שינוי סטטוס`,
+            user: user,
+            type: 'LOG',
+            changes: [
+                { field: 'orderStatus', label: 'סטטוס', oldValue: originalOrder.orderStatus, newValue: newStatus, action: 'UPDATED' }
+            ]
+        };
+        const newStatusHistoryEntry = { status: newStatus, startDate: new Date() };
+        const updatedOrder: Order = {
+            ...originalOrder,
+            orderStatus: newStatus,
+            dealStartDate: newDealStartDate, 
+            timeline: [logEvent, ...originalOrder.timeline],
+            statusHistory: [...(originalOrder.statusHistory || []), newStatusHistoryEntry],
+        };
+        
+        // Pattern: Server is source of truth. Optimistic update for instant feedback; on success replace with server response; on failure revert.
+        setOrdersLocal(prevOrders => {
+            const orderIndex = prevOrders.findIndex(o => o.id === orderId);
+            if (orderIndex === -1) return prevOrders;
+            const newOrders = [...prevOrders];
+            newOrders[orderIndex] = updatedOrder;
+            return newOrders;
+        });
+        addActivity(`סטטוס הזמנה ${originalOrder.orderNumber} שונה ל: ${newStatus}`, { entityType: 'order', entityId: orderId, action: 'status_change', metadata: { orderNumber: originalOrder.orderNumber, oldStatus: originalOrder.orderStatus, newStatus } });
+        setPaginatedOrders(prev => prev.map(o => o.id === orderId ? updatedOrder : o));
+        
+        mongoService.updateOrder(updatedOrder)
+            .then((savedOrder) => {
+                // Use server response as source of truth (e.g. normalized dates)
+                setOrdersLocal(prev => prev.map(o => o.id === orderId ? savedOrder : o));
+                setPaginatedOrders(prev => prev.map(o => o.id === orderId ? savedOrder : o));
+            })
+            .catch((error) => {
+                console.error('Error updating order status:', error);
+                alert('שגיאה בעדכון סטטוס הזמנה');
+                setOrdersLocal(prev => prev.map(o => o.id === orderId ? originalOrder : o));
+                setPaginatedOrders(prev => prev.map(o => o.id === orderId ? originalOrder : o));
+            });
     };
 
     const handleDraftCreate = (draftOrder: Order) => {
@@ -3276,6 +3436,15 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
     const refetchOrders = async (silent: boolean = false) => {
         if (!silent) setLoading(true);
         try {
+            const includeCompleted =
+                orderStatusFilter.length === 0
+                    ? true
+                    : showCompletedOrders || Boolean(
+                        statusConfigs && orderStatusFilter.some(s => {
+                            const config = statusConfigs.find(c => c.label === s);
+                            return config?.isCompleted === true;
+                        })
+                    );
             const filters = {
                 customerFilter,
                 supplierFilter,
@@ -3289,7 +3458,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                 dateFilterType,
                 searchTerm,
                 isCollectionMode,
-                showCompletedOrders
+                showCompletedOrders: includeCompleted
             };
             const result = await mongoService.getOrdersPaginated(filters, currentPage, pageSize);
             setPaginatedOrders(result.orders);
@@ -3375,14 +3544,14 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
             if (exists) {
                 // Update existing order on server
                 savedOrder = await mongoService.updateOrder(order);
-                addActivity(`הזמנה עודכנה: ${order.description}`);
+                addActivity(`הזמנה עודכנה: ${order.description}`, { entityType: 'order', entityId: order.id, action: 'update', metadata: { orderNumber: order.orderNumber } });
             } else {
                 // Create new order on server
                 savedOrder = await mongoService.createOrder(order);
-                addActivity(`הזמנה חדשה נוספה: ${order.description}`);
+                addActivity(`הזמנה חדשה נוספה: ${order.description}`, { entityType: 'order', entityId: savedOrder.id, action: 'create', metadata: { orderNumber: savedOrder.orderNumber } });
             }
             
-            // Update local state immediately (no wait; avoid double API call via setOrdersLocal)
+            // Update global orders state so CustomersPage "היסטוריית הזמנות" and other consumers see the change (e.g. customerId)
             setOrdersLocal(prevOrders => {
                 const exists = prevOrders.some(o => o.id === savedOrder.id);
                 if (exists) {
@@ -3399,8 +3568,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                 return prev;
             });
             if (!exists) setTotalCount(c => c + 1);
-            // Refresh totals and list in background (non-blocking)
-            refetchOrders(true);
+            // No refetch: server response is source of truth; list already updated above.
             
         if (keepOpen) {
                 setEditingOrder(savedOrder);
@@ -3456,8 +3624,25 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
         return parts.join(', ');
     };
 
-    // Use paginatedOrders as filteredOrders (filtering is done on server)
-    const filteredOrders = paginatedOrders;
+    // Deduplicate by orderNumber on client so the same order never appears twice (e.g. ORD-1005). Keep latest by date per normalized orderNumber.
+    const filteredOrders = useMemo(() => {
+        const byKey = new Map<string, Order>();
+        const dateKey = dateFilterType === 'DEAL_DATE' ? 'dealStartDate' : 'date';
+        for (const order of paginatedOrders) {
+            const raw = (order.orderNumber != null && order.orderNumber !== '') ? String(order.orderNumber).trim() : '';
+            const key = raw !== '' ? raw.toUpperCase() : (order.id || '');
+            if (!key) continue;
+            const existing = byKey.get(key);
+            if (!existing) {
+                byKey.set(key, order);
+            } else {
+                const dNew = order[dateKey] ? new Date(order[dateKey] as string).getTime() : 0;
+                const dOld = existing[dateKey] ? new Date(existing[dateKey] as string).getTime() : 0;
+                if (dNew >= dOld) byKey.set(key, order);
+            }
+        }
+        return Array.from(byKey.values());
+    }, [paginatedOrders, dateFilterType]);
     
     return (
         <div>
@@ -3544,6 +3729,14 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                                         {showCompletedOrders && <svg className="w-3 h-3 text-white" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" /></svg>}
                                     </span>
                                     הצג עסקאות שהסתיימו
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setIsImportModalOpen(true)}
+                                    className="flex items-center px-4 py-2 rounded-md text-sm font-medium border border-slate-300 bg-white text-slate-600 hover:bg-slate-50"
+                                >
+                                    <DownloadIcon className="w-5 h-5 me-2" />
+                                    ייבוא מטבלת שליטה (CSV)
                                 </button>
                              </div>
                              
@@ -3881,6 +4074,12 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                         setHeaderContent={setOrderFormHeaderContent}
                     />
                 </Modal>
+            )}
+            {isImportModalOpen && (
+                <OrdersImportModal
+                    onClose={() => setIsImportModalOpen(false)}
+                    onSuccess={() => refetchOrders()}
+                />
             )}
         </div>
     );

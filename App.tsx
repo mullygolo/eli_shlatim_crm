@@ -1,6 +1,6 @@
 
 import React, { useState, useCallback, useEffect } from 'react';
-import { Customer, Order, Activity, Supplier, Employee, Page, OrderStatusConfiguration, FixedExpense, VariableExpense, Loan, EquityInvestment, Debt, AttendanceRecord, ManualEvent, PayrollOverrideMap, Receivable } from './types';
+import { Customer, Order, Activity, AddActivityOptions, Supplier, Employee, Page, OrderStatusConfiguration, FixedExpense, VariableExpense, Loan, EquityInvestment, Debt, AttendanceRecord, ManualEvent, PayrollOverrideMap, Receivable } from './types';
 import { useAuth } from './contexts/AuthContext';
 import ProtectedRoute from './components/ProtectedRoute';
 import {
@@ -294,11 +294,17 @@ const App: React.FC = () => {
         setOpenNewOrderRequest(true);
     }, []);
 
-    const addActivity = useCallback(async (description: string) => {
+    const addActivity = useCallback(async (description: string, options?: AddActivityOptions) => {
         const newActivity: Activity = {
             id: `act_${Date.now()}`,
             description,
             timestamp: new Date(),
+            ...(options && {
+                entityType: options.entityType,
+                entityId: options.entityId,
+                action: options.action,
+                metadata: options.metadata,
+            }),
         };
         try {
             await createActivity(newActivity);
@@ -478,6 +484,7 @@ const App: React.FC = () => {
                             setAttendanceRecords={setAttendanceRecordsWithSync}
                             orders={orders}
                             vatRateHistory={vatRateHistory}
+                            onNavigateToOrder={handleNavigateToOrder}
                         />;
             case 'PriceList':
                 return <PriceListPage suppliers={suppliers} />;

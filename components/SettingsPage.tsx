@@ -5,11 +5,13 @@ import { PlusIcon, EditIcon, DeleteIcon, LockIcon, SettingsIcon } from './icons'
 import Modal from './Modal';
 import EmployeesPage from './EmployeesPage';
 import VatSettingsSection from './VatSettingsSection';
+import TipTapEditor from './TipTapEditor';
+import LogsAndAuditTab from './LogsAndAuditTab';
 
 interface SettingsPageProps {
     statusConfigs: OrderStatusConfiguration[];
     setStatusConfigs: React.Dispatch<React.SetStateAction<OrderStatusConfiguration[]>>;
-    addActivity: (description: string) => void;
+    addActivity: (description: string, options?: import('../types').AddActivityOptions) => void;
     employees: Employee[];
     setEmployees: React.Dispatch<React.SetStateAction<Employee[]>>;
     vatRate: number;
@@ -20,6 +22,7 @@ interface SettingsPageProps {
     setAttendanceRecords: React.Dispatch<React.SetStateAction<AttendanceRecord[]>>;
     orders: Order[];
     vatRateHistory?: any[];
+    onNavigateToOrder?: (orderId: string) => void;
 }
 
 const StatusForm: React.FC<{
@@ -239,11 +242,12 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
     attendanceRecords,
     setAttendanceRecords,
     orders,
-    vatRateHistory
+    vatRateHistory,
+    onNavigateToOrder
 }) => {
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingConfig, setEditingConfig] = useState<OrderStatusConfiguration | null>(null);
-    const [activeTab, setActiveTab] = useState<'statuses' | 'employees' | 'general'>('statuses');
+    const [activeTab, setActiveTab] = useState<'statuses' | 'employees' | 'general' | 'logs'>('statuses');
     const [localSystemMessage, setLocalSystemMessage] = useState(systemMessage);
     const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
     
@@ -270,7 +274,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
         }
         if (window.confirm(`האם אתה בטוח שברצונך למחוק את הסטטוס "${config?.label}"?`)) {
             setStatusConfigs(prev => prev.filter(c => c.id !== id));
-            addActivity(`סטטוס נמחק: ${config?.label}`);
+            addActivity(`סטטוס נמחק: ${config?.label}`, { entityType: 'settings', action: 'delete', metadata: { label: config?.label, configId: id } });
         }
     };
 
@@ -290,12 +294,12 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
 
             if (editingConfig) {
                 nextConfigs = nextConfigs.map(c => c.id === config.id ? config : c);
-                addActivity(`הגדרות סטטוס עודכנו: ${config.label}`);
+                addActivity(`הגדרות סטטוס עודכנו: ${config.label}`, { entityType: 'settings', action: 'update', metadata: { label: config.label, configId: config.id } });
             } else {
                 const maxIndex = Math.max(...nextConfigs.map(c => c.orderIndex), 0);
                 config.orderIndex = maxIndex + 1;
                 nextConfigs.push(config);
-                addActivity(`סטטוס חדש נוסף: ${config.label}`);
+                addActivity(`סטטוס חדש נוסף: ${config.label}`, { entityType: 'settings', action: 'create', metadata: { label: config.label, configId: config.id } });
             }
             
             return nextConfigs;
@@ -338,6 +342,12 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
                     className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${activeTab === 'general' ? 'bg-primary text-white shadow' : 'text-slate-600 hover:bg-slate-50'}`}
                 >
                     כללי
+                </button>
+                <button
+                    onClick={() => setActiveTab('logs')}
+                    className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${activeTab === 'logs' ? 'bg-primary text-white shadow' : 'text-slate-600 hover:bg-slate-50'}`}
+                >
+                    לוגים ותיעוד
                 </button>
             </div>
 
@@ -440,6 +450,16 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
                 </>
             )}
 
+            {activeTab === 'logs' && (
+                <>
+                    <div className="mb-4">
+                        <h3 className="text-lg font-bold text-slate-800">לוגים ותיעוד פעולות</h3>
+                        <p className="text-slate-500 text-sm">תיעוד כל הפעולות והשינויים במערכת עם סינון וייצוא</p>
+                    </div>
+                    <LogsAndAuditTab employees={employees} onNavigateToOrder={onNavigateToOrder} />
+                </>
+            )}
+
             {activeTab === 'general' && (
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                     <VatSettingsSection
@@ -453,20 +473,13 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
                         <h3 className="text-lg font-bold text-slate-800 mb-4">הודעות מערכת</h3>
                         <div>
                             <label className="block text-sm font-medium text-slate-700 mb-1">טקסט הודעה ללוח הבקרה</label>
-                            <textarea
-                                rows={4}
+                            <TipTapEditor
                                 value={localSystemMessage}
-                                onChange={(e) => {
-                                    const newValue = e.target.value;
-                                    // Update local state immediately for responsive UI
+                                onChange={(newValue) => {
                                     setLocalSystemMessage(newValue);
-                                    
-                                    // Clear existing timeout
                                     if (saveTimeoutRef.current) {
                                         clearTimeout(saveTimeoutRef.current);
                                     }
-                                    
-                                    // Save to MongoDB after 1 second of no typing (debounce)
                                     saveTimeoutRef.current = setTimeout(async () => {
                                         try {
                                             await setSystemMessage(newValue);
@@ -478,7 +491,6 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
                                     }, 1000);
                                 }}
                                 onBlur={async () => {
-                                    // Save immediately when user leaves the field
                                     if (saveTimeoutRef.current) {
                                         clearTimeout(saveTimeoutRef.current);
                                     }
@@ -492,10 +504,11 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
                                         }
                                     }
                                 }}
-                                className="block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm"
                                 placeholder="הזן כאן הודעה שתופיע לכל המשתמשים בראש לוח הבקרה..."
+                                dir="rtl"
+                                className="mb-1"
                             />
-                            <p className="text-xs text-slate-500 mt-1">ההודעה תישמר אוטומטית כשתסיים להקליד</p>
+                            <p className="text-xs text-slate-500 mt-1">ההודעה תישמר אוטומטית. ניתן להשתמש במודגש, נטוי, רשימות, כותרות וקישורים.</p>
                         </div>
                     </div>
                 </div>

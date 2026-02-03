@@ -13,11 +13,15 @@ interface CustomersPageProps {
     setCustomersLocal: (updater: (prev: Customer[]) => Customer[]) => void;
     orders: Order[];
     setOrders: React.Dispatch<React.SetStateAction<Order[]>>;
-    addActivity: (description: string) => void;
+    addActivity: (description: string, options?: import('../types').AddActivityOptions) => void;
     onNavigateToOrder: (orderId: string) => void;
     statusConfigs: OrderStatusConfiguration[];
     vatRate: number;
 }
+
+// Logical key for customer deduplication (must match server)
+const customerLogicalKey = (c: Customer & { debt?: number }) =>
+    (c.name || '').trim().toLowerCase() + '|' + (c.businessId || '').trim().toLowerCase();
 
 // Helper to check for duplicates
 const findDuplicateCustomer = (customers: Customer[], name: string, hp?: string, email?: string, phone?: string) => {
@@ -34,29 +38,65 @@ const findDuplicateCustomer = (customers: Customer[], name: string, hp?: string,
     });
 };
 
-const LinkDocumentForm: React.FC<{
+// Enhanced document linking with list selection, allocation editing, and validation
+interface DocumentLinkingState {
+    selectedDoc: { id: string; amount: number; type: number; description: string; date?: string } | null;
+    allocations: Record<string, number>;
+    manualDocId: string;
+}
+
+const DocumentLinkingSection: React.FC<{
     customer: Customer;
     orderData: Array<Order & { gross: number; paid: number; remaining: number }>;
     setOrders: React.Dispatch<React.SetStateAction<Order[]>>;
-    addActivity: (description: string) => void;
+    addActivity: (description: string, options?: import('../types').AddActivityOptions) => void;
     onClose: () => void;
-}> = ({ customer, orderData, setOrders, addActivity }) => {
-    const [documentId, setDocumentId] = useState('');
-    const [loading, setLoading] = useState(false);
+}> = ({ customer, orderData, setOrders, addActivity, onClose }) => {
+    const [state, setState] = useState<DocumentLinkingState>({ selectedDoc: null, allocations: {}, manualDocId: '' });
+    const [customerDocs, setCustomerDocs] = useState<any[]>([]);
+    const [loadingDocs, setLoadingDocs] = useState(false);
+    const [loadingLink, setLoadingLink] = useState(false);
 
-    const handleLink = async () => {
-        const id = documentId.trim();
-        if (!id || orderData.length === 0) return;
-        setLoading(true);
+    // Fetch customer documents from GreenInvoice
+    useEffect(() => {
+        if (!customer.greenInvoiceClientId) return;
+        setLoadingDocs(true);
+        fetch(`/api/green-invoice/documents/by-client/${customer.greenInvoiceClientId}`, {
+            headers: { Authorization: `Bearer ${localStorage.getItem('authToken')}` }
+        })
+            .then(r => r.ok ? r.json() : { documents: [] })
+            .then(data => setCustomerDocs(data.documents || []))
+            .catch(() => setCustomerDocs([]))
+            .finally(() => setLoadingDocs(false));
+    }, [customer.greenInvoiceClientId]);
+
+    const docTypeLabel = (t: number) => {
+        if (t === 10) return 'הצעת מחיר';
+        if (t === 305) return 'חשבונית מס';
+        if (t === 320) return 'חשבונית מס+קבלה';
+        if (t === 330) return 'חשבונית זיכוי';
+        if (t === 400) return 'קבלה';
+        return 'מסמך';
+    };
+
+    const totalDebt = orderData.reduce((s, o) => s + o.remaining, 0);
+    const allocatedTotal = Object.values(state.allocations).reduce((s, a) => s + a, 0);
+    const docAmount = state.selectedDoc?.amount || 0;
+    const overAllocated = allocatedTotal > docAmount + 0.01;
+
+    // Auto-allocate when document is selected
+    const handleSelectDoc = async (docId: string, fromList: boolean = true) => {
+        if (!docId.trim()) return;
         try {
-            const totalDebt = orderData.reduce((s, o) => s + o.remaining, 0);
-            const docRes = await fetch(`/api/green-invoice/documents/${id}/raw`, {
+            const docRes = await fetch(`/api/green-invoice/documents/${docId}/raw`, {
                 headers: { Authorization: `Bearer ${localStorage.getItem('authToken')}` }
             });
-            if (!docRes.ok) throw new Error('מסמך לא נמצא בחשבונית ירוקה');
+            if (!docRes.ok) throw new Error('מסמך לא נמצא');
             const doc = await docRes.json();
             const docTotal = Number(doc.amount ?? doc.total ?? 0);
             if (docTotal <= 0) throw new Error('סכום המסמך לא תקין');
+            
+            // Auto-allocate FIFO
             let remainingToAlloc = Math.min(docTotal, totalDebt);
             const allocations: Record<string, number> = {};
             orderData.forEach(o => {
@@ -67,10 +107,30 @@ const LinkDocumentForm: React.FC<{
                     remainingToAlloc -= amt;
                 }
             });
+            
+            setState({
+                selectedDoc: { id: doc.id, amount: docTotal, type: doc.type, description: doc.description || doc.desc || '', date: doc.date },
+                allocations,
+                manualDocId: fromList ? '' : docId
+            });
+        } catch (e: any) {
+            alert(e.message || 'שגיאה בטעינת מסמך');
+        }
+    };
+
+    const handleAllocationChange = (orderId: string, value: string) => {
+        const val = Math.max(0, parseFloat(value) || 0);
+        setState(prev => ({ ...prev, allocations: { ...prev.allocations, [orderId]: val } }));
+    };
+
+    const handleLink = async () => {
+        if (!state.selectedDoc || orderData.length === 0 || overAllocated) return;
+        setLoadingLink(true);
+        try {
             const res = await fetch('/api/green-invoice/documents/link-orders', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('authToken')}` },
-                body: JSON.stringify({ documentId: id, allocations })
+                body: JSON.stringify({ documentId: state.selectedDoc.id, allocations: state.allocations })
             });
             const data = await res.json();
             if (!res.ok) throw new Error(data.error || 'שגיאה בשיוך');
@@ -80,32 +140,136 @@ const LinkDocumentForm: React.FC<{
                     return u || o;
                 }));
             }
-            addActivity(`שויך מסמך חשבונית ירוקה ל־${Object.keys(allocations).filter(k => allocations[k] > 0).length} הזמנות`);
-            setDocumentId('');
+            const linkedCount = Object.values(state.allocations).filter(a => a > 0).length;
+            addActivity(`שויך מסמך חשבונית ירוקה (${docTypeLabel(state.selectedDoc.type)}) ל־${linkedCount} הזמנות`);
+            setState({ selectedDoc: null, allocations: {}, manualDocId: '' });
+            onClose();
         } catch (e: any) {
             alert(e.message || 'שגיאה בשיוך מסמך');
         } finally {
-            setLoading(false);
+            setLoadingLink(false);
         }
     };
 
     return (
-        <div className="flex flex-wrap items-center gap-2">
-            <input
-                type="text"
-                value={documentId}
-                onChange={e => setDocumentId(e.target.value)}
-                placeholder="מזהה מסמך (ID)"
-                className="flex-1 min-w-[100px] text-sm border border-emerald-300 rounded px-2 py-1.5"
-            />
-            <button
-                type="button"
-                onClick={handleLink}
-                disabled={!documentId.trim() || loading || orderData.length === 0}
-                className="px-3 py-1.5 bg-emerald-600 text-white text-sm rounded hover:bg-emerald-700 disabled:opacity-50"
-            >
-                {loading ? 'משייך...' : 'שייך מסמך'}
-            </button>
+        <div className="space-y-4">
+            {/* Document Selection */}
+            {!state.selectedDoc && (
+                <>
+                    {customer.greenInvoiceClientId && (
+                        <div>
+                            <label className="block text-xs font-bold text-emerald-800 mb-2">בחר מסמך מרשימת הלקוח</label>
+                            {loadingDocs ? (
+                                <div className="text-sm text-slate-500 py-2">טוען מסמכים...</div>
+                            ) : customerDocs.length > 0 ? (
+                                <div className="max-h-48 overflow-y-auto border border-emerald-200 rounded-lg bg-white">
+                                    {customerDocs.map(doc => (
+                                        <button
+                                            key={doc.id}
+                                            type="button"
+                                            onClick={() => handleSelectDoc(doc.id, true)}
+                                            className="w-full text-right p-2 hover:bg-emerald-50 border-b last:border-0 transition-colors"
+                                        >
+                                            <div className="flex justify-between items-start">
+                                                <div className="flex-1">
+                                                    <div className="text-xs font-bold text-slate-700">{docTypeLabel(doc.type)}</div>
+                                                    <div className="text-[10px] text-slate-500 line-clamp-1">{doc.description || doc.desc || 'ללא תיאור'}</div>
+                                                </div>
+                                                <div className="text-sm font-black text-emerald-700">₪{Number(doc.amount || doc.total || 0).toLocaleString()}</div>
+                                            </div>
+                                        </button>
+                                    ))}
+                                </div>
+                            ) : (
+                                <div className="text-xs text-slate-500 py-2">אין מסמכים זמינים</div>
+                            )}
+                        </div>
+                    )}
+                    <div>
+                        <label className="block text-xs font-bold text-emerald-800 mb-1">או הזן מזהה מסמך ידנית</label>
+                        <div className="flex gap-2">
+                            <input
+                                type="text"
+                                value={state.manualDocId}
+                                onChange={e => setState(prev => ({ ...prev, manualDocId: e.target.value }))}
+                                placeholder="מזהה מסמך (ID)"
+                                className="flex-1 text-sm border border-emerald-300 rounded px-2 py-1.5"
+                            />
+                            <button
+                                type="button"
+                                onClick={() => handleSelectDoc(state.manualDocId, false)}
+                                disabled={!state.manualDocId.trim()}
+                                className="px-3 py-1.5 bg-emerald-600 text-white text-sm rounded hover:bg-emerald-700 disabled:opacity-50"
+                            >
+                                טען
+                            </button>
+                        </div>
+                    </div>
+                </>
+            )}
+
+            {/* Selected Document & Allocations */}
+            {state.selectedDoc && (
+                <div className="space-y-3">
+                    <div className="bg-emerald-100 border border-emerald-300 rounded-lg p-3">
+                        <div className="flex justify-between items-start mb-2">
+                            <div>
+                                <div className="text-sm font-bold text-emerald-900">{docTypeLabel(state.selectedDoc.type)}</div>
+                                <div className="text-[10px] text-emerald-700 line-clamp-1">{state.selectedDoc.description || 'ללא תיאור'}</div>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => setState({ selectedDoc: null, allocations: {}, manualDocId: '' })}
+                                className="text-emerald-600 hover:text-emerald-800 text-xs"
+                            >
+                                ✕ שנה
+                            </button>
+                        </div>
+                        <div className="text-xl font-black text-emerald-800">₪{docAmount.toLocaleString()}</div>
+                        {state.selectedDoc.date && <div className="text-[10px] text-emerald-600">תאריך: {state.selectedDoc.date}</div>}
+                    </div>
+
+                    <div>
+                        <div className="flex justify-between items-center mb-2">
+                            <label className="text-xs font-bold text-slate-700">הקצאה להזמנות</label>
+                            <div className={`text-xs font-bold ${overAllocated ? 'text-red-600' : allocatedTotal > 0 ? 'text-emerald-700' : 'text-slate-400'}`}>
+                                ₪{allocatedTotal.toLocaleString()} / ₪{docAmount.toLocaleString()}
+                            </div>
+                        </div>
+                        {overAllocated && (
+                            <div className="text-[10px] text-red-600 bg-red-50 border border-red-200 rounded p-2 mb-2">
+                                ⚠️ סכום ההקצאות עולה על סכום המסמך
+                            </div>
+                        )}
+                        <div className="max-h-40 overflow-y-auto border border-slate-200 rounded-lg bg-white">
+                            {orderData.map(order => (
+                                <div key={order.id} className="flex items-center gap-2 p-2 border-b last:border-0 hover:bg-slate-50">
+                                    <div className="flex-1 min-w-0">
+                                        <div className="text-xs font-bold text-slate-700 truncate">{order.orderNumber}</div>
+                                        <div className="text-[10px] text-slate-500">יתרה: ₪{order.remaining.toLocaleString()}</div>
+                                    </div>
+                                    <input
+                                        type="number"
+                                        value={state.allocations[order.id] || ''}
+                                        onChange={e => handleAllocationChange(order.id, e.target.value)}
+                                        placeholder="0.00"
+                                        className="w-24 text-xs font-bold p-1.5 border border-slate-300 rounded text-center"
+                                    />
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+
+                    <button
+                        type="button"
+                        onClick={handleLink}
+                        disabled={loadingLink || allocatedTotal <= 0 || overAllocated || orderData.length === 0}
+                        className="w-full py-3 bg-emerald-600 text-white rounded-lg font-black text-sm shadow-lg hover:bg-emerald-700 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                        {loadingLink ? 'משייך...' : `שייך מסמך ל־${Object.values(state.allocations).filter(a => a > 0).length} הזמנות`}
+                    </button>
+                </div>
+            )}
         </div>
     );
 };
@@ -115,30 +279,28 @@ const CollectionCenterModal: React.FC<{
     orders: Order[];
     setOrders: React.Dispatch<React.SetStateAction<Order[]>>;
     onClose: () => void;
-    addActivity: (description: string) => void;
+    addActivity: (description: string, options?: import('../types').AddActivityOptions) => void;
     statusConfigs: OrderStatusConfiguration[];
     vatRate: number;
 }> = ({ customer, orders, setOrders, onClose, addActivity, statusConfigs, vatRate }) => {
     const [loading, setLoading] = useState(false);
     const [allCustomerOrders, setAllCustomerOrders] = useState<Order[]>([]);
     
-    // Fetch customer orders with active deals from API
+    // מרכז גבייה: רק הזמנות פתוחות לתשלום של הלקוח הנבחר – שום לקוח אחר
     useEffect(() => {
         const fetchCustomerOrders = async () => {
             setLoading(true);
             try {
-                // Use isCollectionMode filter which already filters for active deals that are not fully paid
                 const filters = {
                     customerFilter: [customer.id],
-                    isCollectionMode: true,
+                    collectionCenterView: true,
                     showCompletedOrders: false
                 };
-                
-                // Get all orders (no pagination limit for this modal)
                 const result = await mongoService.getOrdersPaginated(filters, 1, 10000);
-                
+                const raw = result.orders || [];
+                const forThisCustomer = raw.filter((o: Order) => o.customerId === customer.id);
                 // Calculate balance for each order
-                const ordersWithBalance = result.orders.map(o => {
+                const ordersWithBalance = forThisCustomer.map(o => {
                     const { totalAmount, totalPaid } = calculateOrderTotals(o);
                     const currentOrderVat = o.vatRate ?? vatRate;
                     const gross = totalAmount * (1 + currentOrderVat / 100);
@@ -154,12 +316,8 @@ const CollectionCenterModal: React.FC<{
                 setAllCustomerOrders(ordersWithBalance);
             } catch (error) {
                 console.error('Error fetching customer orders:', error);
-                // Fallback to local orders if API fails
                 const localOrders = orders
-            .filter(o => {
-                const config = statusConfigs.find(c => c.label === o.orderStatus);
-                return o.customerId === customer.id && config?.isActiveDeal;
-            })
+            .filter(o => o.customerId === customer.id && o.paymentStatus !== 'שולם')
             .map(o => {
                 const { totalAmount, totalPaid } = calculateOrderTotals(o);
                 const currentOrderVat = o.vatRate ?? vatRate;
@@ -290,7 +448,7 @@ const CollectionCenterModal: React.FC<{
         });
 
         setOrders(newOrders);
-        addActivity(`בוצע תשלום מרוכז עבור לקוח: ${customer.name} בסך ₪${allocatedTotal.toLocaleString()}`);
+        addActivity(`בוצע תשלום מרוכז עבור לקוח: ${customer.name} בסך ₪${allocatedTotal.toLocaleString()}`, { entityType: 'customer', entityId: customer.id, action: 'payment', metadata: { amount: allocatedTotal, name: customer.name } });
         onClose();
     };
 
@@ -387,15 +545,16 @@ const CollectionCenterModal: React.FC<{
                     </div>
                 </div>
 
-                {/* Right Side: Payment Form + Link Document */}
+                {/* Right Side: Document Linking (Primary) + Manual Payment (Secondary) */}
                 <div className="w-full md:w-80 space-y-4">
-                    <div className="bg-emerald-50 p-4 rounded-2xl border border-emerald-200 shadow-sm space-y-3">
-                        <h4 className="font-black text-slate-800 border-b border-emerald-200 pb-2 text-sm flex items-center gap-2">
-                            <svg className="w-4 h-4 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" /></svg>
-                            שייך מסמך חשבונית ירוקה
+                    {/* PRIMARY: Document Linking */}
+                    <div className="bg-emerald-50 p-4 rounded-2xl border-2 border-emerald-300 shadow-lg space-y-3">
+                        <h4 className="font-black text-slate-800 border-b border-emerald-300 pb-2 text-sm flex items-center gap-2">
+                            <svg className="w-5 h-5 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" /></svg>
+                            שיוך מרוכז - מסמך חשבונית ירוקה
                         </h4>
-                        <p className="text-xs text-slate-600">הזן מזהה מסמך (קבלה/חשבונית) — הסכום יופץ אוטומטית לפי יתרות</p>
-                        <LinkDocumentForm
+                        <p className="text-xs text-slate-600 leading-relaxed">בחר מסמך (קבלה/חשבונית) מהרשימה או הזן מזהה — הסכום יחולק אוטומטית לפי יתרות, ניתן לערוך ידנית</p>
+                        <DocumentLinkingSection
                             customer={customer}
                             orderData={orderData as Array<Order & { gross: number; paid: number; remaining: number }>}
                             setOrders={setOrders}
@@ -403,7 +562,17 @@ const CollectionCenterModal: React.FC<{
                             onClose={onClose}
                         />
                     </div>
-                    <div className="bg-slate-50 p-5 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+
+                    {/* SECONDARY: Manual Payment (Collapsible) */}
+                    <details className="bg-slate-50 rounded-2xl border border-slate-200 shadow-sm">
+                        <summary className="p-4 cursor-pointer hover:bg-slate-100 transition-colors rounded-2xl">
+                            <div className="flex items-center gap-2">
+                                <CashIcon className="w-5 h-5 text-slate-600"/>
+                                <span className="font-black text-slate-700 text-sm">רישום תשלום ידני (ללא מסמך)</span>
+                            </div>
+                            <p className="text-[10px] text-slate-500 mt-1">למקרים שבהם התקבל תשלום ועדיין אין מסמך בחשבונית ירוקה</p>
+                        </summary>
+                        <div className="p-5 pt-2 space-y-4">
                         <h4 className="font-black text-slate-800 border-b pb-3 flex items-center gap-2">
                             <CashIcon className="w-5 h-5 text-emerald-600"/>
                             פרטי תקבול (ידני)
@@ -463,14 +632,15 @@ const CollectionCenterModal: React.FC<{
                             </div>
                         </div>
 
-                        <button 
-                            onClick={handleSaveBatchPayment}
-                            disabled={allocatedTotal <= 0}
-                            className="w-full py-4 bg-emerald-600 text-white rounded-xl font-black text-lg shadow-xl hover:bg-emerald-700 transition-all disabled:opacity-50 disabled:cursor-not-allowed mt-4"
-                        >
-                            בצע גבייה מרוכזת
-                        </button>
-                    </div>
+                            <button 
+                                onClick={handleSaveBatchPayment}
+                                disabled={allocatedTotal <= 0}
+                                className="w-full py-3 bg-slate-600 text-white rounded-lg font-black text-sm shadow-md hover:bg-slate-700 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                רשום תשלום ידני
+                            </button>
+                        </div>
+                    </details>
                 </div>
             </div>
         </Modal>
@@ -679,6 +849,7 @@ const NewCustomerForm: React.FC<{ onSave: (customer: Partial<Customer>, firstCon
 interface CustomerDetailViewProps {
     customer: Customer;
     customerOrders: Order[];
+    customerOrdersLoading?: boolean;
     onSave: (customer: Customer) => void;
     onCancel: () => void;
     onNavigateToOrder: (orderId: string) => void;
@@ -687,7 +858,7 @@ interface CustomerDetailViewProps {
     vatRate: number;
 }
 
-const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, customerOrders, onSave, onCancel, onNavigateToOrder, onMergeClick, statusConfigs, vatRate }) => {
+const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, customerOrders, customerOrdersLoading, onSave, onCancel, onNavigateToOrder, onMergeClick, statusConfigs, vatRate }) => {
     const [activeTab, setActiveTab] = useState<'details' | 'contacts' | 'orders'>('details');
     const [editableCustomer, setEditableCustomer] = useState<Customer>(customer);
     const [editingContact, setEditingContact] = useState<Contact | null>(null);
@@ -746,7 +917,7 @@ const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, custo
                 <nav className="-mb-px flex space-x-6 space-x-reverse px-1">
                     <button onClick={() => setActiveTab('details')} className={`whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm ${activeTab === 'details' ? 'border-primary text-primary' : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'}`}>פרטים</button>
                     <button onClick={() => setActiveTab('contacts')} className={`whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm ${activeTab === 'contacts' ? 'border-primary text-primary' : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'}`}>אנשי קשר</button>
-                    <button onClick={() => setActiveTab('orders')} className={`whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm ${activeTab === 'orders' ? 'border-primary text-primary' : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'}`}>היסטוריית הזמנות ({customerOrders.length})</button>
+                    <button onClick={() => setActiveTab('orders')} className={`whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm ${activeTab === 'orders' ? 'border-primary text-primary' : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'}`}>היסטוריית הזמנות {customerOrdersLoading ? '(טוען...)' : `(${customerOrders.length})`}</button>
                 </nav>
             </div>
             <div className="py-6">
@@ -936,7 +1107,9 @@ const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, custo
                 )}
                 {activeTab === 'orders' && (
                     <div className="border rounded-xl overflow-hidden shadow-sm">
-                        {customerOrders.length > 0 ? (
+                        {customerOrdersLoading ? (
+                            <div className="p-8 text-center text-slate-500">טוען היסטוריית הזמנות...</div>
+                        ) : customerOrders.length > 0 ? (
                             <table className="min-w-full text-xs text-right">
                                 <thead className="bg-slate-50 text-slate-500 font-bold border-b">
                                     <tr>
@@ -1042,6 +1215,11 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
     const [isMergeModalOpen, setIsMergeModalOpen] = useState(false);
     const [isSyncingFromGreenInvoice, setIsSyncingFromGreenInvoice] = useState(false);
 
+    // Fetched customer orders (server source of truth for "היסטוריית הזמנות" – avoids stale global state)
+    const [customerOrdersFetched, setCustomerOrdersFetched] = useState<Order[] | null>(null);
+    const [customerOrdersFetchedForId, setCustomerOrdersFetchedForId] = useState<string | null>(null);
+    const [customerOrdersLoading, setCustomerOrdersLoading] = useState(false);
+
     // Pagination state
     const [currentPage, setCurrentPage] = useState(1);
     const [pageSize, setPageSize] = useState(50);
@@ -1084,8 +1262,47 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
         setCurrentPage(1);
     }, [searchTerm]);
 
-    // Use paginated customers for display
-    const filteredCustomers = paginatedCustomers;
+    // Use paginated customers for display; dedupe by logical key as safety net (server already dedupes)
+    const filteredCustomers = useMemo(() => {
+        const byKey = new Map<string, (Customer & { debt?: number })[]>();
+        for (const c of paginatedCustomers) {
+            const key = customerLogicalKey(c);
+            if (!byKey.has(key)) byKey.set(key, []);
+            byKey.get(key)!.push(c);
+        }
+        const out: (Customer & { debt?: number })[] = [];
+        for (const group of byKey.values()) {
+            if (group.length === 0) continue;
+            const rep = group.find(c => c.greenInvoiceClientId) || group[0];
+            const debt = group.reduce((s, c) => s + (c.debt ?? 0), 0);
+            out.push({ ...rep, debt: Number(debt.toFixed(2)) });
+        }
+        return out.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'he'));
+    }, [paginatedCustomers]);
+
+    const refetchCustomerOrders = React.useCallback(async () => {
+        if (!viewingCustomer) {
+            setCustomerOrdersFetched(null);
+            setCustomerOrdersFetchedForId(null);
+            return;
+        }
+        setCustomerOrdersLoading(true);
+        try {
+            const result = await mongoService.getOrdersPaginated(
+                { customerFilter: [viewingCustomer.id], showCompletedOrders: true },
+                1,
+                1000
+            );
+            setCustomerOrdersFetched(result.orders || []);
+            setCustomerOrdersFetchedForId(viewingCustomer.id);
+        } catch (err) {
+            console.error('Error fetching customer orders:', err);
+            setCustomerOrdersFetched(null);
+            setCustomerOrdersFetchedForId(null);
+        } finally {
+            setCustomerOrdersLoading(false);
+        }
+    }, [viewingCustomer?.id]);
 
     const handleViewCustomer = (customer: Customer) => {
         setViewingCustomer(customer);
@@ -1153,13 +1370,19 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
             setCustomers(prev => [...prev, savedCustomer]);
             // Refetch paginated customers to show the new customer
             await refetchCustomers();
-            addActivity(`לקוח חדש נוסף: ${savedCustomer.name}`);
+            addActivity(`לקוח חדש נוסף: ${savedCustomer.name}`, { entityType: 'customer', entityId: savedCustomer.id, action: 'create', metadata: { name: savedCustomer.name } });
             setIsNewCustomerModalOpen(false);
             setPendingNewCustomer(null);
             setDuplicateFound(null);
-        } catch (error) {
+        } catch (error: any) {
             console.error('Error creating customer:', error);
-            alert('שגיאה בשמירת הלקוח. אנא נסה שוב.');
+            const msg = error?.message || '';
+            if (msg.includes('כבר קיים') || msg.includes('DUPLICATE')) {
+                alert('לקוח עם אותו שם ו/או ח.פ כבר קיים במערכת. לא נוצר כפילות.');
+                await refetchCustomers();
+            } else {
+                alert('שגיאה בשמירת הלקוח. אנא נסה שוב.');
+            }
         }
     };
 
@@ -1189,7 +1412,7 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
         setCustomers(prev => prev.map(c => c.id === oldCustomer.id ? updatedOldCustomer : c));
         // Refetch paginated customers after merge
         await refetchCustomers();
-        addActivity(`לקוח מוזג לתוך כרטיס קיים: ${oldCustomer.name}`);
+        addActivity(`לקוח מוזג לתוך כרטיס קיים: ${oldCustomer.name}`, { entityType: 'customer', entityId: oldCustomer.id, action: 'merge', metadata: { name: oldCustomer.name } });
         
         setDuplicateFound(null);
         setPendingNewCustomer(null);
@@ -1232,8 +1455,11 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
         );
         // Refetch paginated customers after merge
         await refetchCustomers();
-        addActivity(`בוצע מיזוג ידני: ${victim.name} מוזג לתוך ${viewingCustomer.name}`);
+        addActivity(`בוצע מיזוג ידני: ${victim.name} מוזג לתוך ${viewingCustomer.name}`, { entityType: 'customer', entityId: viewingCustomer.id, action: 'merge', metadata: { victimName: victim.name, targetName: viewingCustomer.name } });
         setViewingCustomer(updatedVeteran); // Update view
+        // Invalidate fetched customer orders so "היסטוריית הזמנות" uses updated global state (merged orders)
+        setCustomerOrdersFetched(null);
+        setCustomerOrdersFetchedForId(null);
         setIsMergeModalOpen(false);
     };
 
@@ -1261,9 +1487,9 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
                 }
                 return order;
             }));
-            addActivity(`לקוח עודכן: ${updatedCustomer.name} (עודכנו תנאי תשלום ב-${orders.filter(o => o.customerId === updatedCustomer.id).length} הזמנות)`);
-        } else {
-            addActivity(`לקוח עודכן: ${updatedCustomer.name}`);
+            addActivity(`לקוח עודכן: ${updatedCustomer.name} (עודכנו תנאי תשלום ב-${orders.filter(o => o.customerId === updatedCustomer.id).length} הזמנות)`, { entityType: 'customer', entityId: updatedCustomer.id, action: 'update', metadata: { name: updatedCustomer.name } });
+            } else {
+            addActivity(`לקוח עודכן: ${updatedCustomer.name}`, { entityType: 'customer', entityId: updatedCustomer.id, action: 'update', metadata: { name: updatedCustomer.name } });
         }
 
         setIsDetailModalOpen(false);
@@ -1304,7 +1530,7 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
 ${results.errors.length > 0 ? `\n- שגיאות: ${results.errors.length}` : ''}`;
             
             alert(message);
-            addActivity(`בוצע סנכרון מ-חשבונית ירוקה: ${results.created.length} חדשים, ${results.updated.length} עודכנו`);
+            addActivity(`בוצע סנכרון מ-חשבונית ירוקה: ${results.created.length} חדשים, ${results.updated.length} עודכנו`, { entityType: 'customer', action: 'sync', metadata: { created: results.created.length, updated: results.updated.length } });
         } catch (error: any) {
             console.error('Error syncing from GreenInvoice:', error);
             alert(`שגיאה בסנכרון: ${error.message || 'שגיאה לא ידועה'}`);
@@ -1313,10 +1539,23 @@ ${results.errors.length > 0 ? `\n- שגיאות: ${results.errors.length}` : ''}
         }
     };
 
+    // Prefer server-fetched orders for this customer (avoids stale global state after order customerId change)
     const customerOrders = useMemo(() => {
         if (!viewingCustomer) return [];
+        if (customerOrdersFetched !== null && customerOrdersFetchedForId === viewingCustomer.id)
+            return customerOrdersFetched;
         return orders.filter(o => o.customerId === viewingCustomer.id);
-    }, [orders, viewingCustomer]);
+    }, [orders, viewingCustomer, customerOrdersFetched, customerOrdersFetchedForId]);
+
+    // Fetch customer orders from server when opening customer detail (source of truth)
+    useEffect(() => {
+        if (!viewingCustomer) {
+            setCustomerOrdersFetched(null);
+            setCustomerOrdersFetchedForId(null);
+            return;
+        }
+        refetchCustomerOrders();
+    }, [viewingCustomer?.id, refetchCustomerOrders]);
     
 
     return (
@@ -1571,6 +1810,7 @@ ${results.errors.length > 0 ? `\n- שגיאות: ${results.errors.length}` : ''}
                     <CustomerDetailView 
                         customer={viewingCustomer} 
                         customerOrders={customerOrders}
+                        customerOrdersLoading={customerOrdersLoading}
                         onSave={handleSaveCustomerUpdate}
                         onCancel={() => setIsDetailModalOpen(false)}
                         onNavigateToOrder={onNavigateToOrder}

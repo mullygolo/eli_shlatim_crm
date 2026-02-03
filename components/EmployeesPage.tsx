@@ -7,7 +7,7 @@ import { useAuth } from '../contexts/AuthContext';
 interface EmployeesPageProps {
     employees: Employee[];
     setEmployees: React.Dispatch<React.SetStateAction<Employee[]>>;
-    addActivity: (description: string) => void;
+    addActivity: (description: string, options?: import('../types').AddActivityOptions) => void;
     attendanceRecords: AttendanceRecord[];
     setAttendanceRecords: React.Dispatch<React.SetStateAction<AttendanceRecord[]>>;
 }
@@ -772,8 +772,8 @@ const EmployeesPage: React.FC<EmployeesPageProps> = ({ employees, setEmployees, 
     const handleEditEmployee = (employee: Employee) => { setEditingEmployee(employee); setIsModalOpen(true); };
 
     const handleSaveEmployee = (employee: Employee) => {
-        if (editingEmployee) { setEmployees(prev => prev.map(e => e.id === employee.id ? employee : e)); addActivity(`עובד עודכן: ${employee.name}`); }
-        else { setEmployees(prev => [...prev, employee]); addActivity(`עובד חדש נוסף: ${employee.name}`); }
+        if (editingEmployee) { setEmployees(prev => prev.map(e => e.id === employee.id ? employee : e)); addActivity(`עובד עודכן: ${employee.name}`, { entityType: 'employee', entityId: employee.id, action: 'update', metadata: { name: employee.name } }); }
+        else { setEmployees(prev => [...prev, employee]); addActivity(`עובד חדש נוסף: ${employee.name}`, { entityType: 'employee', entityId: employee.id, action: 'create', metadata: { name: employee.name } }); }
         setIsModalOpen(false); setEditingEmployee(null);
     };
 

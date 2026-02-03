@@ -182,10 +182,40 @@ export interface TimelineEvent {
     dueDate?: string; // YYYY-MM-DD
 }
 
+export type ActivityEntityType =
+    | 'order' | 'customer' | 'supplier' | 'employee' | 'settings' | 'quote'
+    | 'transaction' | 'manual_event' | 'finance' | 'system';
+
+export type ActivityAction =
+    | 'create' | 'update' | 'delete' | 'status_change' | 'payment' | 'merge'
+    | 'sync' | 'login' | 'logout' | 'other';
+
 export interface Activity {
     id: string;
     description: string;
     timestamp: Date;
+    userId?: string;
+    username?: string;
+    entityType?: ActivityEntityType;
+    entityId?: string;
+    action?: ActivityAction;
+    metadata?: Record<string, unknown>;
+}
+
+export interface ActivityFilters {
+    from?: string;
+    to?: string;
+    userId?: string;
+    entityType?: string;
+    action?: string;
+    search?: string;
+    page?: number;
+    limit?: number;
+}
+
+export interface ActivitiesResult {
+    activities: Activity[];
+    total: number;
 }
 
 export interface StatusHistoryEntry {

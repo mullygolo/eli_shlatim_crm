@@ -1,5 +1,5 @@
-
 import React, { useState, useMemo, useEffect } from 'react';
+import DOMPurify from 'dompurify';
 // Fixed error: Removed 'OrderStatus' which is not exported from '../types'
 import { Customer, Order, Activity, Employee, OrderStatusConfiguration, PaymentStatus, ManualEvent, PaymentMethod } from '../types';
 import { TaskIcon, SettingsIcon, MegaphoneIcon, TruckIcon, CashIcon, CalendarPlusIcon } from './icons'; 
@@ -89,8 +89,13 @@ const MonthlyGoalWidget: React.FC<{
     );
 };
 
-// --- System Message Widget ---
+// --- System Message Widget --- (renders HTML from rich editor, sanitized with DOMPurify; plain text wrapped in <p> for backward compatibility)
 const SystemMessageWidget: React.FC<{ message: string }> = ({ message }) => {
+    const raw = (message || '').trim();
+    const isHtml = raw.startsWith('<') && (raw.includes('</') || raw.includes('/>'));
+    const toSanitize = isHtml ? raw : `<p>${raw}</p>`;
+    const sanitized = DOMPurify.sanitize(toSanitize, { ALLOWED_TAGS: ['p', 'br', 'strong', 'b', 'em', 'i', 'u', 's', 'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'a'] });
+    const html = sanitized.trim() || '<p class="text-slate-500">אין הודעות חדשות.</p>';
     return (
         <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 h-full flex flex-col relative overflow-hidden min-h-[180px]">
             <div className="flex items-center gap-2 mb-3 border-b border-slate-100 pb-2">
@@ -99,11 +104,11 @@ const SystemMessageWidget: React.FC<{ message: string }> = ({ message }) => {
                 </div>
                 <h3 className="text-lg font-bold text-slate-800">הודעות מערכת</h3>
             </div>
-            <div className="flex-grow overflow-y-auto max-h-[120px] custom-scrollbar">
-                <p className="text-slate-700 whitespace-pre-wrap leading-relaxed text-sm md:text-base">
-                    {message || "אין הודעות חדשות."}
-                </p>
-            </div>
+            <div
+                className="flex-grow overflow-y-auto max-h-[120px] custom-scrollbar text-slate-700 leading-relaxed text-sm md:text-base [&_p]:mb-2 [&_strong]:font-bold [&_b]:font-bold [&_em]:italic [&_i]:italic [&_ul]:list-disc [&_ol]:list-decimal [&_ul]:mr-4 [&_ol]:mr-4 [&_li]:mr-2 [&_h1]:text-lg [&_h2]:text-base [&_h3]:text-sm [&_a]:text-primary [&_a]:underline"
+                dir="rtl"
+                dangerouslySetInnerHTML={{ __html: html }}
+            />
         </div>
     );
 };

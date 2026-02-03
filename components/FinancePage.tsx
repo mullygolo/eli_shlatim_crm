@@ -119,7 +119,7 @@ interface FinancePageProps {
     setReceivables: React.Dispatch<React.SetStateAction<Receivable[]>>;
     equity: EquityInvestment[];
     setEquity: React.Dispatch<React.SetStateAction<EquityInvestment[]>>;
-    addActivity: (description: string) => void;
+    addActivity: (description: string, options?: import('../types').AddActivityOptions) => void;
     vatRate: number;
     orders: Order[];
     setOrders: React.Dispatch<React.SetStateAction<Order[]>>;
@@ -878,7 +878,7 @@ const CheckCenter: React.FC<{
     setDebts: React.Dispatch<React.SetStateAction<Debt[]>>;
     receivables: Receivable[];
     setReceivables: React.Dispatch<React.SetStateAction<Receivable[]>>;
-    addActivity: (description: string) => void;
+    addActivity: (description: string, options?: import('../types').AddActivityOptions) => void;
 }> = ({ orders, setOrders, fixedExpenses, setFixedExpenses, variableExpenses, setVariableExpenses, debts, setDebts, receivables, setReceivables, addActivity }) => {
     const [tab, setTab] = useState<'INCOMING' | 'OUTGOING'>('INCOMING');
     // SMART FILTER: Active (Actionable), Urgent (Overdue/Bounced), Archive (History), All
@@ -1180,7 +1180,7 @@ const CheckCenter: React.FC<{
         setDebts(updatedDebts);
         setReceivables(updatedReceivables);
         
-        addActivity(`סטטוס צ'ק ${check.reference} (${check.type === 'INCOMING' ? 'נכנס' : 'יוצא'}) עודכן ל-${newStatus}`);
+        addActivity(`סטטוס צ'ק ${check.reference} (${check.type === 'INCOMING' ? 'נכנס' : 'יוצא'}) עודכן ל-${newStatus}`, { entityType: 'finance', action: 'status_change', metadata: { reference: check.reference, type: check.type, newStatus } });
         
         // Refetch checks to reflect the updated status
         refetchChecks();
@@ -2303,7 +2303,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
             const updatedDebt = { ...debt, payments: updatedPayments, isPaid: totalPaid >= gross - 0.05 };
             const saved = await mongoService.updateDebt(updatedDebt);
             setDebts(prev => prev.map(d => d.id === debtId ? saved : d));
-            addActivity(`סטטוס תשלום חוב עודכן ל-${newStatus}`);
+            addActivity(`סטטוס תשלום חוב עודכן ל-${newStatus}`, { entityType: 'finance', action: 'status_change', metadata: { debtId, newStatus } });
             await refetchDebts(); // Refresh paginated debts after payment status update
         } catch (error) {
             console.error('Error updating debt payment status in MongoDB:', error);
@@ -2336,7 +2336,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
             const updatedReceivable = { ...receivable, payments: updatedPayments, isPaid: totalCollected >= gross - 0.05 };
             const saved = await mongoService.updateReceivable(updatedReceivable);
             setReceivables(prev => prev.map(r => r.id === receivableId ? saved : r));
-            addActivity(`סטטוס גבייה עודכן ל-${newStatus}`);
+            addActivity(`סטטוס גבייה עודכן ל-${newStatus}`, { entityType: 'finance', action: 'status_change', metadata: { receivableId, newStatus } });
             await refetchReceivables(); // Refresh paginated receivables after payment status update
         } catch (error) {
             console.error('Error updating receivable payment status in MongoDB:', error);

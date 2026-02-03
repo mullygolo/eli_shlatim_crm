@@ -1,5 +1,5 @@
 import {
-    Customer, Order, Supplier, Employee, Activity, OrderStatusConfiguration,
+    Customer, Order, Supplier, Employee, Activity, ActivityFilters, ActivitiesResult, OrderStatusConfiguration,
     FixedExpense, VariableExpense, Loan, Debt, Receivable, EquityInvestment,
     AttendanceRecord, ManualEvent, CallLog
 } from '../types';
@@ -206,6 +206,45 @@ export async function deleteOrder(orderId: string): Promise<void> {
     });
 }
 
+// CSV import (טבלת שליטה)
+export interface OrdersImportPreviewResult {
+    orders: {
+        orderNumber: string;
+        customerName: string;
+        customerId: string | null;
+        missingCustomer: boolean;
+        date: string | null;
+        status: string;
+        lineItemCount: number;
+        representativeName: string;
+        employeeId: string | null;
+        repLoggedOnly: boolean;
+        existingOrderNumber?: boolean;
+    }[];
+    newStatusLabels: string[];
+    newSupplierNames: string[];
+    missingCustomerNames: string[];
+    contactsToAdd: { customerId: string; customerName: string; phone?: string; email?: string }[];
+    existingOrderNumbers: string[];
+}
+
+export async function ordersImportPreview(rows: Record<string, string>[]): Promise<OrdersImportPreviewResult> {
+    return apiRequest<OrdersImportPreviewResult>('/orders/import/preview', {
+        method: 'POST',
+        body: JSON.stringify({ rows }),
+    });
+}
+
+export async function ordersImportExecute(
+    rows: Record<string, string>[],
+    options?: { skipExistingOrderNumbers?: boolean }
+): Promise<{ created: number; skipped: number; errors: string[] }> {
+    return apiRequest<{ created: number; skipped: number; errors: string[] }>('/orders/import/execute', {
+        method: 'POST',
+        body: JSON.stringify({ rows, skipExistingOrderNumbers: options?.skipExistingOrderNumbers !== false }),
+    });
+}
+
 // ==================== SUPPLIERS ====================
 export async function getSuppliers(): Promise<Supplier[]> {
     return apiRequest<Supplier[]>('/suppliers');
@@ -282,6 +321,20 @@ export async function deleteEmployee(employeeId: string): Promise<void> {
 // ==================== ACTIVITIES ====================
 export async function getActivities(): Promise<Activity[]> {
     return apiRequest<Activity[]>('/activities');
+}
+
+export async function getActivitiesFiltered(filters: ActivityFilters): Promise<ActivitiesResult> {
+    const params = new URLSearchParams();
+    if (filters.from) params.set('from', filters.from);
+    if (filters.to) params.set('to', filters.to);
+    if (filters.userId) params.set('userId', filters.userId);
+    if (filters.entityType) params.set('entityType', filters.entityType);
+    if (filters.action) params.set('action', filters.action);
+    if (filters.search) params.set('search', filters.search);
+    if (filters.page != null) params.set('page', String(filters.page));
+    if (filters.limit != null) params.set('limit', String(filters.limit));
+    const qs = params.toString();
+    return apiRequest<ActivitiesResult>(`/activities${qs ? `?${qs}` : ''}`);
 }
 
 export async function createActivity(activity: Activity): Promise<Activity> {

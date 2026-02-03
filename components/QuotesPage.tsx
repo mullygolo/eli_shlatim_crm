@@ -13,7 +13,7 @@ interface QuotesPageProps {
     quotes: Quote[];
     setQuotes: React.Dispatch<React.SetStateAction<Quote[]>>;
     customers: Customer[];
-    addActivity: (description: string) => void;
+    addActivity: (description: string, options?: import('../types').AddActivityOptions) => void;
 }
 
 const QuoteForm: React.FC<{

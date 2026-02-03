@@ -54,6 +54,8 @@ export interface Customer {
     paymentTerms?: string;
     // GreenInvoice integration field
     greenInvoiceClientId?: string; // ID of client in GreenInvoice
+    /** Created from control-table import when customer name was not matched; do not sync to Green Invoice until user links to real customer */
+    isImportPlaceholder?: boolean;
 }
 
 /* Fix: Added missing Supplier interface export to resolve module errors */
@@ -106,6 +108,8 @@ export interface CustomerPayment {
     drawerName?: string; // Name on check
     bankDetails?: string; // Bank/Branch/Account
     batchId?: string; // NEW: Link to batch payment (Single transaction -> multiple orders)
+    /** True when this payment was added automatically on order import (טבלת שליטה); user can delete it to then link a real document. */
+    isImportPlaceholder?: boolean;
 }
 
 export interface LineItem {

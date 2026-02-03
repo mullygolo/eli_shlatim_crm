@@ -143,7 +143,7 @@ const App: React.FC = () => {
             setVatRate(settingsData.vatRate);
             setMonthlyGoal(settingsData.monthlyGoal);
             setSystemMessage(settingsData.systemMessage);
-            setPayrollOverrides(settingsData.payrollOverrides);
+            setPayrollOverrides(settingsData.payrollOverrides ?? {});
             if (settingsData.vatRateHistory && Array.isArray(settingsData.vatRateHistory) && settingsData.vatRateHistory.length > 0) {
                 const historyWithDates = settingsData.vatRateHistory.map((entry: any) => ({
                     ...entry,
@@ -458,6 +458,8 @@ const App: React.FC = () => {
                             employees={employees}
                             attendanceRecords={attendanceRecords}
                             statusConfigs={statusConfigs}
+                            payrollOverrides={payrollOverrides}
+                            onNavigateToOrder={handleNavigateToOrder}
                         />;
             case 'Attendance':
                 return <AttendancePage 

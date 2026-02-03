@@ -99,9 +99,6 @@ async function authenticate(): Promise<string> {
 
         if (!token) {
             console.error('GreenInvoice auth: no token in header or body. Body preview:', text.slice(0, 200));
-            // #region agent log
-            fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'greenInvoiceService.ts:100',message:'Authentication failed - no token',data:{responseText:text?.slice(0,200),headers:Object.fromEntries(response.headers.entries())},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-            // #endregion
             throw new Error('Token not found in response (header X-Authorization-Bearer or body.token)');
         }
 
@@ -117,9 +114,6 @@ async function authenticate(): Promise<string> {
 
         authToken = token;
         tokenExpiry = expiry;
-        // #region agent log
-        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'greenInvoiceService.ts:116',message:'Authentication successful',data:{tokenLength:token?.length,tokenPreview:token?.substring(0,20),expiry},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-        // #endregion
         return authToken;
     } catch (error) {
         console.error('GreenInvoice authentication error:', error);
@@ -137,9 +131,6 @@ async function apiRequest<T>(
     const token = await authenticate();
 
     const fullUrl = `${GREENINVOICE_API_URL}${endpoint}`;
-    // #region agent log
-    fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'greenInvoiceService.ts:132',message:'API request - before fetch',data:{fullUrl,method:options.method||'GET',endpoint,baseUrl:GREENINVOICE_API_URL,tokenLength:token?.length,hasBody:!!options.body,bodyPreview:options.body?(typeof options.body==='string'?options.body.substring(0,200):JSON.stringify(options.body).substring(0,200)):'none'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-    // #endregion
     
     const response = await fetch(fullUrl, {
         ...options,
@@ -150,9 +141,6 @@ async function apiRequest<T>(
         },
     });
 
-    // #region agent log
-    fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'greenInvoiceService.ts:141',message:'API request - response received',data:{fullUrl,status:response.status,statusText:response.statusText,ok:response.ok,headers:Object.fromEntries(response.headers.entries())},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-    // #endregion
 
     if (!response.ok) {
         const rawText = await response.text();
@@ -168,9 +156,6 @@ async function apiRequest<T>(
         console.error('[API REQUEST] Request body sent:', options.body ? (typeof options.body === 'string' ? options.body.substring(0, 500) : JSON.stringify(options.body).substring(0, 500)) : 'none');
         console.error('[API REQUEST] Full error response:', rawText);
         console.error('[API REQUEST] Response headers:', Object.fromEntries(response.headers.entries()));
-        // #region agent log
-        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'greenInvoiceService.ts:155',message:'API request - error response',data:{fullUrl,status:response.status,statusText:response.statusText,errorMessage:error.message,rawText:rawText?.substring(0,500),errorCode:(error as any).errorCode,errorMessageFull:(error as any).errorMessage},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-        // #endregion
         throw new Error(error.message || (error as any).error || (error as any).errorMessage || `API request failed (${response.status}): ${response.statusText}`);
     }
 
@@ -407,14 +392,8 @@ export async function createInvoice(invoiceData: CreateInvoiceRequest | any, doc
             token = await authenticate();
             console.log('[CREATE DOCUMENT] Authentication successful, token length:', token?.length || 0);
             console.log('[CREATE DOCUMENT] Token preview:', token?.substring(0, 20) + '...');
-            // #region agent log
-            fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'greenInvoiceService.ts:388',message:'createInvoice - authentication successful',data:{tokenLength:token?.length,tokenPreview:token?.substring(0,20)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-            // #endregion
         } catch (authError: any) {
             console.error('[CREATE DOCUMENT] Authentication failed before creating invoice:', authError.message);
-            // #region agent log
-            fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'greenInvoiceService.ts:393',message:'createInvoice - authentication failed',data:{error:authError.message},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-            // #endregion
             throw new Error(`Authentication failed: ${authError.message}`);
         }
         
@@ -463,9 +442,6 @@ export async function createInvoice(invoiceData: CreateInvoiceRequest | any, doc
         // Check if this is the new document format (has 'type' and 'income' fields)
         const isNewFormat = invoiceData.type !== undefined && invoiceData.income !== undefined;
         console.log('[CREATE DOCUMENT] Document format:', isNewFormat ? 'new (type + income)' : 'old');
-        // #region agent log
-        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'greenInvoiceService.ts:440',message:'createInvoice - document format check',data:{isNewFormat,hasType:invoiceData.type!==undefined,hasIncome:invoiceData.income!==undefined,hasClient:invoiceData.client!==undefined,hasPayment:invoiceData.payment!==undefined,dataKeys:Object.keys(invoiceData)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-        // #endregion
         
         // Try multiple endpoint variations
         // Check if this is an estimate - estimates use type 10 (PRICE_QUOTE) with /documents endpoint
@@ -528,10 +504,6 @@ export async function createInvoice(invoiceData: CreateInvoiceRequest | any, doc
                 [GREENINVOICE_API_BASE]: ['/api/v1/documents']
             };
         
-        // #region agent log
-        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'greenInvoiceService.ts:494',message:'createInvoice - endpoints configuration',data:{baseUrlsToTry,adjustedEndpoints,endpointsToTry:endpointsToTry.slice(0,5)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-        // #endregion
-        
         let lastError: any = null;
         
         // Try each endpoint with each base URL
@@ -568,10 +540,6 @@ export async function createInvoice(invoiceData: CreateInvoiceRequest | any, doc
                             console.error(`[CREATE DOCUMENT] ERROR: signed field has unexpected value: ${invoiceData.signed}`);
                         }
                         
-                        // #region agent log
-                        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'greenInvoiceService.ts:551',message:'createInvoice - before request (PHP SDK format)',data:{baseUrl,endpoint,fullUrl,signed:invoiceData.signed,signedType:typeof invoiceData.signed,requestBodyPreview:JSON.stringify(invoiceData).substring(0,300)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-                        // #endregion
-                        
                         // Make direct request with this base URL
                         const token = await authenticate();
                         const response = await fetch(fullUrl, {
@@ -583,15 +551,8 @@ export async function createInvoice(invoiceData: CreateInvoiceRequest | any, doc
                             body: JSON.stringify(invoiceData)
                         });
                         
-                        // #region agent log
-                        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'greenInvoiceService.ts:535',message:'createInvoice - endpoint response (PHP SDK format)',data:{fullUrl,status:response.status,statusText:response.statusText,ok:response.ok,headers:Object.fromEntries(response.headers.entries())},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-                        // #endregion
-                        
                         if (!response.ok) {
                             const rawText = await response.text();
-                            // #region agent log
-                            fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'greenInvoiceService.ts:537',message:'createInvoice - endpoint error (PHP SDK format)',data:{fullUrl,status:response.status,statusText:response.statusText,rawText:rawText?.substring(0,500)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-                            // #endregion
                             throw new Error(`API request failed (${response.status}): ${rawText || response.statusText}`);
                         }
                         
@@ -608,10 +569,6 @@ export async function createInvoice(invoiceData: CreateInvoiceRequest | any, doc
                                 console.log(`[CREATE DOCUMENT] SUCCESS: Document created as draft (signed=false)`);
                             }
                         }
-                        
-                        // #region agent log
-                        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'greenInvoiceService.ts:582',message:'createInvoice - API response (PHP SDK format)',data:{fullUrl,status:response.status,resultSigned:result.signed,requestSigned:invoiceData.signed,resultId:result.id,resultPreview:JSON.stringify(result).substring(0,300)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-                        // #endregion
                         
                         // Handle response (same as below)
                         let invoice: GreenInvoiceInvoice;
@@ -695,10 +652,6 @@ export async function createInvoice(invoiceData: CreateInvoiceRequest | any, doc
                             console.error(`[CREATE DOCUMENT] ERROR: signed field has unexpected value: ${invoiceData.signed}`);
                         }
                         
-                        // #region agent log
-                        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'greenInvoiceService.ts:625',message:'createInvoice - before request (Python SDK format)',data:{baseUrl,endpoint,fullUrl,signed:invoiceData.signed,signedType:typeof invoiceData.signed,requestBodyPreview:JSON.stringify(invoiceData).substring(0,300)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-                        // #endregion
-                        
                         // Verify token before request
                         const token = await authenticate();
                         console.log(`[CREATE DOCUMENT] Token obtained, length: ${token?.length || 0}`);
@@ -723,10 +676,6 @@ export async function createInvoice(invoiceData: CreateInvoiceRequest | any, doc
                             }
                         }
                         
-                        // #region agent log
-                        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'greenInvoiceService.ts:649',message:'createInvoice - API response (Python SDK format)',data:{endpoint,resultSigned:response.signed,requestSigned:invoiceData.signed,hasId:!!response.id,hasInvoice:!!response.invoice,responseKeys:Object.keys(response),resultPreview:JSON.stringify(response).substring(0,300)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-                        // #endregion
-
                         // Handle different response formats
                         let invoice: GreenInvoiceInvoice;
                         if (isEstimate) {
@@ -801,9 +750,6 @@ export async function createInvoice(invoiceData: CreateInvoiceRequest | any, doc
                     const errorCodeMatch = error.message?.match(/errorCode["\s:]+(\d+)/);
                     const errorCode = errorCodeMatch ? errorCodeMatch[1] : null;
                     console.log(`Invoice endpoint ${endpoint} with base ${baseUrl} failed (${status}):`, error.message);
-                    // #region agent log
-                    fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'greenInvoiceService.ts:622',message:'createInvoice - endpoint failed',data:{baseUrl,endpoint,status,errorCode,errorMessage:error.message?.substring(0,200)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-                    // #endregion
                     // If endpoint returns 400 (not 404), it means the endpoint exists but there's a validation error
                     // This is better than 404 - we found the right endpoint!
                     if (status === '400' && errorCode === '2405') {

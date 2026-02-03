@@ -38,22 +38,109 @@ const ACTION_OPTIONS: { value: string; label: string }[] = [
     ...Object.entries(ACTION_LABELS).map(([value, label]) => ({ value, label })),
 ];
 
+/** Hebrew labels for metadata keys (for display) */
+const METADATA_KEY_LABELS: Record<string, string> = {
+    orderNumber: 'הזמנה',
+    oldStatus: 'היה',
+    newStatus: 'הפך ל',
+    name: 'שם',
+    amount: 'סכום',
+    victimName: 'מיזוג מ',
+    targetName: 'לתוך',
+    docType: 'סוג מסמך',
+    paymentsCount: 'תשלומים',
+    paymentsAdded: 'תשלומים שויכו',
+    created: 'חדשים',
+    updated: 'עודכנו',
+    reference: 'אסמכתא',
+    type: 'סוג',
+    configId: 'מזהה',
+    label: 'תווית',
+    receivableId: 'גבייה',
+    debtId: 'חוב',
+};
+
 function formatTimestamp(d: Date): string {
     const date = typeof d === 'string' ? new Date(d) : d;
     return date.toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem', dateStyle: 'short', timeStyle: 'short' });
 }
 
+interface ActivityDisplayDetails {
+    beforeAfter: string | null;
+    summary: string;
+    detailLines: string[];
+}
+
+function formatActivityDetails(a: Activity): ActivityDisplayDetails {
+    const meta = a.metadata || {};
+    const beforeAfter: string | null =
+        meta.oldStatus != null && meta.newStatus != null
+            ? `היה: ${String(meta.oldStatus)} → הפך ל: ${String(meta.newStatus)}`
+            : meta.oldValue != null && meta.newValue != null
+                ? `היה: ${String(meta.oldValue)} → הפך ל: ${String(meta.newValue)}`
+                : null;
+
+    let summary = '';
+    switch (a.action) {
+        case 'status_change':
+            if (meta.oldStatus != null && meta.newStatus != null) {
+                summary = `מ־${String(meta.oldStatus)} ל־${String(meta.newStatus)}`;
+            }
+            if (meta.orderNumber) summary = `הזמנה ${meta.orderNumber}: ${summary || 'שינוי סטטוס'}`;
+            break;
+        case 'payment':
+            if (typeof meta.amount === 'number') summary = `סכום: ₪${meta.amount.toLocaleString()}`;
+            if (meta.name) summary = summary ? `${meta.name} — ${summary}` : String(meta.name);
+            break;
+        case 'merge':
+            if (meta.victimName && meta.targetName) summary = `מ־${meta.victimName} לתוך ${meta.targetName}`;
+            else if (meta.name) summary = String(meta.name);
+            break;
+        case 'create':
+            if (meta.name) summary = `נוצר: ${meta.name}`;
+            if (meta.orderNumber) summary = summary ? `${summary} (${meta.orderNumber})` : `הזמנה ${meta.orderNumber}`;
+            break;
+        case 'update':
+            if (meta.orderNumber) summary = `הזמנה ${meta.orderNumber}`;
+            if (meta.docType) summary = summary ? `${summary}, ${meta.docType}` : String(meta.docType);
+            if (meta.paymentsAdded != null) summary = (summary ? summary + ', ' : '') + `${meta.paymentsAdded} תשלומים שויכו`;
+            if (meta.label) summary = summary ? `${summary}; ${meta.label}` : String(meta.label);
+            break;
+        case 'sync':
+            if (meta.created != null && meta.updated != null) summary = `חדשים: ${meta.created}, עודכנו: ${meta.updated}`;
+            break;
+        case 'delete':
+            if (meta.label) summary = String(meta.label);
+            break;
+        default:
+            if (meta.orderNumber) summary = `הזמנה ${meta.orderNumber}`;
+            if (meta.name) summary = summary ? `${summary}; ${meta.name}` : String(meta.name);
+    }
+
+    const detailLines = Object.entries(meta).map(([k, v]) => {
+        const label = METADATA_KEY_LABELS[k] ?? k;
+        const val = typeof v === 'number' && (k === 'amount' || k === 'paymentsCount' || k === 'paymentsAdded' || k === 'created' || k === 'updated')
+            ? (k === 'amount' ? `₪${v.toLocaleString()}` : String(v))
+            : String(v);
+        return `${label}: ${val}`;
+    });
+
+    return { beforeAfter, summary, detailLines };
+}
+
 function buildCsv(activities: Activity[]): string {
     const BOM = '\uFEFF';
-    const header = 'תאריך,משתמש,פעולה,סוג ישות,תיאור,מטא-נתונים';
+    const header = 'תאריך,משתמש,פעולה,סוג ישות,תיאור,מה היה / מה קרה,מטא-נתונים';
     const rows = activities.map((a) => {
         const date = formatTimestamp(a.timestamp);
         const user = (a.username ?? a.userId ?? '-');
         const action = (a.action ? ACTION_LABELS[a.action] ?? a.action : '-');
         const entityType = (a.entityType ? ENTITY_TYPE_LABELS[a.entityType] ?? a.entityType : '-');
         const desc = (a.description ?? '').replace(/"/g, '""');
+        const details = formatActivityDetails(a);
+        const whatHappened = [details.beforeAfter, details.summary].filter(Boolean).join(' | ').replace(/"/g, '""');
         const meta = a.metadata ? JSON.stringify(a.metadata).replace(/"/g, '""') : '';
-        return `"${date}","${user}","${action}","${entityType}","${desc}","${meta}"`;
+        return `"${date}","${user}","${action}","${entityType}","${desc}","${whatHappened}","${meta}"`;
     });
     return BOM + header + '\n' + rows.join('\n');
 }
@@ -245,58 +332,70 @@ const LogsAndAuditTab: React.FC<LogsAndAuditTabProps> = ({ employees, onNavigate
                                     <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase">פעולה</th>
                                     <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase">ישות</th>
                                     <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase">תיאור</th>
-                                    <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase">פרטים</th>
+                                    <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase">מה היה / מה קרה</th>
+                                    <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase">פרטים מלאים</th>
                                 </tr>
                             </thead>
                             <tbody className="bg-white divide-y divide-slate-200">
-                                {activities.map((a) => (
-                                    <tr key={a.id} className="hover:bg-slate-50">
-                                        <td className="px-4 py-2 text-sm text-slate-600 whitespace-nowrap">
-                                            {formatTimestamp(a.timestamp)}
-                                        </td>
-                                        <td className="px-4 py-2 text-sm text-slate-700">
-                                            {a.username ?? a.userId ?? '-'}
-                                        </td>
-                                        <td className="px-4 py-2 text-sm">
-                                            {a.action ? (
-                                                <span className="px-2 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-800">
-                                                    {ACTION_LABELS[a.action] ?? a.action}
-                                                </span>
-                                            ) : '-'}
-                                        </td>
-                                        <td className="px-4 py-2 text-sm">
-                                            {a.entityType ? (
-                                                <span className="text-slate-700">
-                                                    {ENTITY_TYPE_LABELS[a.entityType] ?? a.entityType}
-                                                    {a.entityId && onNavigateToOrder && a.entityType === 'order' ? (
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => onNavigateToOrder(a.entityId!)}
-                                                            className="mr-1 text-primary hover:underline"
-                                                        >
-                                                            #{a.metadata?.orderNumber ?? a.entityId.slice(0, 8)}
-                                                        </button>
-                                                    ) : a.entityId ? (
-                                                        <span className="text-slate-500"> ({a.entityId.slice(0, 8)}…)</span>
-                                                    ) : null}
-                                                </span>
-                                            ) : '-'}
-                                        </td>
-                                        <td className="px-4 py-2 text-sm text-slate-800 max-w-md truncate" title={a.description}>
-                                            {a.description}
-                                        </td>
-                                        <td className="px-4 py-2 text-sm">
-                                            {a.metadata && Object.keys(a.metadata).length > 0 ? (
-                                                <span className="text-xs text-slate-500">
-                                                    {Object.entries(a.metadata)
-                                                        .slice(0, 2)
-                                                        .map(([k, v]) => `${k}: ${String(v)}`)
-                                                        .join(', ')}
-                                                </span>
-                                            ) : '-'}
-                                        </td>
-                                    </tr>
-                                ))}
+                                {activities.map((a) => {
+                                    const details = formatActivityDetails(a);
+                                    return (
+                                        <tr key={a.id} className="hover:bg-slate-50">
+                                            <td className="px-4 py-2 text-sm text-slate-600 whitespace-nowrap">
+                                                {formatTimestamp(a.timestamp)}
+                                            </td>
+                                            <td className="px-4 py-2 text-sm text-slate-700">
+                                                {a.username ?? a.userId ?? '-'}
+                                            </td>
+                                            <td className="px-4 py-2 text-sm">
+                                                {a.action ? (
+                                                    <span className="px-2 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-800">
+                                                        {ACTION_LABELS[a.action] ?? a.action}
+                                                    </span>
+                                                ) : '-'}
+                                            </td>
+                                            <td className="px-4 py-2 text-sm">
+                                                {a.entityType ? (
+                                                    <span className="text-slate-700">
+                                                        {ENTITY_TYPE_LABELS[a.entityType] ?? a.entityType}
+                                                        {a.entityId && onNavigateToOrder && a.entityType === 'order' ? (
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => onNavigateToOrder(a.entityId!)}
+                                                                className="mr-1 text-primary hover:underline"
+                                                            >
+                                                                #{a.metadata?.orderNumber ?? a.entityId.slice(0, 8)}
+                                                            </button>
+                                                        ) : a.entityId ? (
+                                                            <span className="text-slate-500"> ({a.entityId.slice(0, 8)}…)</span>
+                                                        ) : null}
+                                                    </span>
+                                                ) : '-'}
+                                            </td>
+                                            <td className="px-4 py-2 text-sm text-slate-800 max-w-md truncate" title={a.description}>
+                                                {a.description}
+                                            </td>
+                                            <td className="px-4 py-2 text-sm text-slate-700 max-w-xs">
+                                                {details.beforeAfter ? (
+                                                    <span className="block font-medium text-slate-800">{details.beforeAfter}</span>
+                                                ) : null}
+                                                {details.summary ? (
+                                                    <span className="block text-slate-600">{details.summary}</span>
+                                                ) : null}
+                                                {!details.beforeAfter && !details.summary && '-'}
+                                            </td>
+                                            <td className="px-4 py-2 text-sm">
+                                                {details.detailLines.length > 0 ? (
+                                                    <div className="text-xs text-slate-500 space-y-0.5" title={details.detailLines.join('\n')}>
+                                                        {details.detailLines.map((line, i) => (
+                                                            <div key={i}>{line}</div>
+                                                        ))}
+                                                    </div>
+                                                ) : '-'}
+                                            </td>
+                                        </tr>
+                                    );
+                                })}
                             </tbody>
                         </table>
                     </div>

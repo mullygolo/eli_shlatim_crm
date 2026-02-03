@@ -19,7 +19,6 @@ router.get('/paginated', async (req, res) => {
         const page = parseInt(req.query.page as string) || 1;
         const limit = parseInt(req.query.limit as string) || 50;
         const filters = req.query.filters ? JSON.parse(req.query.filters as string) : {};
-        
         // Get vatRate from settings
         const settings = await getSettings();
         const vatRate = settings?.vatRate || 0;

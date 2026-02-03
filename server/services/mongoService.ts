@@ -1,5 +1,4 @@
 import { MongoClient, Db } from 'mongodb';
-import fs from 'fs';
 import {
     Customer, Order, Supplier, Employee, Activity, ActivityFilters, ActivitiesResult, OrderStatusConfiguration,
     FixedExpense, VariableExpense, Loan, Debt, Receivable, EquityInvestment,
@@ -10,7 +9,7 @@ import {
     OrderDocumentLink
 } from '../types.js';
 import { hashPassword } from '../utils/password.js';
-import { getTodayRangeIsrael, getDateStringIsrael } from '../utils/timezone.js';
+import { getTodayRangeIsrael, getDateStringIsrael, getMonthRangeIsrael } from '../utils/timezone.js';
 import { calculateOrderTotals, calculateDueDate } from '../utils/calculations.js';
 
 // MongoDB Connection Configuration
@@ -314,6 +313,22 @@ export async function getOrderById(orderId: string): Promise<Order | null> {
     }
 }
 
+/** Find one order by order number (trimmed). For import: update existing order status. */
+export async function getOrderByOrderNumber(orderNumber: string): Promise<Order | null> {
+    try {
+        const key = (orderNumber || '').trim();
+        if (!key) return null;
+        const database = await getDb();
+        const collection = database.collection<Order>('orders');
+        const doc = await collection.findOne({ orderNumber: key });
+        if (!doc) return null;
+        return deserializeDates(doc) as Order;
+    } catch (error) {
+        console.error('Error fetching order by order number:', error);
+        throw error;
+    }
+}
+
 /** Distinct preparationStatus values from all orders' line items (for autocomplete suggestions). */
 export async function getPreparationStatusSuggestions(): Promise<string[]> {
     try {
@@ -489,6 +504,14 @@ export async function getOrdersPaginated(filters: any, page: number = 1, limit: 
             query.customerId = { $in: filters.customerFilter };
         }
         
+        // Only orders whose customer is import placeholder (לא תואם לחשבונית ירוקה)
+        if (filters.customerIsImportPlaceholderOnly === true) {
+            const placeholderCustomerIds = customers
+                .filter((c: Customer) => c.isImportPlaceholder === true)
+                .map((c: Customer) => c.id);
+            query.customerId = placeholderCustomerIds.length > 0 ? { $in: placeholderCustomerIds } : { $in: [] };
+        }
+        
         // Employee filter
         if (filters.employeeFilter && filters.employeeFilter.length > 0) {
             query.employeeId = { $in: filters.employeeFilter };
@@ -522,12 +545,13 @@ export async function getOrdersPaginated(filters: any, page: number = 1, limit: 
                 if (lteValid) query[dateField].$lte = lteStr;
             }
         } else if (filters.monthFilter && filters.monthFilter !== 'all') {
-            // Month/Year filter
-            const month = parseInt(filters.monthFilter);
-            const year = filters.yearFilter && filters.yearFilter !== 'all' ? parseInt(filters.yearFilter) : new Date().getFullYear();
-            const startDate = new Date(year, month - 1, 1);
-            const endDate = new Date(year, month, 0, 23, 59, 59, 999);
-            query[dateField] = { $gte: startDate, $lte: endDate };
+            // Month/Year filter (Israel timezone so stored dates match)
+            const month = parseInt(filters.monthFilter, 10);
+            const year = filters.yearFilter && filters.yearFilter !== 'all' ? parseInt(filters.yearFilter, 10) : new Date().getFullYear();
+            if (!isNaN(month) && month >= 1 && month <= 12 && !isNaN(year)) {
+                const { start: startDate, end: endDate } = getMonthRangeIsrael(year, month);
+                query[dateField] = { $gte: startDate, $lte: endDate };
+            }
         } else if (filters.yearFilter && filters.yearFilter !== 'all') {
             // Year filter only
             const year = parseInt(filters.yearFilter);
@@ -1150,42 +1174,24 @@ export async function initializeDefaultAdmin(): Promise<void> {
 
 // Get admin employee without username (for initial setup)
 export async function getAdminWithoutUsername(): Promise<Employee | null> {
-    // #region agent log
-    fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'server/services/mongoService.ts:234',message:'getAdminWithoutUsername called',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-    // #endregion
     try {
         const database = await getDb();
         const collection = database.collection<Employee>('employees');
         
         // Get all admin employees
         const adminEmployees = await collection.find({ roleType: 'ADMIN' }).toArray();
-        // #region agent log
-        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'server/services/mongoService.ts:240',message:'found admin employees',data:{adminCount:adminEmployees.length,adminIds:adminEmployees.map((e:any)=>e.id)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-        // #endregion
         
         // Find first admin without username
         for (const doc of adminEmployees) {
             const employee = deserializeDates(doc) as Employee;
-            // #region agent log
-            fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'server/services/mongoService.ts:245',message:'checking admin employee',data:{employeeId:employee.id,hasUsername:!!employee.username,username:employee.username||null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-            // #endregion
             if (!employee.username || employee.username === '') {
                 // Return full employee data (including passwordHash for setup)
-                // #region agent log
-                fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'server/services/mongoService.ts:247',message:'found admin without username',data:{employeeId:employee.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-                // #endregion
                 return employee;
             }
         }
         
-        // #region agent log
-        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'server/services/mongoService.ts:251',message:'no admin without username found',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-        // #endregion
         return null;
     } catch (error) {
-        // #region agent log
-        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'server/services/mongoService.ts:253',message:'getAdminWithoutUsername error',data:{errorMessage:error instanceof Error?error.message:String(error)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-        // #endregion
         console.error('Error fetching admin without username:', error);
         throw error;
     }
@@ -1216,26 +1222,17 @@ export async function createEmployee(employee: Employee): Promise<Employee> {
 }
 
 export async function updateEmployee(employee: Employee): Promise<Employee> {
-    // #region agent log
-    fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'server/services/mongoService.ts:282',message:'updateEmployee called',data:{employeeId:employee.id,hasUsername:!!employee.username,hasPasswordHash:!!employee.passwordHash},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-    // #endregion
     try {
         const database = await getDb();
         const collection = database.collection<Employee>('employees');
         
         // Get existing employee to check if password changed
         const existing = await collection.findOne({ id: employee.id });
-        // #region agent log
-        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'server/services/mongoService.ts:288',message:'found existing employee',data:{found:!!existing,existingId:existing?.id||null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-        // #endregion
         
         const employeeToSave = { ...employee };
         
         // If passwordHash is provided and not already hashed, hash it
         if (employeeToSave.passwordHash && employeeToSave.passwordHash !== '') {
-            // #region agent log
-            fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'server/services/mongoService.ts:293',message:'checking passwordHash',data:{hashLength:employeeToSave.passwordHash.length,isAlreadyHashed:employeeToSave.passwordHash.startsWith('$2')},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-            // #endregion
             if (!employeeToSave.passwordHash.startsWith('$2')) {
                 // Password is plain text, hash it
                 employeeToSave.passwordHash = await hashPassword(employeeToSave.passwordHash);
@@ -1249,24 +1246,12 @@ export async function updateEmployee(employee: Employee): Promise<Employee> {
         const serialized = serializeDates(employeeToSave);
         // Remove _id from serialized object to avoid MongoDB immutable field error
         const { _id, ...serializedWithoutId } = serialized as any;
-        // #region agent log
-        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'server/services/mongoService.ts:305',message:'before replaceOne',data:{employeeId:employee.id,serializedKeys:Object.keys(serializedWithoutId),hasId:!!_id},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'B'})}).catch(()=>{});
-        // #endregion
         await collection.replaceOne({ id: employee.id }, serializedWithoutId);
-        // #region agent log
-        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'server/services/mongoService.ts:305',message:'after replaceOne',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-        // #endregion
         
         // Remove passwordHash from response
         const { passwordHash, resetPasswordToken, resetPasswordExpires, ...response } = deserializeDates(serialized) as Employee;
-        // #region agent log
-        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'server/services/mongoService.ts:308',message:'updateEmployee success',data:{responseId:response.id,responseKeys:Object.keys(response)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-        // #endregion
         return response as Employee;
     } catch (error) {
-        // #region agent log
-        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'server/services/mongoService.ts:310',message:'updateEmployee error',data:{errorMessage:error instanceof Error?error.message:String(error),errorStack:error instanceof Error?error.stack:null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-        // #endregion
         console.error('Error updating employee:', error);
         throw error;
     }
@@ -2643,12 +2628,6 @@ export async function initializeAttendanceIndexes(): Promise<void> {
 // Clock in/out functions with server-side time
 export async function clockInAttendance(employeeId: string, isWFH: boolean = false): Promise<AttendanceRecord> {
     try {
-        // #region agent log
-        const logPath = 'c:\\Users\\danig\\eli_shlatim_crm\\.cursor\\debug.log';
-        const logEntry = JSON.stringify({location:'server/services/mongoService.ts:clockInAttendance',message:'Function entry',data:{employeeId,isWFH},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A,B,C'}) + '\n';
-        fs.appendFileSync(logPath, logEntry);
-        // #endregion
-        
         const database = await getDb();
         const collection = database.collection<any>('attendanceRecords');
         
@@ -2689,11 +2668,6 @@ export async function clockInAttendance(employeeId: string, isWFH: boolean = fal
         
         const serialized = serializeDates(newRecord);
         
-        // #region agent log
-        const logEntryBeforeInsert = JSON.stringify({location:'server/services/mongoService.ts:clockInAttendance',message:'Before insertOne',data:{employeeId,serializedId:serialized.id,serializedClockIn:serialized.clockIn,serializedClockInType:typeof serialized.clockIn,dateString:serialized.dateString},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'}) + '\n';
-        fs.appendFileSync(logPath, logEntryBeforeInsert);
-        // #endregion
-        
         try {
             await collection.insertOne(serialized);
         } catch (insertError: any) {
@@ -2719,18 +2693,8 @@ export async function clockInAttendance(employeeId: string, isWFH: boolean = fal
         
         const result = deserializeDates(serialized) as AttendanceRecord;
         
-        // #region agent log
-        const logEntrySuccess = JSON.stringify({location:'server/services/mongoService.ts:clockInAttendance',message:'Function exit success',data:{employeeId,resultId:result.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A,B,C'}) + '\n';
-        fs.appendFileSync(logPath, logEntrySuccess);
-        // #endregion
-        
         return result;
     } catch (error) {
-        // #region agent log
-        const logPathError = 'c:\\Users\\danig\\eli_shlatim_crm\\.cursor\\debug.log';
-        const logEntry = JSON.stringify({location:'server/services/mongoService.ts:clockInAttendance:catch',message:'Error in clockInAttendance',data:{employeeId,errorMessage:error instanceof Error ? error.message : String(error)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A,B,C,D,E'}) + '\n';
-        fs.appendFileSync(logPathError, logEntry);
-        // #endregion
         console.error('Error clocking in:', error);
         throw error;
     }
@@ -2738,22 +2702,11 @@ export async function clockInAttendance(employeeId: string, isWFH: boolean = fal
 
 export async function clockOutAttendance(recordId: string): Promise<AttendanceRecord> {
     try {
-        // #region agent log
-        const logPath = 'c:\\Users\\danig\\eli_shlatim_crm\\.cursor\\debug.log';
-        const logEntry = JSON.stringify({location:'server/services/mongoService.ts:clockOutAttendance',message:'Function entry',data:{recordId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A,B,C'}) + '\n';
-        fs.appendFileSync(logPath, logEntry);
-        // #endregion
-        
         const database = await getDb();
         const collection = database.collection<AttendanceRecord>('attendanceRecords');
         
         // Find the record
         const existingDoc = await collection.findOne({ id: recordId });
-        
-        // #region agent log
-        const logEntry2 = JSON.stringify({location:'server/services/mongoService.ts:clockOutAttendance',message:'After findOne query',data:{recordId,found:!!existingDoc,existingId:existingDoc?.id,existingClockOut:existingDoc?.clockOut},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B,C,D'}) + '\n';
-        fs.appendFileSync(logPath, logEntry2);
-        // #endregion
         
         if (!existingDoc) {
             throw new Error('Attendance record not found');
@@ -2764,11 +2717,6 @@ export async function clockOutAttendance(recordId: string): Promise<AttendanceRe
         
         // Remove _id immediately to prevent it from being included in the update
         const { _id: existingId, ...existing } = existingDeserialized;
-        
-        // #region agent log
-        const logEntryDeserialize = JSON.stringify({location:'server/services/mongoService.ts:clockOutAttendance',message:'After deserializeDates and _id removal',data:{recordId,existingClockIn:existing?.clockIn,existingClockInType:typeof existing?.clockIn,existingClockOut:existing?.clockOut,existingId:existing?.id,existingEmployeeId:existing?.employeeId,hadId:!!existingId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A,B'}) + '\n';
-        fs.appendFileSync(logPath, logEntryDeserialize);
-        // #endregion
         
         if (existing.clockOut) {
             throw new Error('Employee already clocked out for this record');
@@ -2794,11 +2742,6 @@ export async function clockOutAttendance(recordId: string): Promise<AttendanceRe
         const durationMs = now.getTime() - clockInDate.getTime();
         const totalHours = Math.max(0, durationMs / (1000 * 60 * 60));
         
-        // #region agent log
-        const logEntryCalc = JSON.stringify({location:'server/services/mongoService.ts:clockOutAttendance',message:'After calculation',data:{recordId,now:now.toISOString(),clockInDate:clockInDate.toISOString(),durationMs,totalHours},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A,E'}) + '\n';
-        fs.appendFileSync(logPath, logEntryCalc);
-        // #endregion
-        
         const updated = {
             ...existing,
             employeeName: employeeName || existing.employeeName,
@@ -2809,46 +2752,15 @@ export async function clockOutAttendance(recordId: string): Promise<AttendanceRe
         
         const serialized = serializeDates(updated);
         
-        // #region agent log
-        const logEntrySerialized = JSON.stringify({location:'server/services/mongoService.ts:clockOutAttendance',message:'After serializeDates',data:{recordId,serializedClockOut:serialized.clockOut,serializedClockOutType:typeof serialized.clockOut,serializedId:serialized.id,hasId:!!serialized._id,serializedKeys:Object.keys(serialized)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'}) + '\n';
-        fs.appendFileSync(logPath, logEntrySerialized);
-        // #endregion
-        
         // Remove _id from serialized object to avoid MongoDB immutable field error
         const { _id, ...serializedWithoutId } = serialized as any;
         
-        // #region agent log
-        const logEntryBeforeReplace = JSON.stringify({location:'server/services/mongoService.ts:clockOutAttendance',message:'Before replaceOne - final check',data:{recordId,serializedWithoutIdKeys:Object.keys(serializedWithoutId),hasIdInWithoutId:!!serializedWithoutId._id,serializedWithoutIdClockOut:serializedWithoutId.clockOut},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B,E'}) + '\n';
-        fs.appendFileSync(logPath, logEntryBeforeReplace);
-        // #endregion
-        
-        // #region agent log
-        const logEntry3 = JSON.stringify({location:'server/services/mongoService.ts:clockOutAttendance',message:'Before replaceOne',data:{recordId,serializedId:serialized.id,hasId:!!serialized._id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B,C,E'}) + '\n';
-        fs.appendFileSync(logPath, logEntry3);
-        // #endregion
-        
-        const replaceResult = await collection.replaceOne({ id: recordId }, serializedWithoutId);
-        
-        // #region agent log
-        const logEntryAfterReplace = JSON.stringify({location:'server/services/mongoService.ts:clockOutAttendance',message:'After replaceOne',data:{recordId,matchedCount:replaceResult.matchedCount,modifiedCount:replaceResult.modifiedCount,acknowledged:replaceResult.acknowledged},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'}) + '\n';
-        fs.appendFileSync(logPath, logEntryAfterReplace);
-        // #endregion
+        await collection.replaceOne({ id: recordId }, serializedWithoutId);
         
         const result = deserializeDates(serialized) as AttendanceRecord;
         
-        // #region agent log
-        const logEntry4 = JSON.stringify({location:'server/services/mongoService.ts:clockOutAttendance',message:'Function exit success',data:{resultId:result.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A,B,C'}) + '\n';
-        fs.appendFileSync(logPath, logEntry4);
-        // #endregion
-        
         return result;
     } catch (error) {
-        // #region agent log
-        const logPath = 'c:\\Users\\danig\\eli_shlatim_crm\\.cursor\\debug.log';
-        const logEntry = JSON.stringify({location:'server/services/mongoService.ts:clockOutAttendance:catch',message:'Error in clockOutAttendance',data:{recordId,errorMessage:error instanceof Error ? error.message : String(error)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A,B,C,D,E'}) + '\n';
-        fs.appendFileSync(logPath, logEntry);
-        // #endregion
-        
         console.error('Error clocking out:', error);
         throw error;
     }

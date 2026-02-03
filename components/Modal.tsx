@@ -1,7 +1,7 @@
 
 import React from 'react';
 
-type ModalSize = 'lg' | 'xl' | '2xl' | '3xl' | '4xl' | '5xl';
+type ModalSize = 'lg' | 'xl' | '2xl' | '3xl' | '4xl' | '5xl' | '6xl' | '7xl' | '8xl';
 
 interface ModalProps {
     title: string;
@@ -22,6 +22,9 @@ const Modal: React.FC<ModalProps> = ({ title, onClose, children, size = 'lg', zI
         '3xl': 'max-w-3xl',
         '4xl': 'max-w-4xl',
         '5xl': 'max-w-5xl',
+        '6xl': 'max-w-6xl',
+        '7xl': 'max-w-7xl',
+        '8xl': 'max-w-[min(1640px,95vw)]',
     };
 
     return (

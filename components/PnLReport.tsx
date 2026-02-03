@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Order, FixedExpense, VariableExpense, Loan, Employee, AttendanceRecord, OrderStatusConfiguration, Debt, Receivable, TransactionStatus } from '../types';
+import { Order, FixedExpense, VariableExpense, Loan, Employee, AttendanceRecord, OrderStatusConfiguration, Debt, Receivable, TransactionStatus, PayrollOverrideMap } from '../types';
 import { calculateOrderTotals, getEmployeeSalaryAtDate } from '../utils/calculations';
 import Modal from './Modal';
 
@@ -14,6 +14,9 @@ interface PnLReportProps {
     vatRate: number;
     debts: Debt[];
     receivables: Receivable[];
+    payrollOverrides?: PayrollOverrideMap;
+    /** When provided, order numbers in income/cogs drill-down become clickable and open the order */
+    onNavigateToOrder?: (orderId: string) => void;
 }
 
 interface DrillDownItem {
@@ -22,6 +25,12 @@ interface DrillDownItem {
     date?: Date;
     description?: string;
     subtext?: string;
+    /** True when this payroll item uses a manual override from Attendance page */
+    manualOverride?: boolean;
+    /** Order id for income/cogs items - makes the order number clickable in drill-down */
+    orderId?: string;
+    /** Order number (e.g. ORD-1007) for display when opening the order */
+    orderNumber?: string;
 }
 
 interface MonthlyPnL {
@@ -62,7 +71,7 @@ interface MonthlyPnL {
 }
 
 const PnLReport: React.FC<PnLReportProps> = ({ 
-    orders, fixedExpenses, variableExpenses, loans, employees, attendanceRecords, statusConfigs, vatRate, debts, receivables
+    orders, fixedExpenses, variableExpenses, loans, employees, attendanceRecords, statusConfigs, vatRate, debts, receivables, payrollOverrides = {}, onNavigateToOrder
 }) => {
     const [drillDown, setDrillDown] = useState<{ title: string; items: DrillDownItem[] } | null>(null);
 
@@ -87,16 +96,35 @@ const PnLReport: React.FC<PnLReportProps> = ({
         return years;
     }, []);
 
-    // Updated Balance Overview with Incl/Excl VAT
+    // One document per orderNumber: keep the one with earliest dealStartDate/date (same as PnL table and Orders page)
+    const canonicalOrders = useMemo(() => {
+        const ordersByNumber = new Map<string, Order>();
+        orders.forEach(order => {
+            const key = order.orderNumber;
+            const existing = ordersByNumber.get(key);
+            const orderDate = new Date(order.dealStartDate || order.date).getTime();
+            if (!existing) {
+                ordersByNumber.set(key, order);
+                return;
+            }
+            const existingDate = new Date(existing.dealStartDate || existing.date).getTime();
+            if (orderDate < existingDate) ordersByNumber.set(key, order);
+        });
+        return Array.from(ordersByNumber.values());
+    }, [orders]);
+
+    // Updated Balance Overview with Incl/Excl VAT (uses canonical orders to avoid double-counting)
     const balanceOverview = useMemo(() => {
         let customerDebtIncl = 0;
         let customerDebtExcl = 0;
         let supplierDebtIncl = 0;
         let supplierDebtExcl = 0;
 
-        orders.forEach(order => {
-            const config = statusConfigs.find(c => c.label === order.orderStatus);
-            if (!config?.isActiveDeal || config.isLost) return;
+        // Match status by trimmed label; exclude unknown status / אבוד / non-active
+        const getStatusConfig = (statusLabel: string) => statusConfigs.find(c => (c.label || '').trim() === (statusLabel || '').trim());
+        canonicalOrders.forEach(order => {
+            const config = getStatusConfig(order.orderStatus);
+            if (!config || config.isLost || !config.isActiveDeal) return;
 
             const { totalAmount, totalPaid } = calculateOrderTotals(order);
             const orderVat = order.vatRate ?? vatRate;
@@ -137,7 +165,7 @@ const PnLReport: React.FC<PnLReportProps> = ({
         });
 
         return { customerDebtIncl, customerDebtExcl, supplierDebtIncl, supplierDebtExcl };
-    }, [orders, statusConfigs, vatRate]);
+    }, [canonicalOrders, statusConfigs, vatRate]);
 
     const monthlyData = useMemo(() => {
         const pnlMap: Record<string, MonthlyPnL> = {};
@@ -176,19 +204,12 @@ const PnLReport: React.FC<PnLReportProps> = ({
             tempDate.setMonth(tempDate.getMonth() + 1);
         }
 
-        // 1. Process Orders (Income & COGS & VAT)
-        // #region agent log - Hypothesis F: Orders processing start
-        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PnLReport.tsx:179',message:'Orders processing start',data:{ordersCount:orders.length,startMonth,startYear,endMonth,endYear},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'F'})}).catch(()=>{});
-        // #endregion
-        
-        orders.forEach((order, orderIndex) => {
-            const config = statusConfigs.find(c => c.label === order.orderStatus);
-            
-            // #region agent log - Hypothesis F: Order check - detailed structure
-            fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PnLReport.tsx:187',message:'Order status check - detailed',data:{orderNumber:order.orderNumber,orderStatus:order.orderStatus,isActiveDeal:config?.isActiveDeal,hasPayments:!!order.payments,paymentsCount:order.payments?.length || 0,paymentsArray:order.payments,paymentsType:typeof order.payments,paymentsIsArray:Array.isArray(order.payments),orderKeys:Object.keys(order)},timestamp:Date.now(),sessionId:'debug-session',runId:'run3',hypothesisId:'F'})}).catch(()=>{});
-            // #endregion
-            
-            if (!config?.isActiveDeal) return;
+        // 1. Process Orders (Income & COGS & VAT) — uses canonicalOrders (one per orderNumber, earliest date)
+        const getStatusConfig = (statusLabel: string) => statusConfigs.find(c => (c.label || '').trim() === (statusLabel || '').trim());
+        canonicalOrders.forEach((order) => {
+            const config = getStatusConfig(order.orderStatus);
+            const skipStatus = !config || config.isLost || !config.isActiveDeal;
+            if (skipStatus) return;
 
             const rawDate = order.dealStartDate || order.date;
             const date = rawDate instanceof Date ? rawDate : new Date(rawDate);
@@ -207,14 +228,18 @@ const PnLReport: React.FC<PnLReportProps> = ({
             pnlMap[key].incomeItems.push({ 
                 name: `${order.orderNumber} - ${order.description}`, 
                 amount: totals.totalAmount, 
-                date: displayDate 
+                date: displayDate,
+                orderId: order.id,
+                orderNumber: order.orderNumber
             });
             
             pnlMap[key].cogs += totals.totalCost;
             pnlMap[key].cogsItems.push({ 
                 name: `עלויות ייצור: ${order.orderNumber}`, 
                 amount: totals.totalCost, 
-                date: displayDate 
+                date: displayDate,
+                orderId: order.id,
+                orderNumber: order.orderNumber
             });
             
             // VAT is now calculated on cash flow basis (when payments are made), not on order date
@@ -222,80 +247,42 @@ const PnLReport: React.FC<PnLReportProps> = ({
         });
         
         // 1a. Process Customer Payments (VAT Output - Cash Flow Basis)
-        // #region agent log - Hypothesis F: Customer payments processing start
-        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PnLReport.tsx:218',message:'Customer payments processing start',data:{ordersCount:orders.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'F'})}).catch(()=>{});
-        // #endregion
-        
-        orders.forEach((order, orderIndex) => {
-            const config = statusConfigs.find(c => c.label === order.orderStatus);
-            if (!config?.isActiveDeal) return;
+        canonicalOrders.forEach((order) => {
+            const config = getStatusConfig(order.orderStatus);
+            if (!config || config.isLost || !config.isActiveDeal) return;
             
             const currentVat = order.vatRate ?? vatRate;
             const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
-            
-            // #region agent log - Hypothesis F: Processing order payments
-            fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PnLReport.tsx:222',message:'Processing order payments',data:{orderNumber:order.orderNumber,hasPayments:!!order.payments,paymentsCount:order.payments?.length || 0,currentVat},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'F'})}).catch(()=>{});
-            // #endregion
-            
-            // Process customer payments
-            order.payments?.forEach((payment, paymentIndex) => {
-                // #region agent log - Hypothesis F: Payment status check
-                const hasInvalidStatus = payment.status && invalidStatuses.includes(payment.status);
-                fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PnLReport.tsx:227',message:'Payment status check',data:{orderNumber:order.orderNumber,paymentIndex,paymentStatus:payment.status,hasInvalidStatus,paymentAmount:payment.amount},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'F'})}).catch(()=>{});
-                // #endregion
-                
+
+            order.payments?.forEach((payment) => {
                 if (payment.status && invalidStatuses.includes(payment.status)) return;
                 
                 const date = payment.date instanceof Date ? payment.date : new Date(payment.date);
                 const key = getMonthKey(date);
-                
-                // #region agent log - Hypothesis B: Payment date filtering
-                const paymentMonth = date.getMonth() + 1;
-                const paymentYear = date.getFullYear();
-                const inRange = paymentMonth >= startMonth && paymentMonth <= endMonth && paymentYear >= startYear && paymentYear <= endYear;
-                fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PnLReport.tsx:234',message:'Customer payment date check',data:{orderNumber:order.orderNumber,paymentDate:date.toISOString(),paymentMonth,paymentYear,startMonth,startYear,endMonth,endYear,inRange,keyExists:!!pnlMap[key],amount:payment.amount},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'B'})}).catch(()=>{});
-                // #endregion
-                
-                if (!pnlMap[key]) {
-                    // #region agent log - Hypothesis F: Payment filtered out - key not in range
-                    fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PnLReport.tsx:238',message:'Payment filtered out - key not in pnlMap',data:{orderNumber:order.orderNumber,paymentDate:date.toISOString(),key,pnlMapKeys:Object.keys(pnlMap)},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'F'})}).catch(()=>{});
-                    // #endregion
-                    return;
-                }
+                if (!pnlMap[key]) return;
                 
                 // Calculate VAT from actual payment (cash flow basis)
                 const netAmount = payment.amount / (1 + currentVat / 100);
                 const vatAmount = payment.amount - netAmount;
                 
-                // #region agent log - Hypothesis C: VAT calculation from payment
-                fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PnLReport.tsx:245',message:'Customer payment VAT calculation',data:{orderNumber:order.orderNumber,paymentAmount:payment.amount,currentVat,netAmount,vatAmount,calculatedCorrectly:Math.abs((payment.amount - netAmount * (1 + currentVat / 100))) < 0.01,vatAmountGreaterThan001:vatAmount > 0.01},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'C'})}).catch(()=>{});
-                // #endregion
-                
                 if (vatAmount > 0.01) {
-                    const beforeVatOutput = pnlMap[key].vatOutput;
                     pnlMap[key].vatOutput += vatAmount;
                     pnlMap[key].vatOutputItems.push({
                         name: `מע"מ עסקאות (תשלום מלקוח): ${order.orderNumber}`,
                         amount: vatAmount,
                         date: payment.date,
-                        subtext: `חולץ מתשלום ₪${payment.amount.toLocaleString()}`
+                        subtext: `חולץ מתשלום ₪${payment.amount.toLocaleString()}`,
+                        orderId: order.id,
+                        orderNumber: order.orderNumber
                     });
-                    
-                    // #region agent log - Hypothesis C: VAT output updated
-                    fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PnLReport.tsx:254',message:'VAT output updated',data:{monthKey:key,beforeVatOutput,addedVatAmount:vatAmount,afterVatOutput:pnlMap[key].vatOutput,orderNumber:order.orderNumber},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'C'})}).catch(()=>{});
-                    // #endregion
-                } else {
-                    // #region agent log - Hypothesis F: VAT amount too small, skipped
-                    fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PnLReport.tsx:256',message:'VAT amount too small, skipped',data:{orderNumber:order.orderNumber,paymentAmount:payment.amount,vatAmount,currentVat},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'F'})}).catch(()=>{});
-                    // #endregion
                 }
             });
         });
         
         // 1b. Process Supplier Payments (VAT Input - Cash Flow Basis)
-        orders.forEach(order => {
-            const config = statusConfigs.find(c => c.label === order.orderStatus);
-            if (!config?.isActiveDeal) return;
+        canonicalOrders.forEach(order => {
+            const config = getStatusConfig(order.orderStatus);
+            if (!config || config.isLost || !config.isActiveDeal) return;
             
             const currentVat = order.vatRate ?? vatRate;
             const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
@@ -320,7 +307,9 @@ const PnLReport: React.FC<PnLReportProps> = ({
                         name: `תשלום לספק: ${order.orderNumber}`,
                         amount: netAmount,
                         date: payment.date,
-                        subtext: `פריט: ${li.description}`
+                        subtext: `פריט: ${li.description}`,
+                        orderId: order.id,
+                        orderNumber: order.orderNumber
                     });
                     
                     if (vatAmount > 0.01) {
@@ -329,7 +318,9 @@ const PnLReport: React.FC<PnLReportProps> = ({
                             name: `מע"מ תשומות (תשלום לספק): ${order.orderNumber}`,
                             amount: vatAmount,
                             date: payment.date,
-                            subtext: `חולץ מתשלום ₪${payment.amount.toLocaleString()}`
+                            subtext: `חולץ מתשלום ₪${payment.amount.toLocaleString()}`,
+                            orderId: order.id,
+                            orderNumber: order.orderNumber
                         });
                     }
                 });
@@ -355,7 +346,9 @@ const PnLReport: React.FC<PnLReportProps> = ({
                         name: `תשלום לספק: ${order.orderNumber}`,
                         amount: netAmount,
                         date: payment.date,
-                        subtext: `שירות: ${as.description}`
+                        subtext: `שירות: ${as.description}`,
+                        orderId: order.id,
+                        orderNumber: order.orderNumber
                     });
                     
                     if (vatAmount > 0.01) {
@@ -364,7 +357,9 @@ const PnLReport: React.FC<PnLReportProps> = ({
                             name: `מע"מ תשומות (תשלום לספק): ${order.orderNumber}`,
                             amount: vatAmount,
                             date: payment.date,
-                            subtext: `חולץ מתשלום ₪${payment.amount.toLocaleString()}`
+                            subtext: `חולץ מתשלום ₪${payment.amount.toLocaleString()}`,
+                            orderId: order.id,
+                            orderNumber: order.orderNumber
                         });
                     }
                 });
@@ -390,18 +385,10 @@ const PnLReport: React.FC<PnLReportProps> = ({
 
                     pnlMap[key].fixedExpenses += net;
                     pnlMap[key].fixedItems.push({ name: fe.name, amount: net, subtext: fe.category });
-                    
-                    // #region agent log - Hypothesis D: Fixed expense VAT calculation
                     if (vat > 0) {
-                        const beforeVatInput = pnlMap[key].vatInput;
-                        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PnLReport.tsx:347',message:'Fixed expense VAT calculation',data:{expenseName:fe.name,monthKey:key,monthlyAmount:amount,isVatExempt:fe.isVatExempt,includesVat:fe.includesVat,vatRate,net,vat,beforeVatInput},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
                         pnlMap[key].vatInput += vat;
                         pnlMap[key].vatInputItems.push({ name: `מע"מ תשומות (קבועות): ${fe.name}`, amount: vat, subtext: fe.category });
-                        // #region agent log - Hypothesis D: After adding VAT
-                        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PnLReport.tsx:348',message:'After adding fixed expense VAT',data:{monthKey:key,afterVatInput:pnlMap[key].vatInput},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-                        // #endregion
                     }
-                    // #endregion
                 }
             });
         });
@@ -418,23 +405,13 @@ const PnLReport: React.FC<PnLReportProps> = ({
 
             pnlMap[key].variableExpenses += net;
             pnlMap[key].variableItems.push({ name: ve.name, amount: net, date: ve.date, subtext: ve.category });
-            
-            // #region agent log - Hypothesis D: Variable expense VAT calculation
             if (vat > 0) {
-                const beforeVatInput = pnlMap[key].vatInput;
-                fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PnLReport.tsx:367',message:'Variable expense VAT calculation',data:{expenseName:ve.name,monthKey:key,amount,isVatExempt:ve.isVatExempt,includesVat:ve.includesVat,vatRate,net,vat,beforeVatInput},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-                // #endregion
-                
                 pnlMap[key].vatInput += vat;
                 pnlMap[key].vatInputItems.push({ name: `מע"מ תשומות (משתנות): ${ve.name}`, amount: vat, date: ve.date, subtext: ve.category });
-                
-                // #region agent log - Hypothesis D: After adding variable expense VAT
-                fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PnLReport.tsx:369',message:'After adding variable expense VAT',data:{monthKey:key,afterVatInput:pnlMap[key].vatInput},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-                // #endregion
             }
         });
 
-        // 4. Process Payroll
+        // 4. Process Payroll (respects manual payroll overrides from Attendance page)
         Object.keys(pnlMap).forEach(monthKey => {
             const [year, month] = monthKey.split('-').map(Number);
             employees.forEach(emp => {
@@ -460,12 +437,41 @@ const PnLReport: React.FC<PnLReportProps> = ({
                         }
                     });
                 }
-                
-                const employerCost = monthlyGross * (emp.employerCostPercentage / 100);
-                const totalPayroll = monthlyGross + employerCost;
+
+                // Social/employer part: in PnL we use employerCostPercentage as % on top of gross
+                let employerCostPart = monthlyGross * ((emp.employerCostPercentage || 0) / 100);
+                let totalPayroll = monthlyGross + employerCostPart;
+                let manualOverride = false;
+
+                const override = (payrollOverrides ?? {})[`${emp.id}_${year}_${month}`];
+                if (override) {
+                    if (override.finalEmployerCost !== undefined) {
+                        // "עלות מעביד סופית" = total cost to employer (gross + social)
+                        totalPayroll = override.finalEmployerCost;
+                        if (override.finalGross !== undefined) {
+                            employerCostPart = override.finalEmployerCost - override.finalGross;
+                            monthlyGross = override.finalGross;
+                        }
+                        manualOverride = true;
+                    } else if (override.finalGross !== undefined) {
+                        monthlyGross = override.finalGross;
+                        employerCostPart = monthlyGross * ((emp.employerCostPercentage || 0) / 100);
+                        totalPayroll = monthlyGross + employerCostPart;
+                        manualOverride = true;
+                    }
+                }
+
                 if (totalPayroll > 0) {
                     pnlMap[monthKey].payroll += totalPayroll;
-                    pnlMap[monthKey].payrollItems.push({ name: emp.name, amount: totalPayroll, subtext: `שכר: ${monthlyGross.toLocaleString()}, סוציאליות: ${employerCost.toLocaleString()}` });
+                    const subtext = manualOverride && override?.finalEmployerCost !== undefined && override?.finalGross === undefined
+                        ? `עלות מעביד מתוקנת: ${totalPayroll.toLocaleString()}`
+                        : `שכר: ${monthlyGross.toLocaleString()}, סוציאליות: ${employerCostPart.toLocaleString()}${manualOverride ? ' • מתוקן ידנית' : ''}`;
+                    pnlMap[monthKey].payrollItems.push({
+                        name: emp.name,
+                        amount: totalPayroll,
+                        subtext,
+                        manualOverride: manualOverride || undefined
+                    });
                 }
             });
         });
@@ -582,12 +588,6 @@ const PnLReport: React.FC<PnLReportProps> = ({
                 if (!debt.isVatExempt) {
                     netAmount = p.amount / (1 + vatRate / 100);
                     const vatAmount = p.amount - netAmount;
-                    
-                    // #region agent log - Hypothesis E: Debt payment VAT calculation
-                    const beforeVatInput = pnlMap[key].vatInput;
-                    fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PnLReport.tsx:520',message:'Debt payment VAT calculation',data:{debtName:debt.name,monthKey:key,paymentAmount:p.amount,isVatExempt:debt.isVatExempt,vatRate,netAmount,vatAmount,beforeVatInput},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-                    // #endregion
-                    
                     if (vatAmount > 0.01) {
                         pnlMap[key].vatInput += vatAmount;
                         pnlMap[key].vatInputItems.push({ 
@@ -596,10 +596,6 @@ const PnLReport: React.FC<PnLReportProps> = ({
                             date: p.date, 
                             subtext: `חולץ מתשלום ₪${p.amount.toLocaleString()}` 
                         });
-                        
-                        // #region agent log - Hypothesis E: After adding debt VAT
-                        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PnLReport.tsx:523',message:'After adding debt payment VAT',data:{monthKey:key,afterVatInput:pnlMap[key].vatInput},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-                        // #endregion
                     }
                 }
                 
@@ -624,12 +620,6 @@ const PnLReport: React.FC<PnLReportProps> = ({
                 if (!rec.isVatExempt) {
                     netAmount = p.amount / (1 + vatRate / 100);
                     const vatAmount = p.amount - netAmount;
-                    
-                    // #region agent log - Hypothesis E: Receivable payment VAT calculation
-                    const beforeVatOutput = pnlMap[key].vatOutput;
-                    fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PnLReport.tsx:552',message:'Receivable payment VAT calculation',data:{receivableName:rec.name,monthKey:key,paymentAmount:p.amount,isVatExempt:rec.isVatExempt,vatRate,netAmount,vatAmount,beforeVatOutput},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-                    // #endregion
-                    
                     if (vatAmount > 0.01) {
                         pnlMap[key].vatOutput += vatAmount;
                         pnlMap[key].vatOutputItems.push({ 
@@ -638,10 +628,6 @@ const PnLReport: React.FC<PnLReportProps> = ({
                             date: p.date, 
                             subtext: `חולץ מגבייה ₪${p.amount.toLocaleString()}` 
                         });
-                        
-                        // #region agent log - Hypothesis E: After adding receivable VAT
-                        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PnLReport.tsx:555',message:'After adding receivable payment VAT',data:{monthKey:key,afterVatOutput:pnlMap[key].vatOutput},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-                        // #endregion
                     }
                 }
                 
@@ -655,17 +641,7 @@ const PnLReport: React.FC<PnLReportProps> = ({
             m.grossProfit = m.income - m.cogs;
             m.operatingProfit = m.grossProfit - (m.payroll + m.fixedExpenses + m.variableExpenses);
             m.netProfit = m.operatingProfit - m.financingExpenses;
-            
-            // #region agent log - Hypothesis A: vatBalance calculation per month
-            fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PnLReport.tsx:574',message:'Monthly VAT calculation',data:{monthKey:m.monthKey,vatOutput:m.vatOutput,vatInput:m.vatInput,beforeBalance:m.vatBalance},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-            // #endregion
-            
             m.vatBalance = m.vatOutput - m.vatInput;
-            
-            // #region agent log - Hypothesis A: vatBalance after calculation
-            fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PnLReport.tsx:575',message:'Monthly VAT balance calculated',data:{monthKey:m.monthKey,vatBalance:m.vatBalance},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-            // #endregion
-            
             // VAT is handled separately in the VAT section at the end of the report
             // VAT should not be included in P&L calculations as it's not part of profit/loss
             // VAT Cash Flow Adjustment kept for reference but not used in netCashFlow
@@ -678,7 +654,7 @@ const PnLReport: React.FC<PnLReportProps> = ({
             return m;
         });
 
-    }, [orders, fixedExpenses, variableExpenses, loans, employees, attendanceRecords, statusConfigs, vatRate, debts, receivables, startMonth, startYear, endMonth, endYear]);
+    }, [canonicalOrders, fixedExpenses, variableExpenses, loans, employees, attendanceRecords, statusConfigs, vatRate, debts, receivables, startMonth, startYear, endMonth, endYear, payrollOverrides]);
 
     // Period Totals Logic
     const periodTotals = useMemo((): MonthlyPnL => {
@@ -703,10 +679,6 @@ const PnLReport: React.FC<PnLReportProps> = ({
             vatCashFlowAdjustment: 0
         };
 
-        // #region agent log - Hypothesis A: Period totals calculation start
-        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PnLReport.tsx:612',message:'Period totals calculation start',data:{monthlyDataCount:monthlyData.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-        // #endregion
-        
         const result = monthlyData.reduce((acc, m) => {
             acc.income += m.income;
             acc.incomeItems.push(...m.incomeItems);
@@ -734,26 +706,11 @@ const PnLReport: React.FC<PnLReportProps> = ({
             acc.vatOutputItems.push(...m.vatOutputItems);
             acc.vatInput += m.vatInput;
             acc.vatInputItems.push(...m.vatInputItems);
-            
-            // #region agent log - Hypothesis A: Accumulating vatBalance
-            fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PnLReport.tsx:639',message:'Accumulating monthly vatBalance',data:{monthKey:m.monthKey,monthVatBalance:m.vatBalance,accVatBalanceBefore:acc.vatBalance},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-            // #endregion
-            
             acc.vatBalance += m.vatBalance;
-            
-            // #region agent log - Hypothesis A: After accumulating vatBalance
-            fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PnLReport.tsx:640',message:'After accumulating vatBalance',data:{accVatBalanceAfter:acc.vatBalance},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-            // #endregion
-            
             acc.vatCashFlowAdjustment += m.vatCashFlowAdjustment;
             return acc;
         }, initial);
-        
-        // #region agent log - Hypothesis A: Period totals calculation end - check if sum equals direct calculation
-        const calculatedVatBalance = result.vatOutput - result.vatInput;
-        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PnLReport.tsx:642',message:'Period totals VAT balance comparison',data:{summedVatBalance:result.vatBalance,calculatedVatBalance:calculatedVatBalance,vatOutput:result.vatOutput,vatInput:result.vatInput,difference:Math.abs(result.vatBalance-calculatedVatBalance)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-        // #endregion
-        
+
         return result;
     }, [monthlyData]);
 
@@ -809,7 +766,28 @@ const PnLReport: React.FC<PnLReportProps> = ({
                                 {drillDown.items.sort((a,b) => (b.date?.getTime() || 0) - (a.date?.getTime() || 0)).map((item, idx) => (
                                     <tr key={idx} className="hover:bg-slate-50">
                                         <td className="px-4 py-3">
-                                            <div className="font-bold text-slate-800">{item.name}</div>
+                                            <div className="font-bold text-slate-800 flex items-center gap-2 flex-wrap">
+                                                {item.orderId && item.orderNumber && onNavigateToOrder ? (
+                                                    <>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => { onNavigateToOrder(item.orderId!); setDrillDown(null); }}
+                                                            className="text-primary hover:underline font-mono focus:outline-none focus:ring-2 focus:ring-primary/30 rounded"
+                                                            title="פתח פרטי הזמנה"
+                                                        >
+                                                            {item.orderNumber}
+                                                        </button>
+                                                        {item.name.replace(item.orderNumber, '').replace(/^[\s\-:]+|[\s\-:]+$/g, '').trim() && (
+                                                            <span> – {item.name.replace(item.orderNumber, '').replace(/^[\s\-:]+|[\s\-:]+$/g, '').trim()}</span>
+                                                        )}
+                                                    </>
+                                                ) : (
+                                                    item.name
+                                                )}
+                                                {item.manualOverride && (
+                                                    <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800" title="תוקן ידנית בדוח ריכוז שכר ונוכחות">מתוקן ידנית</span>
+                                                )}
+                                            </div>
                                             {item.subtext && <div className="text-[10px] text-slate-400">{item.subtext}</div>}
                                         </td>
                                         <td className="px-4 py-3 text-slate-500 text-xs">

@@ -17,7 +17,7 @@ export const OrdersImportModal: React.FC<OrdersImportModalProps> = ({ onClose, o
     const [step, setStep] = useState<'select' | 'preview' | 'done'>('select');
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
-    const [executeResult, setExecuteResult] = useState<{ created: number; skipped: number; errors: string[] } | null>(null);
+    const [executeResult, setExecuteResult] = useState<{ created: number; updated: number; skipped: number; errors: string[] } | null>(null);
     const [skipExisting, setSkipExisting] = useState(true);
 
     const parseFile = useCallback((f: File): Promise<Record<string, string>[]> => {
@@ -32,7 +32,16 @@ export const OrdersImportModal: React.FC<OrdersImportModalProps> = ({ onClose, o
                         return;
                     }
                     const data = (results.data || []) as Record<string, string>[];
-                    resolve(data);
+                    const BOM = '\uFEFF';
+                    const normalized = data.map((row: Record<string, string>) => {
+                        const out: Record<string, string> = {};
+                        for (const [key, value] of Object.entries(row)) {
+                            const k = (key || '').replace(BOM, '').trim();
+                            if (k !== '') out[k] = value;
+                        }
+                        return out;
+                    });
+                    resolve(normalized);
                 },
                 error: (err) => reject(err)
             });
@@ -168,7 +177,7 @@ export const OrdersImportModal: React.FC<OrdersImportModalProps> = ({ onClose, o
                         </div>
                         {missingCount > 0 && (
                             <div className="bg-amber-50 border border-amber-200 p-3 rounded text-amber-800 text-sm">
-                                <strong>לקוחות שלא נמצאו ({missingCount}):</strong> ההזמנות שלהם לא ייווצרו. נא לסנכרן מחשבונית ירוקה או לתקן שמות.
+                                <strong>לקוחות שלא נמצאו ({missingCount}):</strong> ההזמנות ייווצרו עם לקוח זמני (לא יועלו לחשבונית ירוקה). עדכן ידנית את הלקוח מהכרטיס הזמנה – ואז סנן בעמוד הזמנות לפי "הזמנות עם לקוח מייבוא (לא תואם)" כדי לגשת אליהן.
                                 <div className="max-h-60 overflow-y-auto mt-1">
                                     <ul className="list-disc list-inside">
                                         {preview.missingCustomerNames.map((n) => (
@@ -192,7 +201,7 @@ export const OrdersImportModal: React.FC<OrdersImportModalProps> = ({ onClose, o
                             <button
                                 type="button"
                                 onClick={runImport}
-                                disabled={loading || (missingCount > 0 && preview.orders.every((o) => o.missingCustomer))}
+                                disabled={loading}
                                 className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 disabled:opacity-50"
                             >
                                 {loading ? 'מריץ ייבוא...' : 'הרץ ייבוא'}
@@ -208,6 +217,7 @@ export const OrdersImportModal: React.FC<OrdersImportModalProps> = ({ onClose, o
                     <>
                         <div className="bg-green-50 border border-green-200 p-3 rounded text-green-800 text-sm">
                             <p><strong>נוצרו:</strong> {executeResult.created} הזמנות</p>
+                            <p><strong>עודכנו (סטטוס):</strong> {executeResult.updated ?? 0} הזמנות</p>
                             <p><strong>דולגו:</strong> {executeResult.skipped}</p>
                             {executeResult.errors.length > 0 && (
                                 <>

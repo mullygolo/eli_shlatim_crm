@@ -238,8 +238,8 @@ export async function ordersImportPreview(rows: Record<string, string>[]): Promi
 export async function ordersImportExecute(
     rows: Record<string, string>[],
     options?: { skipExistingOrderNumbers?: boolean }
-): Promise<{ created: number; skipped: number; errors: string[] }> {
-    return apiRequest<{ created: number; skipped: number; errors: string[] }>('/orders/import/execute', {
+): Promise<{ created: number; updated: number; skipped: number; errors: string[] }> {
+    return apiRequest<{ created: number; updated: number; skipped: number; errors: string[] }>('/orders/import/execute', {
         method: 'POST',
         body: JSON.stringify({ rows, skipExistingOrderNumbers: options?.skipExistingOrderNumbers !== false }),
     });
@@ -708,24 +708,11 @@ export async function clockIn(employeeId: string, isWFH: boolean = false): Promi
 }
 
 export async function clockOut(recordId: string): Promise<AttendanceRecord> {
-    // #region agent log
-    fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'services/mongoService.ts:clockOut',message:'Frontend clockOut called',data:{recordId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-    // #endregion
-    try {
-        const result = await apiRequest<AttendanceRecord>('/attendance/clock-out', {
-            method: 'POST',
-            body: JSON.stringify({ recordId }),
-        });
-        // #region agent log
-        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'services/mongoService.ts:clockOut',message:'Frontend clockOut success',data:{recordId,resultId:result?.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-        // #endregion
-        return result;
-    } catch (error: any) {
-        // #region agent log
-        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'services/mongoService.ts:clockOut:catch',message:'Frontend clockOut error',data:{recordId,errorMessage:error?.message,errorString:String(error)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-        // #endregion
-        throw error;
-    }
+    const result = await apiRequest<AttendanceRecord>('/attendance/clock-out', {
+        method: 'POST',
+        body: JSON.stringify({ recordId }),
+    });
+    return result;
 }
 
 export async function deleteAttendanceRecord(recordId: string): Promise<void> {

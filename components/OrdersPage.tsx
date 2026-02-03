@@ -2202,6 +2202,8 @@ const OrderForm: React.FC<{
                     onClose={() => setIsCreateDocumentModalOpen(false)}
                     onCreate={(documentType, method, paymentsOverride) => handleCreateDocument(documentType, method, paymentsOverride)}
                     balanceDue={balanceDue}
+                    balanceToIssue={Math.max(0, totalDueWithVat - (invoiceSummary?.netInvoiced ?? 0))}
+                    isActiveDeal={isActiveDeal}
                     mode={createDocumentModalMode}
                     fromDocumentType={createDocumentModalFromType}
                     sourceDocumentId={createDocumentModalSourceId}
@@ -2209,10 +2211,17 @@ const OrderForm: React.FC<{
                 />
             )}
 
-            {paymentIdToDelete && (
-                <Modal title="אישור מחיקת תשלום" onClose={() => setPaymentIdToDelete(null)} size="lg" zIndex={70}>
+            {paymentIdToDelete && (() => {
+                const targetPayment = formData.payments?.find(p => p.id === paymentIdToDelete);
+                const isImportPlaceholder = targetPayment?.isImportPlaceholder || targetPayment?.notes === 'תקבול אוטומטי מייבוא';
+                return (
+                <Modal title={isImportPlaceholder ? 'מחיקת תקבול אוטומטי מייבוא' : 'אישור מחיקת תשלום'} onClose={() => setPaymentIdToDelete(null)} size="lg" zIndex={70}>
                     <div className="text-start">
-                        <p className="text-slate-700 mb-6">האם אתה בטוח שברצונך למחוק את רישום התשלום הזה? פעולה זו תעדכן את היתרה לתשלום.</p>
+                        <p className="text-slate-700 mb-6">
+                            {isImportPlaceholder
+                                ? 'התקבול נוסף אוטומטית בייבוא. אם תמחק אותו, ההזמנה תסומן כלא שולמה ותוכל לשייך מסמך חשבונאי (חשבונית/קבלה) לפי הלוגיקה הרגילה.'
+                                : 'האם אתה בטוח שברצונך למחוק את רישום התשלום הזה? פעולה זו תעדכן את היתרה לתשלום.'}
+                        </p>
                         <div className="flex justify-end gap-3">
                             <button 
                                 type="button" 
@@ -2226,12 +2235,13 @@ const OrderForm: React.FC<{
                                 onClick={confirmDeletePayment} 
                                 className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700"
                             >
-                                מחק תשלום
+                                {isImportPlaceholder ? 'מחק תקבול אוטומטי' : 'מחק תשלום'}
                             </button>
                         </div>
                     </div>
                 </Modal>
-            )}
+                );
+            })()}
 
             <div className="space-y-2">
                 {parentOrder && (
@@ -2457,9 +2467,9 @@ const OrderForm: React.FC<{
                     <datalist id="preparation-status-list">
                         {preparationStatusSuggestions.map(s => <option key={s} value={s} />)}
                     </datalist>
-                    <div className="overflow-x-auto rounded-lg border-2 border-slate-300 bg-slate-100/80" style={{ minWidth: 'min(100%, 1000px)' }}>
-                        <div className="hidden md:grid text-xs font-semibold min-w-[1000px]" style={{ gridTemplateColumns: 'repeat(12, minmax(0, 1fr)) minmax(180px, 2fr)' }}>
-                            <div className="col-span-2 py-2.5 px-2 border-b-2 border-r border-slate-400 bg-slate-200 text-slate-800">תיאור</div>
+                    <div className="overflow-x-auto rounded-lg border-2 border-slate-300 bg-slate-100/80" style={{ minWidth: 'min(100%, 1520px)' }}>
+                        <div className="hidden md:grid text-xs font-semibold min-w-[1520px]" style={{ gridTemplateColumns: 'minmax(340px, 3fr) minmax(72px, 0.6fr) minmax(72px, 0.6fr) minmax(72px, 0.6fr) minmax(80px, 0.7fr) minmax(100px, 1fr) minmax(100px, 1fr) minmax(80px, 0.8fr) minmax(120px, 1.1fr) minmax(150px, 1fr) minmax(150px, 1fr) minmax(220px, 2fr)' }}>
+                            <div className="col-span-1 py-2.5 px-2 border-b-2 border-r border-slate-400 bg-slate-200 text-slate-800">תיאור</div>
                             <div className="col-span-1 py-2.5 px-2 border-b-2 border-r border-slate-400 bg-slate-200 text-slate-800">סוג יח'</div>
                             <div className="col-span-1 py-2.5 px-2 border-b-2 border-r border-slate-400 bg-slate-200 text-slate-800">רוחב</div>
                             <div className="col-span-1 py-2.5 px-2 border-b-2 border-r border-slate-400 bg-slate-200 text-slate-800">גובה</div>
@@ -2478,9 +2488,9 @@ const OrderForm: React.FC<{
                             const rowBg = index % 2 === 0 ? 'bg-white' : 'bg-slate-50';
                             const cellBorder = 'border-r border-slate-300';
                             return (
-                                <div key={item.id} className={`p-3 border border-slate-200 rounded-lg bg-slate-50 md:rounded-none md:border-0 md:border-b md:border-slate-300 md:py-2 md:px-0 md:grid md:gap-0 md:items-stretch md:min-w-[1000px] ${rowBg} relative hover:bg-slate-50/80 transition-colors`} style={{ gridTemplateColumns: 'repeat(12, minmax(0, 1fr)) minmax(180px, 2fr)' }}>
+                                <div key={item.id} className={`p-3 border border-slate-200 rounded-lg bg-slate-50 md:rounded-none md:border-0 md:border-b md:border-slate-300 md:py-2 md:px-0 md:grid md:gap-0 md:items-stretch md:min-w-[1520px] ${rowBg} relative hover:bg-slate-50/80 transition-colors`} style={{ gridTemplateColumns: 'minmax(340px, 3fr) minmax(72px, 0.6fr) minmax(72px, 0.6fr) minmax(72px, 0.6fr) minmax(80px, 0.7fr) minmax(100px, 1fr) minmax(100px, 1fr) minmax(80px, 0.8fr) minmax(120px, 1.1fr) minmax(150px, 1fr) minmax(150px, 1fr) minmax(220px, 2fr)' }}>
                                     <button type="button" onClick={() => removeLineItem(index)} className="absolute top-2 left-2 text-red-500 hover:text-red-700 p-1 md:hidden z-10"><DeleteIcon className="h-5 w-5"/></button>
-                                    <div className={`md:col-span-2 md:py-1.5 md:px-2 md:border-r md:border-slate-300 md:bg-inherit min-w-0 ${cellBorder}`}>
+                                    <div className={`md:col-span-1 md:py-1.5 md:px-2 md:border-r md:border-slate-300 md:bg-inherit min-w-0 ${cellBorder}`}>
                                         <label className="text-xs font-medium text-slate-500 md:hidden">תיאור</label>
                                         <input
                                             type="text"
@@ -2489,13 +2499,13 @@ const OrderForm: React.FC<{
                                             value={item.description}
                                             onChange={e => handleLineItemChange(index, e)}
                                             title={item.description || 'תיאור'}
-                                            className="mt-1 md:mt-0 block w-full min-w-0 rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary"
+                                            className="mt-1 md:mt-0 block w-full min-w-0 rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary box-border"
                                             style={{ maxWidth: '100%' }}
                                         />
                                     </div>
-                                    <div className={`md:col-span-1 md:py-1.5 md:px-2 ${cellBorder}`}>
+                                    <div className={`md:col-span-1 md:py-1.5 md:px-2 min-w-0 ${cellBorder}`}>
                                         <label className="text-xs font-medium text-slate-500 md:hidden mt-2">סוג יחידה</label>
-                                        <select name="unitType" value={item.unitType} onChange={e => handleLineItemChange(index, e)} className="mt-1 md:mt-0 block w-full min-w-0 rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary">
+                                        <select name="unitType" value={item.unitType} onChange={e => handleLineItemChange(index, e)} className="mt-1 md:mt-0 block w-full min-w-0 max-w-full rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary">
                                             {Object.values(LineItemUnit).map(u => <option key={u} value={u}>{u}</option>)}
                                         </select>
                                     </div>
@@ -2504,11 +2514,11 @@ const OrderForm: React.FC<{
                                             <>
                                                 <div className={`md:col-span-1 md:py-1.5 md:px-2 ${cellBorder}`}>
                                                     <label className="text-xs font-medium text-slate-500 md:hidden">רוחב</label>
-                                                    <input type="number" placeholder="רוחב" name="width" value={item.width || ''} onChange={e => handleLineItemChange(index, e)} className="mt-1 md:mt-0 block w-full rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary" />
+                                                    <input type="number" placeholder="רוחב" name="width" value={item.width || ''} onChange={e => handleLineItemChange(index, e)} className="mt-1 md:mt-0 block w-full min-w-[4.5rem] rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary" />
                                                 </div>
                                                 <div className={`md:col-span-1 md:py-1.5 md:px-2 ${cellBorder}`}>
                                                     <label className="text-xs font-medium text-slate-500 md:hidden">גובה</label>
-                                                    <input type="number" placeholder="גובה" name="height" value={item.height || ''} onChange={e => handleLineItemChange(index, e)} className="mt-1 md:mt-0 block w-full rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary" />
+                                                    <input type="number" placeholder="גובה" name="height" value={item.height || ''} onChange={e => handleLineItemChange(index, e)} className="mt-1 md:mt-0 block w-full min-w-[4.5rem] rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary" />
                                                 </div>
                                             </>
                                         ) : (
@@ -2516,15 +2526,15 @@ const OrderForm: React.FC<{
                                         )}
                                         <div className={`md:col-span-1 md:py-1.5 md:px-2 ${cellBorder}`}>
                                             <label className="text-xs font-medium text-slate-500 md:hidden">כמות</label>
-                                            <input type="number" placeholder="כמות" name="quantity" value={item.quantity} onChange={e => handleLineItemChange(index, e)} min="0" step="0.01" className="mt-1 md:mt-0 block w-full rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary" />
+                                            <input type="number" placeholder="כמות" name="quantity" value={item.quantity} onChange={e => handleLineItemChange(index, e)} min="0" step="0.01" className="mt-1 md:mt-0 block w-full min-w-[4.5rem] rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary" />
                                         </div>
                                         <div className={`md:col-span-1 md:py-1.5 md:px-2 ${cellBorder}`}>
                                             <label className="text-xs font-medium text-slate-500 md:hidden">מחיר ליח'</label>
-                                            <input type="number" placeholder="מחיר" name="unitPrice" value={item.unitPrice} onChange={e => handleLineItemChange(index, e)} className="mt-1 md:mt-0 block w-full rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary" />
+                                            <input type="number" placeholder="מחיר" name="unitPrice" value={item.unitPrice} onChange={e => handleLineItemChange(index, e)} className="mt-1 md:mt-0 block w-full min-w-[5.5rem] rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary" />
                                         </div>
                                         <div className={`md:col-span-1 md:py-1.5 md:px-2 ${cellBorder}`}>
                                             <label className="text-xs font-medium text-slate-500 md:hidden">עלות ליח'</label>
-                                            <input type="number" placeholder="עלות" name="cost" value={item.cost} onChange={e => handleLineItemChange(index, e)} className="mt-1 md:mt-0 block w-full rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary" />
+                                            <input type="number" placeholder="עלות" name="cost" value={item.cost} onChange={e => handleLineItemChange(index, e)} className="mt-1 md:mt-0 block w-full min-w-[5.5rem] rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary" />
                                         </div>
                                         <div className={`md:col-span-1 flex items-center md:flex-col md:justify-center md:items-center mt-1 md:mt-0 md:py-1.5 md:px-2 bg-indigo-50/50 md:border-r md:border-slate-300 ${cellBorder}`}>
                                             <label className="text-[10px] font-bold text-indigo-500 md:hidden w-20">רווח %</label>
@@ -2556,7 +2566,7 @@ const OrderForm: React.FC<{
                                                     value={item.supplierId || ''}
                                                     onChange={e => handleLineItemChange(index, e)}
                                                     title={item.supplierId ? (suppliers.find(s => s.id === item.supplierId)?.name || '') : 'בחר ספק'}
-                                                    className="flex-grow min-w-0 block w-full rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary sm:text-sm"
+                                                    className="flex-grow min-w-0 max-w-full block w-full rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary sm:text-sm"
                                                 >
                                                     <option value="">בחר ספק</option>
                                                     {suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
@@ -2587,7 +2597,7 @@ const OrderForm: React.FC<{
                                                 onChange={e => handleLineItemChange(index, e)}
                                                 list="preparation-status-list"
                                                 title={item.preparationStatus ?? 'סטטוס הכנה'}
-                                                className="mt-1 md:mt-0 block w-full min-w-0 rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary"
+                                                className="mt-1 md:mt-0 block w-full min-w-[12rem] rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary"
                                                 style={{ maxWidth: '100%' }}
                                             />
                                         </div>
@@ -2597,7 +2607,7 @@ const OrderForm: React.FC<{
                                                 name="notes"
                                                 value={item.notes || ''}
                                                 onChange={e => handleLineItemChange(index, e)}
-                                                className="mt-1 md:mt-0 block w-full min-w-0 rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary"
+                                                className="mt-1 md:mt-0 block w-full min-w-[16rem] rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary"
                                                 placeholder="הערות לפריט זה"
                                                 rows={2}
                                             />
@@ -2797,7 +2807,13 @@ const OrderForm: React.FC<{
                                         )}
                                     </div>
                                 </div>
-                                {(invoiceSummary.netInvoiced < totalDueWithVat - 0.01 || totalPaid < invoiceSummary.netInvoiced - 0.01) && (
+                                {!isActiveDeal ? (
+                                    <div className="flex flex-wrap gap-2 pt-2 border-t border-slate-200 text-xs">
+                                        <span className="inline-flex items-center px-2 py-1 rounded bg-slate-100 text-slate-600 font-medium border border-slate-200">
+                                            עֶסקה לא פעילה – אין להנפיק חשבונית/קבלה
+                                        </span>
+                                    </div>
+                                ) : (invoiceSummary.netInvoiced < totalDueWithVat - 0.01 || totalPaid < invoiceSummary.netInvoiced - 0.01) && (
                                     <div className="flex flex-wrap gap-2 pt-2 border-t border-slate-200 text-xs">
                                         {invoiceSummary.netInvoiced < totalDueWithVat - 0.01 && (
                                             <span className="inline-flex items-center px-2 py-1 rounded bg-amber-50 text-amber-800 font-semibold border border-amber-200">
@@ -2891,13 +2907,27 @@ const OrderForm: React.FC<{
                                                     ) : '-'}
                                                 </td>
                                                 <td className="px-3 py-2 text-left">
-                                                    <button 
-                                                        type="button" 
-                                                        onClick={(e) => { e.stopPropagation(); setPaymentIdToDelete(payment.id); }} 
-                                                        className="text-red-400 hover:text-red-600 p-1"
-                                                    >
-                                                        <DeleteIcon className="w-4 h-4"/>
-                                                    </button>
+                                                    {payment.notes?.includes('סונכרן מחשבונית ירוקה') ? (
+                                                        <span className="text-slate-400 text-xs" title="תשלום מסונכרן ממסמך – להסרה בטל שיוך המסמך במסמכים חשבונאיים">מסמך</span>
+                                                    ) : (payment.isImportPlaceholder || payment.notes === 'תקבול אוטומטי מייבוא') ? (
+                                                        <button 
+                                                            type="button" 
+                                                            onClick={(e) => { e.stopPropagation(); setPaymentIdToDelete(payment.id); }} 
+                                                            className="text-amber-600 hover:text-amber-800 p-1 font-medium text-xs"
+                                                            title="מחק תקבול אוטומטי מייבוא – לאחר המחיקה תוכל לשייך מסמך חשבונאי"
+                                                        >
+                                                            מחק תקבול אוטומטי
+                                                        </button>
+                                                    ) : (
+                                                        <button 
+                                                            type="button" 
+                                                            onClick={(e) => { e.stopPropagation(); setPaymentIdToDelete(payment.id); }} 
+                                                            className="text-red-400 hover:text-red-600 p-1"
+                                                            title="מחק תשלום"
+                                                        >
+                                                            <DeleteIcon className="w-4 h-4"/>
+                                                        </button>
+                                                    )}
                                                 </td>
                                             </tr>
                                         )})}
@@ -2967,6 +2997,7 @@ const OrderForm: React.FC<{
                                 const data = await res.json();
                                 if (!res.ok) throw new Error(data.error || 'שגיאה בשיוך מסמך');
                                 const paymentsAdded = data.paymentsAdded ?? 0;
+                                const newPayments = data.orderUpdates?.payments;
                                 const linkLogEvent: TimelineEvent = {
                                     id: `log_link_${Date.now()}`,
                                     timestamp: new Date(),
@@ -2976,10 +3007,14 @@ const OrderForm: React.FC<{
                                 };
                                 setFormData(prev => ({
                                     ...prev,
-                                    ...(data.orderUpdates?.payments && { payments: data.orderUpdates.payments }),
+                                    ...(newPayments && { payments: newPayments }),
                                     timeline: [linkLogEvent, ...prev.timeline]
                                 }));
                                 addActivity(`שויך מסמך חשבונית ירוקה להזמנה (${paymentsAdded} תשלומים)`, { entityType: 'order', entityId: order.id, action: 'update', metadata: { orderNumber: order.orderNumber, paymentsAdded } });
+                                if (newPayments && newPayments.length > 0) {
+                                    const updatedOrder = { ...formData, payments: newPayments, timeline: [linkLogEvent, ...(formData.timeline || [])] };
+                                    await onSave(updatedOrder, true);
+                                }
                             }}
                         />
                     </div>
@@ -3312,6 +3347,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
     const [orderFormHeaderContent, setOrderFormHeaderContent] = useState<React.ReactNode>(null);
     const [searchTerm, setSearchTerm] = useState('');
     const [customerFilter, setCustomerFilter] = useState<string[]>([]);
+    const [customerIsImportPlaceholderOnly, setCustomerIsImportPlaceholderOnly] = useState(false);
     const [supplierFilter, setSupplierFilter] = useState<string[]>([]);
     const [employeeFilter, setEmployeeFilter] = useState<string[]>([]); // New Employee Filter
     const [orderStatusFilter, setOrderStatusFilter] = useState<string[]>([]);
@@ -3370,6 +3406,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
         setDateFilterType('ORDER_DATE');
         setIsCollectionMode(false);
         setShowCompletedOrders(false);
+        setCustomerIsImportPlaceholderOnly(false);
         setCurrentPage(1); // Reset to first page
     };
 
@@ -3458,7 +3495,8 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                 dateFilterType,
                 searchTerm,
                 isCollectionMode,
-                showCompletedOrders: includeCompleted
+                showCompletedOrders: includeCompleted,
+                customerIsImportPlaceholderOnly
             };
             const result = await mongoService.getOrdersPaginated(filters, currentPage, pageSize);
             setPaginatedOrders(result.orders);
@@ -3474,7 +3512,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
     // Reset to page 1 when filters change
     useEffect(() => {
         setCurrentPage(1);
-    }, [customerFilter, supplierFilter, employeeFilter, orderStatusFilter, paymentStatusFilter, monthFilter, yearFilter, startDateFilter, endDateFilter, dateFilterType, searchTerm, isCollectionMode, showCompletedOrders]);
+    }, [customerFilter, supplierFilter, employeeFilter, orderStatusFilter, paymentStatusFilter, monthFilter, yearFilter, startDateFilter, endDateFilter, dateFilterType, searchTerm, isCollectionMode, showCompletedOrders, customerIsImportPlaceholderOnly]);
 
     // Fetch paginated orders when filters or pagination change; if orders already in props (e.g. from background load), show first page immediately then refetch in background
     useEffect(() => {
@@ -3514,7 +3552,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
         } else {
             refetchOrders();
         }
-    }, [currentPage, pageSize, customerFilter, supplierFilter, employeeFilter, orderStatusFilter, paymentStatusFilter, monthFilter, yearFilter, startDateFilter, endDateFilter, dateFilterType, searchTerm, isCollectionMode, showCompletedOrders]);
+    }, [currentPage, pageSize, customerFilter, supplierFilter, employeeFilter, orderStatusFilter, paymentStatusFilter, monthFilter, yearFilter, startDateFilter, endDateFilter, dateFilterType, searchTerm, isCollectionMode, showCompletedOrders, customerIsImportPlaceholderOnly]);
 
     useEffect(() => {
         if (initialOpenOrderId) {
@@ -3694,7 +3732,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                                 </select>
                             </div>
                             <div>
-                                <MultiSelectFilter label="לקוח" options={customerOptions} selectedValues={customerFilter} onChange={setCustomerFilter} />
+                                <MultiSelectFilter label="לקוח" options={customerOptions} selectedValues={customerFilter} onChange={(v) => { setCustomerFilter(v); if (v.length === 0) { setCustomerIsImportPlaceholderOnly(false); setIsCollectionMode(false); } }} />
                             </div>
                             <div>
                                 <MultiSelectFilter label="עובד" options={employeeOptions} selectedValues={employeeFilter} onChange={setEmployeeFilter} />
@@ -3711,6 +3749,17 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                                     <input type="text" placeholder="חיפוש..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)} className="w-full text-xs p-2 border-slate-300 rounded-md focus:ring-primary" />
                                     {searchTerm && <button onClick={() => setSearchTerm('')} className="absolute inset-y-0 left-2 text-slate-400">×</button>}
                                 </div>
+                            </div>
+                            <div className="flex items-center gap-2 pt-6">
+                                <label className="flex items-center gap-2 text-xs font-medium text-slate-600 cursor-pointer">
+                                    <input
+                                        type="checkbox"
+                                        checked={customerIsImportPlaceholderOnly}
+                                        onChange={e => setCustomerIsImportPlaceholderOnly(e.target.checked)}
+                                        className="rounded border-slate-300 text-primary focus:ring-primary"
+                                    />
+                                    הזמנות עם לקוח מייבוא (לא תואם לחשבונית ירוקה)
+                                </label>
                             </div>
                         </div>
                         <div className="flex items-center justify-between pt-2 border-t border-slate-100 flex-wrap gap-4">
@@ -3859,13 +3908,13 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                                         <button onClick={() => handleEditOrder(order)} className="text-primary hover:underline font-semibold">{order.orderNumber}</button>
                                         {order.type === OrderType.SERVICE_CALL && <span className="block text-[10px] text-red-600 font-bold">תיקון</span>}
                                     </td>
-                                    <td className="px-4 py-4 whitespace-nowrap text-sm font-medium text-slate-900">
-                                        {order.description}
+                                    <td className="px-4 py-4 text-sm font-medium text-slate-900 max-w-[260px]" title={order.description || ''}>
+                                        <div className="line-clamp-2 break-words">{order.description}</div>
                                         {order.parentOrderId && <div className="text-xs text-slate-400">מקושר להזמנת אב</div>}
                                     </td>
-                                    <td className="px-4 py-4 whitespace-nowrap text-sm text-slate-500">
-                                        <div className="flex items-center gap-2">
-                                            <span>{getCustomerName(order.customerId)}</span>
+                                    <td className="px-4 py-4 text-sm text-slate-500 max-w-[140px]" title={getCustomerName(order.customerId)}>
+                                        <div className="flex items-center gap-2 min-w-0">
+                                            <span className="truncate">{getCustomerName(order.customerId)}</span>
                                             {whatsappUrl && <a href={whatsappUrl} target="crm_whatsapp" title={`שלח וואטסאפ ל-${primaryContact?.phone}`} className="text-green-500 hover:text-green-700"><WhatsAppIcon className="h-5 w-5"/></a>}
                                             {gmailUrl && <a href={gmailUrl} target="crm_email" title={`שלח אימייל ל-${primaryContact?.email}`} className="text-slate-500 hover:text-primary"><EmailIcon className="h-5 w-5"/></a>}
                                             {telUrl && <a href={telUrl} title={`התקשר ל-${primaryContact?.phone}`} className="text-slate-500 hover:text-primary"><PhoneIcon className="h-5 w-5"/></a>}
@@ -4045,7 +4094,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                 <Modal 
                     title={editingOrder ? `עריכת הזמנה ${editingOrder.orderNumber}` : `הוספת הזמנה חדשה (${getNextOrderNumber()})`}
                     onClose={() => { setOrderFormHeaderContent(null); setIsModalOpen(false); }}
-                    size="5xl"
+                    size="8xl"
                     headerEnd={orderFormHeaderContent}
                 >
                     <OrderForm 

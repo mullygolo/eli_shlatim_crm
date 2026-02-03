@@ -31,6 +31,9 @@ interface DocumentInfo {
     description?: string;
     /** אמצעי תשלום אם קיים */
     paymentMethod?: string;
+    /** למסמכי צ'ק: מספר צ'ק ותאריך פירעון (לדוחות כספיים) */
+    chequeReference?: string;
+    chequeRepaymentDate?: string;
     signed?: boolean;
     cancellable?: boolean;
     url?: string;
@@ -54,6 +57,16 @@ function paymentMethodFromRaw(raw: any): string | undefined {
     const t = payments[0]?.type;
     if (t == null) return undefined;
     return PAYMENT_TYPE_LABELS[Number(t)] ?? 'אחר';
+}
+
+function chequeDetailsFromRaw(raw: any): { reference?: string; repaymentDate?: string } {
+    const payments = raw?.payment;
+    if (!Array.isArray(payments) || payments.length === 0) return {};
+    const p = payments.find((x: any) => Number(x.type) === 2);
+    if (!p) return {};
+    const reference = p.chequeNum ? String(p.chequeNum).trim() : undefined;
+    const repaymentDate = (p.dueDate || p.date) ? String(p.dueDate || p.date).slice(0, 10) : undefined;
+    return { reference, repaymentDate };
 }
 
 const DocumentViewer: React.FC<DocumentViewerProps> = ({ 
@@ -138,6 +151,7 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({
                                     ? new Date(creationDate).toLocaleDateString('he-IL')
                                     : undefined;
                             const payMethod = paymentMethodFromRaw(rawDoc);
+                            const chequeDetails = chequeDetailsFromRaw(rawDoc);
                             // Infer type & label from raw doc (305=invoice, 320=invoice_receipt, 400=receipt, 330=credit, 10=estimate)
                             const rawType = rawDoc.type;
                             const inferredType: DocumentInfoType = rawType === 320 ? 'invoice_receipt' : rawType === 400 ? 'receipt' : rawType === 330 ? 'credit' : rawType === 10 ? 'estimate' : rawType === 305 ? 'invoice' : doc.type;
@@ -154,6 +168,8 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({
                                 number: rawDoc.number?.toString() || rawDoc.short_code,
                                 description: rawDoc.description || undefined,
                                 paymentMethod: payMethod,
+                                chequeReference: chequeDetails.reference,
+                                chequeRepaymentDate: chequeDetails.repaymentDate,
                                 signed: rawDoc.signed,
                                 cancellable: rawDoc.cancellable !== false,
                                 url: rawDoc.url?.he || rawDoc.url?.origin
@@ -245,6 +261,7 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({
                                         ? new Date(creationDate).toLocaleDateString('he-IL')
                                         : undefined;
                                 const payMethod = paymentMethodFromRaw(foundDoc);
+                                const chequeDetails = chequeDetailsFromRaw(foundDoc);
                                 docs.push({
                                     id: foundDoc.id,
                                     type: docType,
@@ -257,6 +274,8 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({
                                     number: foundDoc.number?.toString() || foundDoc.short_code,
                                     description: foundDoc.description || undefined,
                                     paymentMethod: payMethod,
+                                    chequeReference: chequeDetails.reference,
+                                    chequeRepaymentDate: chequeDetails.repaymentDate,
                                     signed: foundDoc.signed,
                                     cancellable: foundDoc.cancellable !== false,
                                     url: foundDoc.url?.he || foundDoc.url?.origin
@@ -606,6 +625,13 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({
                                 )}
                                 {doc.paymentMethod != null && doc.paymentMethod !== '' && (
                                     <div><span className="font-medium text-slate-500">אמצעי תשלום:</span> {doc.paymentMethod}</div>
+                                )}
+                                {doc.paymentMethod === 'צ\'ק' && (doc.chequeReference != null || doc.chequeRepaymentDate != null) && (
+                                    <div className="col-span-2 text-xs font-bold text-indigo-700">
+                                        {doc.chequeReference != null && <span>מס׳ צ׳ק: {doc.chequeReference}</span>}
+                                        {doc.chequeReference != null && doc.chequeRepaymentDate != null && ' · '}
+                                        {doc.chequeRepaymentDate != null && <span>פירעון: {new Date(doc.chequeRepaymentDate).toLocaleDateString('he-IL')}</span>}
+                                    </div>
                                 )}
                             </div>
                         </div>

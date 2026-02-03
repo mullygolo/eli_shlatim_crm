@@ -306,6 +306,17 @@ router.post('/orders/:orderId/link-document', async (req, res) => {
         const raw = await getDocumentRaw(documentId);
         const docTotal = Number(raw?.amount ?? raw?.total ?? 0);
         const allocAmount = typeof amount === 'number' && amount > 0 ? amount : docTotal;
+        const settings = await getSettings();
+        const vatRate = settings?.vatRate || 0;
+        const totals = calculateOrderTotals(order);
+        const orderTotalWithVat = totals.totalAmount * (1 + (order.vatRate ?? vatRate) / 100);
+        const remainingBalance = orderTotalWithVat - totals.totalPaid;
+        if (allocAmount > remainingBalance + 0.01) {
+            return res.status(400).json({
+                error: `ההקצאה (₪${allocAmount.toFixed(2)}) חורגת מיתרת ההזמנה לתשלום (₪${remainingBalance.toFixed(2)})`,
+                errors: [`יתרה לתשלום בהזמנה ${order.orderNumber}: ₪${remainingBalance.toFixed(2)}`]
+            });
+        }
         const existingLinks = await getOrderDocumentLinksByDocumentId(documentId);
         const result = await validateDocumentForOrders(raw, [order], customer, existingLinks, { [orderId]: allocAmount });
         if (!result.valid) return res.status(400).json({ error: result.errors[0] || 'ולידציה נכשלה', errors: result.errors });
@@ -364,6 +375,20 @@ router.post('/documents/link-orders', async (req, res) => {
         if (validOrders.length !== orderIds.length) return res.status(404).json({ error: 'הזמנה לא נמצאה' });
         const customer = await getCustomerById(validOrders[0].customerId);
         if (!customer) return res.status(404).json({ error: 'לקוח לא נמצא' });
+        const settings = await getSettings();
+        const defaultVatRate = settings?.vatRate || 0;
+        for (const o of validOrders) {
+            const totals = calculateOrderTotals(o);
+            const orderTotalWithVat = totals.totalAmount * (1 + (o.vatRate ?? defaultVatRate) / 100);
+            const remainingBalance = orderTotalWithVat - totals.totalPaid;
+            const alloc = allocations[o.id] || 0;
+            if (alloc > remainingBalance + 0.01) {
+                return res.status(400).json({
+                    error: `ההקצאה להזמנה ${o.orderNumber} (₪${alloc.toFixed(2)}) חורגת מיתרת ההזמנה לתשלום (₪${remainingBalance.toFixed(2)})`,
+                    errors: [`יתרה לתשלום בהזמנה ${o.orderNumber}: ₪${remainingBalance.toFixed(2)}`]
+                });
+            }
+        }
         const existingLinks = await getOrderDocumentLinksByDocumentId(documentId);
         const newAlloc: Record<string, number> = {};
         orderIds.forEach(id => { newAlloc[id] = allocations[id] || 0; });
@@ -628,6 +653,17 @@ router.post('/orders/create-document', async (req, res) => {
         // Get settings for VAT rate
         const settings = await getSettings();
         const vatRate = settings?.vatRate || 0;
+
+        // וולידציה: חשבונית מס / חשבונית מס+קבלה — לא להנפיק אם ההזמנה כבר חויבה במלואה
+        if (documentType === 'invoice' || documentType === 'invoice_receipt') {
+            const links = await getOrderDocumentLinksByOrderId(orderId);
+            const ids = { linkedDocumentIds: links.map((l: { documentId?: string }) => l.documentId).filter(Boolean) };
+            const summary = await getInvoiceSummaryByOrderNumber(order.orderNumber, ids);
+            const orderTotalWithVat = calculateOrderTotals(order).totalAmount * (1 + (order.vatRate ?? vatRate) / 100);
+            if (summary.netInvoiced >= orderTotalWithVat - 0.01) {
+                return res.status(400).json({ error: 'ההזמנה כבר חויבה במלואה' });
+            }
+        }
 
         // Ensure customer exists in GreenInvoice
         let greenInvoiceClientId = customer.greenInvoiceClientId;

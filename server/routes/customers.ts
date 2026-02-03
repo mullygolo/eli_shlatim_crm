@@ -48,8 +48,8 @@ router.post('/', async (req, res) => {
             throw err;
         }
         
-        // Sync to GreenInvoice if enabled
-        if (process.env.GREENINVOICE_SYNC_ENABLED === 'true' && !customer.greenInvoiceClientId) {
+        // Sync to GreenInvoice if enabled (skip placeholder customers from import – link manually later)
+        if (process.env.GREENINVOICE_SYNC_ENABLED === 'true' && !customer.greenInvoiceClientId && !customer.isImportPlaceholder) {
             try {
                 const clientData = mapCustomerToClient(customer);
                 const greenInvoiceClient = await createOrGetClient(clientData, customer.businessId);
@@ -78,8 +78,8 @@ router.put('/:id', async (req, res) => {
     try {
         const customer = await updateCustomer(req.body);
         
-        // Sync to GreenInvoice if enabled
-        if (process.env.GREENINVOICE_SYNC_ENABLED === 'true') {
+        // Sync to GreenInvoice if enabled (skip placeholder customers from import – link manually later)
+        if (process.env.GREENINVOICE_SYNC_ENABLED === 'true' && !customer.isImportPlaceholder) {
             try {
                 const clientData = mapCustomerToClient(customer);
                 

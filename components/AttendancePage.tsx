@@ -634,50 +634,34 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
     }, [setRecords, currentEmployeeId]);
 
     const handleClockAction = async (action: 'IN' | 'OUT') => {
-        if (isClocking) return; // Prevent double-clicks
-        
-        setIsClocking(true);
+        if (isClocking) return;
+
         setErrorMessage(null);
 
-        try {
-            if (action === 'IN') {
-                // Double-check activeRecord before proceeding (defense in depth)
-                const latestRecords = await mongoService.getAttendanceRecords();
-                const todayStr = getDateStringIsrael();
-                const hasActive = latestRecords.some(r => {
-                    if (r.employeeId !== currentEmployeeId) return false;
-                    const recordDateStr = getDateStringForComparison(r.date);
-                    return recordDateStr === todayStr && !r.clockOut;
-                });
-                
-                if (hasActive || activeRecord) {
-                    setErrorMessage('כבר יש כניסה פעילה להיום');
-                    setIsClocking(false);
-                    // Refresh records to show the active one
-                    setRecords(latestRecords);
-                    return;
-                }
+        if (action === 'IN') {
+            if (activeRecord) {
+                setErrorMessage('כבר יש כניסה פעילה להיום');
+                return;
+            }
 
-                // Try to clock in with retry
-                const savedRecord = await retryWithBackoff(() => 
+            const optimisticId = `att_opt_${Date.now()}`;
+            const now = new Date();
+            const optimisticRecord: AttendanceRecord = {
+                id: optimisticId,
+                employeeId: currentEmployeeId,
+                date: now,
+                clockIn: now,
+                totalHours: 0,
+                status: isWFH ? 'WFH' : 'PRESENT',
+            };
+            setRecords(prev => [...prev, optimisticRecord]);
+            // No setIsClocking(true) — UI immediately shows "יציאה" from optimistic record
+
+            try {
+                const savedRecord = await retryWithBackoff(() =>
                     mongoService.clockIn(currentEmployeeId, isWFH)
                 );
-
-                // Update local state with server response
-                setRecords(prev => {
-                    // Remove any existing record for today (shouldn't happen, but safety)
-                    const todayStr = getDateStringIsrael(); // Use Israel timezone
-                    const filtered = prev.filter(r => {
-                        if (r.employeeId !== currentEmployeeId) return true;
-                        const recordDateStr = getDateStringForComparison(r.date);
-                        return !(recordDateStr === todayStr && !r.clockOut);
-                    });
-                    // Check if savedRecord already exists in filtered array to avoid duplicates
-                    const exists = filtered.some(r => r.id === savedRecord.id);
-                    return exists ? filtered : [...filtered, savedRecord];
-                });
-                
-                // Refresh all records from server to ensure consistency
+                setRecords(prev => prev.map(r => r.id === optimisticId ? savedRecord : r));
                 setTimeout(async () => {
                     try {
                         const updatedRecords = await mongoService.getAttendanceRecords();
@@ -686,118 +670,87 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
                         console.error('Error refreshing records after clock-in:', err);
                     }
                 }, 500);
-            } else if (action === 'OUT') {
-                if (!activeRecord) {
-                    setErrorMessage('אין כניסה פעילה');
-                    setIsClocking(false);
-                    return;
-                }
+            } catch (error: any) {
+                console.error('Error clocking in:', error);
+                setRecords(prev => prev.filter(r => r.id !== optimisticId));
 
-                // Double-check that the record doesn't already have clockOut (prevent double-click)
-                if (activeRecord.clockOut) {
-                    setErrorMessage('כבר יצאת מהמשמרת');
-                    setIsClocking(false);
-                    // Refresh records to get latest state
-                    try {
-                        const updatedRecords = await mongoService.getAttendanceRecords();
-                        setRecords(updatedRecords);
-                    } catch (err) {
-                        console.error('Error refreshing records:', err);
+                const isNetworkError = !navigator.onLine ||
+                    (error.message && error.message.includes('fetch')) ||
+                    (error.message && error.message.includes('network'));
+
+                if (isNetworkError) {
+                    saveToOfflineQueue('IN', { employeeId: currentEmployeeId, isWFH });
+                    setErrorMessage('אין חיבור לאינטרנט. הפעולה נשמרה ותתבצע אוטומטית כשהחיבור יחזור.');
+                } else {
+                    const msg = error.message && error.message.includes('already has an active clock-in')
+                        ? 'כבר יש כניסה פעילה להיום'
+                        : (error.message || 'שגיאה בביצוע הפעולה. אנא נסה שוב.');
+                    setErrorMessage(msg);
+                    if (error.message && error.message.includes('already has an active clock-in')) {
+                        try {
+                            const latestRecords = await mongoService.getAttendanceRecords();
+                            setRecords(latestRecords);
+                        } catch (err) {
+                            console.error('Error refreshing records:', err);
+                        }
                     }
-                    return;
                 }
-
-                // #region agent log
-                fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AttendancePage.tsx:handleClockAction:OUT',message:'Before clock out API call',data:{recordId:activeRecord.id,activeRecord:JSON.stringify(activeRecord)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A,B,C'})}).catch(()=>{});
-                // #endregion
-
-                // Try to clock out with retry
-                const savedRecord = await retryWithBackoff(() => 
-                    mongoService.clockOut(activeRecord.id)
-                );
-
-                // #region agent log
-                fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AttendancePage.tsx:handleClockAction:OUT',message:'After clock out API call success',data:{savedRecord:JSON.stringify(savedRecord)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A,B,C'})}).catch(()=>{});
-                // #endregion
-
-                // Update local state with server response immediately
-                setRecords(prev => {
-                    const updated = prev.map(r => r.id === activeRecord.id ? savedRecord : r);
-                    // #region agent log
-                    fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AttendancePage.tsx:handleClockAction:OUT',message:'After setRecords update',data:{recordId:activeRecord.id,updatedRecordClockOut:savedRecord?.clockOut,updatedRecordsCount:updated.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-                    // #endregion
-                    return updated;
-                });
-                
-                // Refresh all records from server to ensure consistency
-                setTimeout(async () => {
-                    try {
-                        const updatedRecords = await mongoService.getAttendanceRecords();
-                        setRecords(updatedRecords);
-                        // #region agent log
-                        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AttendancePage.tsx:handleClockAction:OUT',message:'After refresh from server',data:{refreshedRecordsCount:updatedRecords.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-                        // #endregion
-                    } catch (err) {
-                        console.error('Error refreshing records after clock-out:', err);
-                    }
-                }, 500);
             }
+            return;
+        }
+
+        // action === 'OUT'
+        if (!activeRecord) {
+            setErrorMessage('אין כניסה פעילה');
+            return;
+        }
+        if (activeRecord.clockOut) {
+            setErrorMessage('כבר יצאת מהמשמרת');
+            return;
+        }
+
+        const recordToClockOut = activeRecord;
+        const now = new Date();
+        const optimisticUpdated: AttendanceRecord = {
+            ...recordToClockOut,
+            clockOut: now,
+            totalHours: recordToClockOut.clockIn
+                ? Math.max(0, (now.getTime() - new Date(recordToClockOut.clockIn).getTime()) / (1000 * 60 * 60))
+                : 0,
+        };
+        setRecords(prev => prev.map(r => r.id === recordToClockOut.id ? optimisticUpdated : r));
+        // No setIsClocking(true) — UI immediately shows "כניסה" after optimistic clock-out
+
+        try {
+            const savedRecord = await retryWithBackoff(() =>
+                mongoService.clockOut(recordToClockOut.id)
+            );
+            setRecords(prev => prev.map(r => r.id === recordToClockOut.id ? savedRecord : r));
+            setTimeout(async () => {
+                try {
+                    const updatedRecords = await mongoService.getAttendanceRecords();
+                    setRecords(updatedRecords);
+                } catch (err) {
+                    console.error('Error refreshing records after clock-out:', err);
+                }
+            }, 500);
         } catch (error: any) {
-            console.error('Error clocking:', error);
-            
-            // #region agent log
-            fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AttendancePage.tsx:handleClockAction:catch',message:'Error caught in clock action',data:{action,errorMessage:error?.message,errorStack:error?.stack,errorString:String(error)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A,B,C,D,E'})}).catch(()=>{});
-            // #endregion
-            
-            // Check if it's a network error
-            const isNetworkError = !navigator.onLine || 
+            console.error('Error clocking out:', error);
+            setRecords(prev => prev.map(r => r.id === recordToClockOut.id ? recordToClockOut : r));
+
+            const isNetworkError = !navigator.onLine ||
                 (error.message && error.message.includes('fetch')) ||
                 (error.message && error.message.includes('network'));
 
             if (isNetworkError) {
-                // Save to offline queue
-                if (action === 'IN') {
-                    saveToOfflineQueue('IN', { employeeId: currentEmployeeId, isWFH });
-                    setErrorMessage('אין חיבור לאינטרנט. הפעולה נשמרה ותתבצע אוטומטית כשהחיבור יחזור.');
-                } else {
-                    saveToOfflineQueue('OUT', { recordId: activeRecord.id });
-                    setErrorMessage('אין חיבור לאינטרנט. הפעולה נשמרה ותתבצע אוטומטית כשהחיבור יחזור.');
-                }
-
-                // Optimistically update UI (will be synced when online)
-                if (action === 'IN') {
-                    const optimisticRecord: AttendanceRecord = {
-                        id: `att_${Date.now()}_offline`,
-                        employeeId: currentEmployeeId,
-                        date: new Date(),
-                        clockIn: new Date(),
-                        totalHours: 0,
-                        status: isWFH ? 'WFH' : 'PRESENT',
-                    };
-                    setRecords(prev => [...prev, optimisticRecord]);
-                } else {
-                    const now = new Date();
-                    const updatedRecord = { 
-                        ...activeRecord, 
-                        clockOut: now,
-                        totalHours: activeRecord.clockIn ? 
-                            Math.max(0, (now.getTime() - new Date(activeRecord.clockIn).getTime()) / (1000 * 60 * 60)) : 0
-                    };
-                    setRecords(prev => prev.map(r => r.id === activeRecord.id ? updatedRecord : r));
-                }
+                saveToOfflineQueue('OUT', { recordId: recordToClockOut.id });
+                setErrorMessage('אין חיבור לאינטרנט. הפעולה נשמרה ותתבצע אוטומטית כשהחיבור יחזור.');
             } else {
-                // Other errors (e.g., already clocked in)
-                const errorMsg = error.message || 'שגיאה בביצוע הפעולה. אנא נסה שוב.';
-                setErrorMessage(errorMsg);
-                
-                if (error.message && error.message.includes('already has an active clock-in')) {
-                    setErrorMessage('כבר יש כניסה פעילה להיום');
-                } else if (error.message && error.message.includes('already clocked out')) {
-                    setErrorMessage('כבר בוצעה יציאה לרשומה זו');
-                }
+                const msg = error.message && error.message.includes('already clocked out')
+                    ? 'כבר בוצעה יציאה לרשומה זו'
+                    : (error.message || 'שגיאה בביצוע הפעולה. אנא נסה שוב.');
+                setErrorMessage(msg);
             }
-        } finally {
-            setIsClocking(false);
         }
     };
 
@@ -862,10 +815,8 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
         const emp = employees.find(e => e.id === empId);
         if (!emp) return { totalHours: 0, baseSalary: 0, bonus: 0, totalGross: 0, workDays: 0, isGlobal: false, vacationDays: 0, sickDays: 0, sickCertificates: [], employerCost: 0 };
 
-        // Use paginatedRecords if viewing current employee and month/year match, otherwise use all records
-        const recordsToUse = (empId === currentEmployeeId && month === selectedMonth && year === selectedYear) 
-            ? paginatedRecords 
-            : records;
+        // Always use full records list for monthly stats so manager report and PnL use the same source
+        const recordsToUse = records;
         
         const empRecords = recordsToUse.filter(r => {
             const d = new Date(r.date);
@@ -920,7 +871,7 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
         let totalGross = baseSalary + bonus;
         let employerCost = totalGross * (1 + (emp.employerCostPercentage || 0) / 100);
 
-        const override = payrollOverrides[`${empId}_${year}_${month}`];
+        const override = (payrollOverrides ?? {})[`${empId}_${year}_${month}`];
         if (override) {
             if (override.finalGross !== undefined) {
                 totalGross = override.finalGross;
@@ -1145,7 +1096,7 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
                             </thead>
                             <tbody className="divide-y divide-slate-100">
                                 {allStats.map(({ emp, stats }) => {
-                                    const override = payrollOverrides[`${emp.id}_${selectedYear}_${selectedMonth}`];
+                                    const override = (payrollOverrides ?? {})[`${emp.id}_${selectedYear}_${selectedMonth}`];
                                     const salaryAtEnd = getEmployeeSalaryAtDate(emp, new Date(selectedYear, selectedMonth, 0));
                                     return (
                                         <tr key={emp.id} className="hover:bg-slate-50 transition-colors">
@@ -1355,7 +1306,7 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
                                 {daysInMonth.map((date) => {
                                     const dateKey = getDateStringForComparison(date);
                                     const holiday = getJewishHoliday(date);
-                                    const dayRecords = paginatedRecords
+                                    const dayRecords = records
                                         .filter(r => r.employeeId === currentEmployeeId && getDateStringForComparison(r.date) === dateKey)
                                         .sort((a, b) => new Date(a.clockIn || 0).getTime() - new Date(b.clockIn || 0).getTime());
                                     const isWeekend = date.getDay() === 5 || date.getDay() === 6;

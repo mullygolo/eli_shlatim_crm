@@ -73,3 +73,25 @@ export function getYesterdayStringIsrael(): string {
     yesterday.setDate(yesterday.getDate() - 1);
     return getDateStringIsrael(yesterday);
 }
+
+/**
+ * Get start and end of a calendar month in Israel timezone for MongoDB queries.
+ * Returns Date objects that represent 00:00:00.000 on the first day and 23:59:59.999 on the last day of the month in Israel.
+ */
+export function getMonthRangeIsrael(year: number, month: number): { start: Date; end: Date } {
+    // First day of month in Israel: YYYY-MM-01
+    const startStr = `${year}-${String(month).padStart(2, '0')}-01`;
+    const start = new Date(startStr + 'T00:00:00.000+02:00'); // Israel standard offset; DST handled by ISO
+    if (isNaN(start.getTime())) {
+        // Fallback: local interpretation
+        const startLocal = new Date(year, month - 1, 1, 0, 0, 0, 0);
+        const endLocal = new Date(year, month, 0, 23, 59, 59, 999);
+        return { start: startLocal, end: endLocal };
+    }
+    // Last day: last day of month in Israel
+    const lastDay = new Date(year, month, 0).getDate();
+    const endStr = `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}T23:59:59.999+02:00`;
+    let end = new Date(endStr);
+    if (isNaN(end.getTime())) end = new Date(year, month, 0, 23, 59, 59, 999);
+    return { start, end };
+}

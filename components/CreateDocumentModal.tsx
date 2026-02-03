@@ -21,6 +21,8 @@ interface CreateDocumentModalProps {
     onCreate: (documentType: GreenInvoiceDocumentType, method: 'api' | 'window', paymentsOverride?: ReceiptPaymentItem[]) => void;
     /** יתרת המסמך להנפקת קבלה (יתרה לתשלום) — להצגה וברירת מחדל לסכום תקבול */
     balanceDue?: number;
+    /** יתרה להנפקה (סה"כ הזמנה כולל מע"מ פחות כבר חויב) — כאשר <= 0 חשבונית מס/חשבונית מס+קבלה מושבתות */
+    balanceToIssue?: number;
     /** 'full' = כל האפשרויות. 'from-document' = תעודת משלוח, חשבון עסקה, קבלה (מתוך חשבונית/קבלה). 'from-estimate' = הזמנה עבודה, חשבון עסקה, חשבונית מס, חשבונית מס/קבלה, קבלה (מתוך הצעת מחיר) */
     mode?: 'full' | 'from-document';
     /** כאשר mode === 'from-document': סוג המסמך שממנו נפתח (estimate → FROM_ESTIMATE, אחרת → FROM_DOCUMENT) */
@@ -29,6 +31,8 @@ interface CreateDocumentModalProps {
     sourceDocumentId?: string;
     /** מצב טעינה - משבית את הכפתור בזמן יצירת מסמך */
     isLoading?: boolean;
+    /** האם ההזמנה בסטטוס עסקה פעילה; כאשר false — חשבונית מס/חשבונית מס+קבלה מושבתות עם הודעה */
+    isActiveDeal?: boolean;
 }
 
 // + הראשי — אין קבלה מתוך חשבונית (רק מתוך + של חשבונית קיימת)
@@ -55,21 +59,27 @@ const FROM_ESTIMATE_TYPES: { value: GreenInvoiceDocumentType; label: string; des
     { value: 'receipt', label: 'קבלה', description: 'הנפקת קבלה' }
 ];
 
-const CreateDocumentModal: React.FC<CreateDocumentModalProps> = ({ order, customer, onClose, onCreate, mode = 'full', fromDocumentType, sourceDocumentId, balanceDue = 0, isLoading = false }) => {
+const CreateDocumentModal: React.FC<CreateDocumentModalProps> = ({ order, customer, onClose, onCreate, mode = 'full', fromDocumentType, sourceDocumentId, balanceDue = 0, balanceToIssue, isLoading = false, isActiveDeal = true }) => {
     const [selectedType, setSelectedType] = useState<GreenInvoiceDocumentType | ''>('');
     const [selectedMethod, setSelectedMethod] = useState<'api' | 'window'>('api');
     const [receiptPayments, setReceiptPayments] = useState<ReceiptPaymentItem[]>([]);
 
+    const fullyInvoiced = balanceToIssue !== undefined && balanceToIssue <= 0.01;
     const fromEstimate = mode === 'from-document' && fromDocumentType === 'estimate';
     const documentTypes = mode === 'from-document'
         ? (fromEstimate ? FROM_ESTIMATE_TYPES : FROM_DOCUMENT_TYPES)
         : FULL_TYPES;
     const resolvedTypes = documentTypes.map((t) => {
-        if (fromEstimate) return { ...t, disabled: false };
-        return {
-            ...t,
-            disabled: t.disabled ?? (t.value === 'credit_invoice' ? !order.greenInvoiceId : false)
-        };
+        let disabled = t.disabled ?? (t.value === 'credit_invoice' ? !order.greenInvoiceId : false);
+        if (!disabled && (t.value === 'invoice' || t.value === 'invoice_receipt') && fullyInvoiced) {
+            disabled = true;
+        }
+        if (!disabled && !isActiveDeal && (t.value === 'invoice' || t.value === 'invoice_receipt')) {
+            disabled = true;
+        }
+        if (fromEstimate && !(t.value === 'invoice' || t.value === 'invoice_receipt')) return { ...t, disabled };
+        if (fromEstimate) return { ...t, disabled: disabled };
+        return { ...t, disabled };
     });
 
     const isReceiptOrInvoiceReceipt = selectedType === 'receipt' || selectedType === 'invoice_receipt';
@@ -129,6 +139,12 @@ const CreateDocumentModal: React.FC<CreateDocumentModalProps> = ({ order, custom
     return (
         <Modal title="צור מסמך חשבונאי בחשבונית ירוקה" onClose={onClose} size="lg">
             <div className="space-y-6">
+                {!isActiveDeal && (
+                    <div className="flex flex-wrap gap-2 p-3 rounded-lg bg-slate-100 border border-slate-200 text-sm">
+                        <span className="font-medium text-slate-700">עסקה לא פעילה – אין להנפיק חשבונית/קבלה.</span>
+                        <span className="text-slate-600">ניתן לשייך מסמך קיים (שייך מסמך) או להנפיק תעודת משלוח/חשבון עסקה אם רלוונטי.</span>
+                    </div>
+                )}
                 {/* Document Type Selection */}
                 <div>
                     <label className="block text-sm font-medium text-slate-700 mb-3">
@@ -158,11 +174,19 @@ const CreateDocumentModal: React.FC<CreateDocumentModalProps> = ({ order, custom
                                 <div className="flex-1">
                                     <div className="font-medium text-slate-800">{type.label}</div>
                                     <div className="text-sm text-slate-500 mt-1">{type.description}</div>
-                                    {type.disabled && (
+                                    {type.disabled && !isActiveDeal && (type.value === 'invoice' || type.value === 'invoice_receipt') ? (
+                                        <div className="text-xs text-slate-600 mt-1">
+                                            עסקה לא פעילה – אין להנפיק חשבונית/קבלה
+                                        </div>
+                                    ) : type.disabled && (type.value === 'invoice' || type.value === 'invoice_receipt') && fullyInvoiced ? (
+                                        <div className="text-xs text-amber-600 mt-1">
+                                            ההזמנה כבר חויבה במלואה
+                                        </div>
+                                    ) : type.disabled ? (
                                         <div className="text-xs text-orange-600 mt-1">
                                             נדרשת חשבונית קיימת
                                         </div>
-                                    )}
+                                    ) : null}
                                 </div>
                             </label>
                         ))}

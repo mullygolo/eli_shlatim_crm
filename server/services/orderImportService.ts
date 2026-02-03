@@ -12,14 +12,16 @@ import {
     LineItemUnit,
     Contact,
     TimelineEvent,
-    PaymentStatus
+    PaymentStatus,
+    PaymentMethod
 } from '../types.js';
-import { getStatusConfigs, updateStatusConfigs, getDb } from './mongoService.js';
-import { createSupplier, createOrder, getCustomers, updateCustomer, getEmployees } from './mongoService.js';
+import { getStatusConfigs, updateStatusConfigs, getDb, getSettings, getOrderById, updateOrder } from './mongoService.js';
+import { createSupplier, createOrder, createCustomer, getCustomers, updateCustomer, getEmployees } from './mongoService.js';
+import { calculateOrderTotals } from '../utils/calculations.js';
 
-// CSV column header variants (typos / encodings)
+// CSV column header variants (typos / encodings). Server expects client to send normalized keys (trim + BOM stripped).
 const COL = {
-    STATUS: ['סטוטס הזמנה', 'סטטוס הזמנה'],
+    STATUS: ['סטוטס הזמנה', 'סטטוס הזמנה', 'סטטוס'],
     SUPPLIER: ['שם ספק'],
     DATE: ['תאריך'],
     CUSTOMER: ['שם לקוח'],
@@ -34,9 +36,23 @@ const COL = {
     REP: ['נציג']
 } as const;
 
+const BOM = '\uFEFF';
+
+/** Normalize CSV row keys: trim and strip BOM so "סטטוס הזמנה" / "סטטוס" match regardless of encoding */
+function normalizeRowKeys(row: Record<string, string>): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const [key, value] of Object.entries(row)) {
+        const k = (key || '').replace(BOM, '').trim();
+        if (k === '') continue;
+        out[k] = value;
+    }
+    return out;
+}
+
 function getCell(row: Record<string, string>, keys: readonly string[]): string {
+    const normalized = normalizeRowKeys(row);
     for (const k of keys) {
-        const v = row[k];
+        const v = normalized[k];
         if (v !== undefined && v !== null && String(v).trim() !== '') return String(v).trim();
     }
     return '';
@@ -308,15 +324,23 @@ export async function executeImport(
     const employees = await getEmployees();
     const db = await getDb();
     const ordersCollection = db.collection<Order>('orders');
-    const existingOrders = await ordersCollection.find({}).project({ orderNumber: 1 }).toArray();
+    const existingOrders = await ordersCollection.find({}).project({ orderNumber: 1, id: 1 }).toArray();
+    /** Normalize order number for matching: strip BOM, trim, lowercase, remove spaces/dashes/dots/slashes so "06-01-26001" and "060126001" match */
+    const normOrderNum = (s: string) => (s || '').replace(BOM, '').trim().toLowerCase().replace(/[\s\-\.\/]/g, '');
     const existingOrderNumbers = new Set(
-        existingOrders.map((o: any) => (o.orderNumber || '').trim().toLowerCase())
+        existingOrders.map((o: any) => normOrderNum(o.orderNumber || ''))
     );
+    const existingOrderById = new Map<string, string>();
+    for (const o of existingOrders) {
+        const k = normOrderNum(o.orderNumber || '');
+        if (k && o.id) existingOrderById.set(k, o.id);
+    }
 
     const normalized = rows.map(normalizeRow).filter(r => (r.orderNumber || '').trim() && (r.customerName || '').trim());
     const grouped = groupRowsByOrderNumber(normalized);
     const errors: string[] = [];
     let created = 0;
+    let updated = 0;
     let skipped = 0;
 
     // 1) Add new statuses (no flags)
@@ -396,22 +420,69 @@ export async function executeImport(
     }
 
     const defaultEmployeeId = employees.length > 0 ? employees[0].id : '';
+    /** Placeholder customers created for "customer not found" – key: normalized name, value: Customer */
+    const placeholderByNormalizedName = new Map<string, Customer>();
+    const settings = await getSettings();
+    const vatRate = settings?.vatRate ?? 17;
+
+    /** Tasks to update existing orders (run in parallel chunks so 429 orders don't block) */
+    const existingOrderUpdateTasks: Array<{ existingOrderId: string; groupRows: NormalizedRow[]; first: NormalizedRow }> = [];
 
     // 4) Create orders
     for (const [orderNumberKey, groupRows] of grouped) {
         const first = groupRows[0];
-        const customer = findCustomerByName(customers, first.customerName);
+        let customer = findCustomerByName(customers, first.customerName);
         if (!customer) {
-            skipped += 1;
-            continue;
+            const nameNorm = normalizeForMatch(first.customerName);
+            const existingPlaceholder = placeholderByNormalizedName.get(nameNorm);
+            if (existingPlaceholder) {
+                customer = existingPlaceholder;
+            } else {
+                try {
+                    const placeholder: Customer = {
+                        id: `cust_import_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
+                        name: first.customerName.trim(),
+                        businessId: '',
+                        website: '',
+                        address: '',
+                        category: 'ייבוא טבלת שליטה – לא תואם לחשבונית ירוקה',
+                        notes: 'נוצר מייבוא טבלת שליטה. עדכן לכרטיס הלקוח הנכון מכרטיסיית ההזמנה.',
+                        isSpecial: false,
+                        contacts: [],
+                        createdAt: new Date(),
+                        paymentMethod: 'העברה בנקאית' as any,
+                        paymentTerms: 'תשלום מיידי',
+                        isImportPlaceholder: true
+                    };
+                    await createCustomer(placeholder);
+                    customers.push(placeholder);
+                    placeholderByNormalizedName.set(nameNorm, placeholder);
+                    customer = placeholder;
+                } catch (e) {
+                    errors.push(`יצירת לקוח זמני "${first.customerName}": ${(e as Error).message}`);
+                    skipped += 1;
+                    continue;
+                }
+            }
         }
-        if (skipExisting && existingOrderNumbers.has((first.orderNumber || '').trim().toLowerCase())) {
+        const orderNumKey = (first.orderNumber || '').replace(BOM, '').trim();
+        const orderNumLower = normOrderNum(first.orderNumber || '');
+        const existingOrderId = orderNumKey ? existingOrderById.get(orderNumLower) : undefined;
+
+        if (skipExisting && existingOrderNumbers.has(orderNumLower)) {
+            if (existingOrderId) {
+                existingOrderUpdateTasks.push({ existingOrderId, groupRows, first });
+            }
             skipped += 1;
             continue;
         }
 
         const date = groupRows.map(r => r.date).find(d => d) || new Date();
-        const status = first.status || '';
+        // Use status from first row that has one; if none (column not found or all blank), use first status from config
+        const statusLabel = (groupRows.map(r => (r.status || '').trim()).find(Boolean) || '').trim();
+        const status = statusLabel && statusConfigs.some(c => c.label === statusLabel)
+            ? statusLabel
+            : (statusConfigs.length > 0 ? statusConfigs.sort((a, b) => a.orderIndex - b.orderIndex)[0].label : '');
         const repName = first.representativeName;
         const employee = repName ? findEmployeeByName(employees, repName) : null;
         const employeeId = employee?.id || defaultEmployeeId;
@@ -441,6 +512,17 @@ export async function executeImport(
             };
         });
 
+        const { totalAmount } = calculateOrderTotals({ lineItems, payments: [] });
+        const totalDueWithVat = Math.round(totalAmount * (1 + vatRate / 100) * 100) / 100;
+        const autoPayment = {
+            id: `pay_import_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
+            amount: totalDueWithVat,
+            date,
+            method: PaymentMethod.BANK_TRANSFER,
+            notes: 'תקבול אוטומטי מייבוא',
+            isImportPlaceholder: true as const
+        };
+
         const order: Order = {
             id: `ord_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
             orderNumber: first.orderNumber.trim(),
@@ -451,8 +533,8 @@ export async function executeImport(
             customerId: customer.id,
             employeeId,
             orderStatus: status,
-            paymentStatus: PaymentStatus.UNPAID,
-            payments: [],
+            paymentStatus: PaymentStatus.PAID,
+            payments: [autoPayment],
             paymentTerms: 'תשלום מיידי',
             lineItems,
             invoiceIssued: false,
@@ -471,5 +553,53 @@ export async function executeImport(
         }
     }
 
-    return { created, skipped, errors };
+    // Run existing-order updates in parallel chunks (so 429 orders don't block for minutes)
+    const CONCURRENCY = 25;
+    const updateOne = async (task: { existingOrderId: string; groupRows: NormalizedRow[]; first: NormalizedRow }) => {
+        const existingOrder = await getOrderById(task.existingOrderId);
+        if (!existingOrder) return;
+        const csvDate = task.groupRows.map(r => r.date).find(d => d) || (existingOrder.date && new Date(existingOrder.date)) || new Date();
+        const statusLabel = (task.groupRows.map(r => (r.status || '').trim()).find(Boolean) || '').trim();
+        const newStatus = statusLabel && statusConfigs.some(c => c.label === statusLabel)
+            ? statusLabel
+            : (statusConfigs.length > 0 ? statusConfigs.sort((a, b) => a.orderIndex - b.orderIndex)[0].label : '');
+        const statusChanged = newStatus && existingOrder.orderStatus !== newStatus;
+        const hasNoRealPayments = !existingOrder.payments?.length ||
+            existingOrder.payments.every((p: { isImportPlaceholder?: boolean; notes?: string }) =>
+                p.isImportPlaceholder || p.notes === 'תקבול אוטומטי מייבוא');
+        const orderUpdates: Partial<Order> = { ...existingOrder };
+        orderUpdates.date = csvDate;
+        orderUpdates.createdAt = csvDate;
+        orderUpdates.dealStartDate = csvDate;
+        if (statusChanged) {
+            const newStatusHistory = [...(existingOrder.statusHistory || [])];
+            newStatusHistory.push({ status: newStatus, startDate: new Date() });
+            orderUpdates.orderStatus = newStatus;
+            orderUpdates.statusHistory = newStatusHistory;
+        }
+        if (hasNoRealPayments) {
+            const { totalAmount } = calculateOrderTotals(existingOrder);
+            const totalDueWithVat = Math.round(totalAmount * (1 + vatRate / 100) * 100) / 100;
+            orderUpdates.paymentStatus = PaymentStatus.PAID;
+            orderUpdates.payments = [{
+                id: `pay_import_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
+                amount: totalDueWithVat,
+                date: csvDate,
+                method: PaymentMethod.BANK_TRANSFER,
+                notes: 'תקבול אוטומטי מייבוא',
+                isImportPlaceholder: true as const
+            }];
+        }
+        await updateOrder(orderUpdates as Order);
+    };
+    for (let i = 0; i < existingOrderUpdateTasks.length; i += CONCURRENCY) {
+        const chunk = existingOrderUpdateTasks.slice(i, i + CONCURRENCY);
+        const results = await Promise.allSettled(chunk.map(updateOne));
+        results.forEach((r, idx) => {
+            if (r.status === 'fulfilled') updated += 1;
+            else errors.push(`עדכון הזמנה ${chunk[idx].first.orderNumber}: ${(r as PromiseRejectedResult).reason?.message || 'שגיאה'}`);
+        });
+    }
+
+    return { created, updated, skipped, errors };
 }

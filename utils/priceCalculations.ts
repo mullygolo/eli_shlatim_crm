@@ -9,21 +9,12 @@ import { PriceListProduct, PriceTier, LineItemUnit, ProductAddon, SupplierPricin
  * @returns The calculated price from the matching tier, or the base price.
  */
 function calculateTieredPrice(basePrice: number, value: number, tiers: PriceTier[], tierField: 'price' | 'cost'): number {
-    // #region agent log
-    fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'priceCalculations.ts:11',message:'calculateTieredPrice entry',data:{basePrice,value,tiersCount:tiers?.length||0,tierField},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-    // #endregion
     if (!tiers || tiers.length === 0) {
-        // #region agent log
-        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'priceCalculations.ts:14',message:'No tiers, returning basePrice',data:{basePrice},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-        // #endregion
         return basePrice;
     }
 
     // Sort tiers by min value, ensuring stable order
     const sortedTiers = [...tiers].sort((a, b) => a.min - b.min);
-    // #region agent log
-    fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'priceCalculations.ts:19',message:'Sorted tiers',data:{firstTierMin:sortedTiers[0]?.min,lastTierMin:sortedTiers[sortedTiers.length-1]?.min,tiersCount:sortedTiers.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-    // #endregion
 
     // Find the best matching tier
     const matchingTier = sortedTiers.reduce((bestMatch: PriceTier | null, currentTier) => {
@@ -41,9 +32,6 @@ function calculateTieredPrice(basePrice: number, value: number, tiers: PriceTier
         // Check if the value also fits within the 'max' boundary if it exists
         if (matchingTier.max === undefined || matchingTier.max === null || value <= matchingTier.max) {
              const tieredValue = matchingTier[tierField];
-             // #region agent log
-             fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'priceCalculations.ts:35',message:'Found matching tier',data:{tieredValue,basePrice,min:matchingTier.min,max:matchingTier.max},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-             // #endregion
              // If the tier has a valid price/cost, return it. Otherwise, fall back to basePrice.
              return tieredValue !== undefined && tieredValue !== null ? tieredValue : basePrice;
         }
@@ -55,15 +43,9 @@ function calculateTieredPrice(basePrice: number, value: number, tiers: PriceTier
     
     // If value is less than the minimum tier, use the first tier's price if basePrice is 0
     if (value < firstTier.min) {
-        // #region agent log
-        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'priceCalculations.ts:47',message:'Value less than first tier',data:{value,firstTierMin:firstTier.min,basePrice},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-        // #endregion
         // If basePrice is 0 or undefined, use the first tier's price
         if (!basePrice || basePrice === 0) {
             const firstTierValue = firstTier[tierField];
-            // #region agent log
-            fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'priceCalculations.ts:51',message:'Using first tier (basePrice is 0)',data:{firstTierValue},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-            // #endregion
             return firstTierValue !== undefined && firstTierValue !== null ? firstTierValue : basePrice;
         }
         return basePrice;
@@ -72,15 +54,9 @@ function calculateTieredPrice(basePrice: number, value: number, tiers: PriceTier
     // Value is greater than all tiers - use the last (highest) tier's price
     if (value > (lastTier.max ?? Infinity)) {
         const lastTierValue = lastTier[tierField];
-        // #region agent log
-        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'priceCalculations.ts:60',message:'Value greater than last tier',data:{lastTierValue,basePrice},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-        // #endregion
         return lastTierValue !== undefined && lastTierValue !== null ? lastTierValue : basePrice;
     }
 
-    // #region agent log
-    fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'priceCalculations.ts:65',message:'No matching tier, returning basePrice',data:{basePrice,value},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-    // #endregion
     return basePrice;
 }
 
@@ -105,10 +81,6 @@ export function calculateProductPrice(
     variantId?: string,
     unitType?: LineItemUnit
 ): { unitPrice: number; unitCost: number } {
-    // #region agent log
-    fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'priceCalculations.ts:75',message:'calculateProductPrice entry',data:{productId:product.id,productType:product.productType,quantity,sizeWidth:size?.width,sizeHeight:size?.height,variantId,unitType,baseUnit:product.baseUnit},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-    // #endregion
-    
     let unitPrice = 0;
     let unitCost = 0;
 
@@ -139,9 +111,6 @@ export function calculateProductPrice(
     }
 
     // If no variant selected or variant has no specific price/cost, calculate based on base/tiered pricing
-    // #region agent log
-    fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'priceCalculations.ts:115',message:'Before standard branch check',data:{unitPrice,productType:product.productType},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-    // #endregion
     if (unitPrice === 0 && (product.productType === 'standard' || !product.productType)) {
         const effectiveUnitType = unitType || product.baseUnit;
         // If size is provided (width and height), use it for calculation (treat as M2)
@@ -149,16 +118,10 @@ export function calculateProductPrice(
         const valueForTiers = size?.width && size?.height 
             ? size.width * size.height 
             : quantity;
-        // #region agent log
-        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'priceCalculations.ts:119',message:'calculateProductPrice standard branch',data:{quantity,sizeWidth:size?.width,sizeHeight:size?.height,effectiveUnitType,valueForTiers,hasPriceRange:!!product.customerPriceRange,customerBasePrice:product.customerBasePrice,tiersCount:product.customerPriceTiers?.length||0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-        // #endregion
 
         // Check if product uses simple price range (customerPriceRange)
         if (product.customerPriceRange && product.customerPriceRange.min !== undefined) {
             unitPrice = product.customerPriceRange.min;
-            // #region agent log
-            fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'priceCalculations.ts:125',message:'Using customerPriceRange',data:{unitPrice,priceRangeMin:product.customerPriceRange.min},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-            // #endregion
         } else {
         // Calculate customer price
         unitPrice = calculateTieredPrice(
@@ -167,9 +130,6 @@ export function calculateProductPrice(
             product.customerPriceTiers || [],
             'price'
         );
-            // #region agent log
-            fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'priceCalculations.ts:133',message:'After calculateTieredPrice',data:{unitPrice,basePrice:product.customerBasePrice||0,valueForTiers},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-            // #endregion
         }
 
         // Calculate supplier cost - use new structure if available, otherwise fall back to legacy

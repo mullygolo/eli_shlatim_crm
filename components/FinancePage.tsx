@@ -1,6 +1,6 @@
 
 import React, { useState, useMemo, useEffect, useCallback, Component, ErrorInfo } from 'react';
-import { FixedExpense, VariableExpense, Loan, EquityInvestment, Debt, Receivable, ReceivablePayment, PaymentMethod, DebtPayment, Order, TransactionStatus, CustomerPayment, SupplierPayment, LineItemUnit, Attachment, PaymentStatusHistory, AmortizationEntry, Employee, AttendanceRecord, OrderStatusConfiguration } from '../types';
+import { FixedExpense, VariableExpense, Loan, EquityInvestment, Debt, Receivable, ReceivablePayment, PaymentMethod, DebtPayment, Order, TransactionStatus, CustomerPayment, SupplierPayment, LineItemUnit, Attachment, PaymentStatusHistory, AmortizationEntry, Employee, AttendanceRecord, OrderStatusConfiguration, PayrollOverrideMap } from '../types';
 import { PlusIcon, EditIcon, DeleteIcon, BankIcon, TrendingUpIcon, LogIcon, CashIcon, ClockIcon, LockIcon, DownloadIcon, ImportIcon } from './icons';
 import Modal from './Modal';
 import PnLReport from './PnLReport';
@@ -126,6 +126,8 @@ interface FinancePageProps {
     employees: Employee[];
     attendanceRecords: AttendanceRecord[];
     statusConfigs: OrderStatusConfiguration[];
+    payrollOverrides: PayrollOverrideMap;
+    onNavigateToOrder?: (orderId: string) => void;
 }
 
 // Internal type for Table Display
@@ -1454,7 +1456,7 @@ const CheckSeriesGenerator: React.FC<{
 };
 
 const FinancePage: React.FC<FinancePageProps> = ({ 
-    fixedExpenses, setFixedExpenses, variableExpenses, setVariableExpenses, loans, setLoans, debts, setDebts, receivables, setReceivables, equity, setEquity, addActivity, vatRate, orders, setOrders, employees, attendanceRecords, statusConfigs
+    fixedExpenses, setFixedExpenses, variableExpenses, setVariableExpenses, loans, setLoans, debts, setDebts, receivables, setReceivables, equity, setEquity, addActivity, vatRate, orders, setOrders, employees, attendanceRecords, statusConfigs, payrollOverrides, onNavigateToOrder
 }) => {
     const [activeTab, setActiveTab] = useState<'FIXED' | 'VARIABLE' | 'LOANS' | 'DEBTS' | 'RECEIVABLES' | 'EQUITY' | 'CHECKS' | 'PNL'>('PNL');
     const [isModalOpen, setIsModalOpen] = useState(false);
@@ -2691,6 +2693,8 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                 vatRate={vatRate} 
                                 debts={debts} 
                                 receivables={receivables} 
+                                payrollOverrides={payrollOverrides}
+                                onNavigateToOrder={onNavigateToOrder}
                             />
                         </ErrorBoundary>
                     )}

@@ -313,7 +313,8 @@ export function mapOrderToDocumentRequest(
     if (paymentsOverride && (documentType === 'receipt' || documentType === 'invoice_receipt') && !draft) {
         paymentsOverride.forEach((pay) => {
             const ref = (pay.reference && String(pay.reference).trim()) || '';
-            const repaymentStr = pay.repaymentDate ? (typeof pay.repaymentDate === 'string' ? pay.repaymentDate : (pay.repaymentDate instanceof Date ? pay.repaymentDate.toISOString().slice(0, 10) : String(pay.repaymentDate).slice(0, 10))) : undefined;
+            const rawRepayment: string | Date | undefined = pay.repaymentDate as string | Date | undefined;
+            const repaymentStr = rawRepayment == null ? undefined : typeof rawRepayment === 'string' ? rawRepayment.slice(0, 10) : rawRepayment instanceof Date ? rawRepayment.toISOString().slice(0, 10) : String(rawRepayment).slice(0, 10);
             payment.push(buildPayItem(pay.amount, pay.date, pay.method, ref, false, repaymentStr));
         });
     } else if (order.paymentStatus === PaymentStatus.PAID || totalPaid >= totalAmount - 0.01) {

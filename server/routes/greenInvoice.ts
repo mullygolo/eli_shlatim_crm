@@ -657,7 +657,8 @@ router.post('/orders/create-document', async (req, res) => {
         // וולידציה: חשבונית מס / חשבונית מס+קבלה — לא להנפיק אם ההזמנה כבר חויבה במלואה
         if (documentType === 'invoice' || documentType === 'invoice_receipt') {
             const links = await getOrderDocumentLinksByOrderId(orderId);
-            const ids = { linkedDocumentIds: links.map((l: { documentId?: string }) => l.documentId).filter(Boolean) };
+            const linkedIds = links.map((l: { documentId?: string }) => l.documentId).filter((id): id is string => typeof id === 'string' && id.length > 0);
+            const ids = { linkedDocumentIds: linkedIds };
             const summary = await getInvoiceSummaryByOrderNumber(order.orderNumber, ids);
             const orderTotalWithVat = calculateOrderTotals(order).totalAmount * (1 + (order.vatRate ?? vatRate) / 100);
             if (summary.netInvoiced >= orderTotalWithVat - 0.01) {

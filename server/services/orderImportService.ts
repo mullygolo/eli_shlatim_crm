@@ -316,7 +316,7 @@ async function getSuppliersFromDb(): Promise<Supplier[]> {
 export async function executeImport(
     rows: Record<string, string>[],
     options: { skipExistingOrderNumbers?: boolean } = {}
-): Promise<{ created: number; skipped: number; errors: string[] }> {
+): Promise<{ created: number; updated: number; skipped: number; errors: string[] }> {
     const skipExisting = options.skipExistingOrderNumbers !== false;
     const customers = await getCustomers();
     let suppliers = await getSuppliersFromDb();

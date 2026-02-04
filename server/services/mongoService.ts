@@ -16,6 +16,16 @@ import { calculateOrderTotals, calculateDueDate } from '../utils/calculations.js
 const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://daniel_db_user:danny123@elishlatim.geyfv2c.mongodb.net/elishlatim?retryWrites=true&w=majority&appName=Compass';
 const DB_NAME = process.env.DB_NAME || 'elishlatim';
 
+/** Max orders returned by getOrders() to keep initial load fast. Use getOrdersPaginated for full list. */
+const ORDERS_INITIAL_LOAD_LIMIT = typeof process.env.ORDERS_INITIAL_LOAD_LIMIT !== 'undefined'
+    ? Math.max(500, parseInt(process.env.ORDERS_INITIAL_LOAD_LIMIT, 10) || 5000)
+    : 5000;
+
+/** Max customers returned by getCustomers() to keep initial load fast. Use getCustomersPaginated for full list. */
+const CUSTOMERS_INITIAL_LOAD_LIMIT = typeof process.env.CUSTOMERS_INITIAL_LOAD_LIMIT !== 'undefined'
+    ? Math.max(500, parseInt(process.env.CUSTOMERS_INITIAL_LOAD_LIMIT, 10) || 3000)
+    : 3000;
+
 // Connection cache
 let client: MongoClient | null = null;
 let db: Db | null = null;
@@ -103,7 +113,11 @@ export async function getCustomers(): Promise<Customer[]> {
     try {
         const database = await getDb();
         const collection = database.collection<Customer>('customers');
-        const docs = await collection.find({}).toArray();
+        const docs = await collection
+            .find({})
+            .sort({ createdAt: -1 })
+            .limit(CUSTOMERS_INITIAL_LOAD_LIMIT)
+            .toArray();
         return docs.map(deserializeDates) as Customer[];
     } catch (error) {
         console.error('Error fetching customers:', error);
@@ -289,7 +303,11 @@ export async function getOrders(): Promise<Order[]> {
     try {
         const database = await getDb();
         const collection = database.collection<Order>('orders');
-        const docs = await collection.find({}).toArray();
+        const docs = await collection
+            .find({})
+            .sort({ date: -1 })
+            .limit(ORDERS_INITIAL_LOAD_LIMIT)
+            .toArray();
         const orders = docs.map(deserializeDates) as Order[];
         return orders;
     } catch (error) {

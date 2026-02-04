@@ -138,8 +138,76 @@ const App: React.FC = () => {
     // Load data in two phases: critical first (show app fast), then rest in background
     const CRITICAL_TIMEOUT_MS = 10000;
     const BACKGROUND_TIMEOUT_MS = 60000; // 60s – טעינת לקוחות, הזמנות, ספקים וכו' יכולה לקחת זמן ברשת איטית או DB כבד
+
+    // Extracted so it can be called from effect (with cancelledRef) and from retry button (no ref). Guards prevent state updates after unmount.
+    const loadBackgroundData = useCallback(async (cancelledRef?: { current: boolean }) => {
+        const isCancelled = () => cancelledRef?.current === true;
+        const entries: { label: string; fn: () => Promise<any> }[] = [
+            { label: 'לקוחות', fn: getCustomers },
+            { label: 'הזמנות', fn: getOrders },
+            { label: 'ספקים', fn: getSuppliers },
+            { label: 'פעילויות', fn: getActivities },
+            { label: 'הוצאות קבועות', fn: getFixedExpenses },
+            { label: 'הוצאות משתנות', fn: getVariableExpenses },
+            { label: 'הלוואות', fn: getLoans },
+            { label: 'חובות', fn: getDebts },
+            { label: 'לקוחות לפתיחה', fn: getReceivables },
+            { label: 'הון', fn: getEquity },
+            { label: 'נוכחות', fn: getAttendanceRecords },
+            { label: 'אירועים', fn: getManualEvents },
+        ];
+        const loadPromise = Promise.allSettled(entries.map((e) => e.fn()));
+        const timeoutPromise = new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('BACKGROUND_TIMEOUT')), BACKGROUND_TIMEOUT_MS)
+        );
+        let results: PromiseSettledResult<any>[];
+        try {
+            results = await Promise.race([loadPromise, timeoutPromise]);
+        } catch (err) {
+            if (!isCancelled()) {
+                console.error('Background data load timeout or error:', err);
+                setBackgroundLoadError('טעינת הנתונים נכשלה (timeout). וודא שהשרת רץ ורענן את הדף.');
+            }
+            return;
+        }
+        if (isCancelled()) return;
+        const failed = results
+            .map((r, i) => (r.status === 'rejected' ? { label: entries[i].label, err: (r as PromiseRejectedResult).reason } : null))
+            .filter((x): x is { label: string; err: unknown } => x !== null);
+        const getValue = (r: PromiseSettledResult<any>, fallback: any) => (r.status === 'fulfilled' ? r.value : fallback);
+        if (failed.length > 0) {
+            if (!isCancelled()) {
+                console.error('Error loading background data (partial):', failed);
+                const msg = failed.length >= entries.length
+                    ? 'הנתונים לא נטענו. ייתכן שהשרת לא זמין או שיש בעיית התחברות. נסה לרענן את הדף.'
+                    : `חלק מהנתונים לא נטענו (${failed.map(f => f.label).join(', ')}). נסה שוב או רענן את הדף.`;
+                setBackgroundLoadError(msg);
+            }
+        } else {
+            if (!isCancelled()) setBackgroundLoadError(null);
+        }
+        if (isCancelled()) return;
+        try {
+            setCustomers(getValue(results[0], []));
+            setOrders(getValue(results[1], []));
+            setSuppliers(getValue(results[2], []));
+            setActivities(getValue(results[3], []));
+            setFixedExpenses(getValue(results[4], []));
+            setVariableExpenses(getValue(results[5], []));
+            setLoans(getValue(results[6], []));
+            setDebts(getValue(results[7], []));
+            setReceivables(getValue(results[8], []));
+            setEquity(getValue(results[9], []));
+            setAttendanceRecords(getValue(results[10], []));
+            setManualEvents(getValue(results[11], []));
+        } catch (err) {
+            if (!isCancelled()) console.error('Error applying background data:', err);
+        }
+    }, []);
+
     useEffect(() => {
         let cancelled = false;
+        const cancelledRef = { current: false };
 
         const applySettings = (settingsData: any) => {
             setVatRate(settingsData.vatRate);
@@ -201,68 +269,8 @@ const App: React.FC = () => {
             if (!cancelled) setIsLoading(false);
         };
 
-        const loadRestInBackground = async () => {
-            const entries: { label: string; fn: () => Promise<any> }[] = [
-                { label: 'לקוחות', fn: getCustomers },
-                { label: 'הזמנות', fn: getOrders },
-                { label: 'ספקים', fn: getSuppliers },
-                { label: 'פעילויות', fn: getActivities },
-                { label: 'הוצאות קבועות', fn: getFixedExpenses },
-                { label: 'הוצאות משתנות', fn: getVariableExpenses },
-                { label: 'הלוואות', fn: getLoans },
-                { label: 'חובות', fn: getDebts },
-                { label: 'לקוחות לפתיחה', fn: getReceivables },
-                { label: 'הון', fn: getEquity },
-                { label: 'נוכחות', fn: getAttendanceRecords },
-                { label: 'אירועים', fn: getManualEvents },
-            ];
-            const loadPromise = Promise.allSettled(entries.map((e) => e.fn()));
-            const timeoutPromise = new Promise<never>((_, reject) =>
-                setTimeout(() => reject(new Error('BACKGROUND_TIMEOUT')), BACKGROUND_TIMEOUT_MS)
-            );
-            let results: PromiseSettledResult<any>[];
-            try {
-                results = await Promise.race([loadPromise, timeoutPromise]);
-            } catch (err) {
-                if (!cancelled) {
-                    console.error('Background data load timeout or error:', err);
-                    setBackgroundLoadError('טעינת הנתונים נכשלה (timeout). וודא שהשרת רץ ורענן את הדף.');
-                }
-                return;
-            }
-            if (cancelled) return;
-            const failed = results
-                .map((r, i) => (r.status === 'rejected' ? { label: entries[i].label, err: (r as PromiseRejectedResult).reason } : null))
-                .filter((x): x is { label: string; err: unknown } => x !== null);
-            if (failed.length > 0) {
-                console.error('Error loading background data (partial):', failed);
-                const msg = failed.length >= entries.length
-                    ? 'הנתונים לא נטענו. ייתכן שהשרת לא זמין או שיש בעיית התחברות. נסה לרענן את הדף.'
-                    : `חלק מהנתונים לא נטענו (${failed.map(f => f.label).join(', ')}). נסה לרענן את הדף.`;
-                setBackgroundLoadError(msg);
-            }
-            const getValue = (r: PromiseSettledResult<any>, fallback: any) => (r.status === 'fulfilled' ? r.value : fallback);
-            if (cancelled) return;
-            try {
-                setCustomers(getValue(results[0], []));
-                setOrders(getValue(results[1], []));
-                setSuppliers(getValue(results[2], []));
-                setActivities(getValue(results[3], []));
-                setFixedExpenses(getValue(results[4], []));
-                setVariableExpenses(getValue(results[5], []));
-                setLoans(getValue(results[6], []));
-                setDebts(getValue(results[7], []));
-                setReceivables(getValue(results[8], []));
-                setEquity(getValue(results[9], []));
-                setAttendanceRecords(getValue(results[10], []));
-                setManualEvents(getValue(results[11], []));
-            } catch (err) {
-                console.error('Error applying background data:', err);
-            }
-        };
-
         loadCritical().then(() => {
-            if (!cancelled) loadRestInBackground();
+            if (!cancelled) loadBackgroundData(cancelledRef);
         });
 
         // Set up automatic refresh for attendance records every 30 seconds (skip while clock-in/out in progress to avoid overwriting optimistic state)
@@ -278,9 +286,10 @@ const App: React.FC = () => {
 
         return () => {
             cancelled = true;
+            cancelledRef.current = true;
             clearInterval(attendanceRefreshInterval);
         };
-    }, []);
+    }, [loadBackgroundData]);
 
     const [openOrderId, setOpenOrderId] = useState<string | null>(null);
     const [openNewOrderRequest, setOpenNewOrderRequest] = useState(false);
@@ -882,15 +891,24 @@ const App: React.FC = () => {
                         onAddOrder={handleAddOrderFromHeader}
                     />
                     {backgroundLoadError && (
-                        <div className="mx-4 mt-2 sm:mx-6 lg:mx-8 flex items-center justify-between gap-3 rounded-lg bg-amber-50 border border-amber-200 px-4 py-3 text-amber-800" role="alert">
-                            <span className="text-sm font-medium">{backgroundLoadError}</span>
-                            <button
-                                type="button"
-                                onClick={() => window.location.reload()}
-                                className="shrink-0 rounded-md bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-700"
-                            >
-                                רענן דף
-                            </button>
+                        <div className="mx-4 mt-2 sm:mx-6 lg:mx-8 flex flex-wrap items-center justify-between gap-3 rounded-lg bg-amber-50 border border-amber-200 px-4 py-3 text-amber-800" role="alert">
+                            <span className="text-sm font-medium flex-1 min-w-0">{backgroundLoadError}</span>
+                            <div className="flex gap-2 shrink-0">
+                                <button
+                                    type="button"
+                                    onClick={() => { setBackgroundLoadError(null); loadBackgroundData(); }}
+                                    className="rounded-md bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-700"
+                                >
+                                    נסה שוב
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => window.location.reload()}
+                                    className="rounded-md bg-amber-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-800"
+                                >
+                                    רענן דף
+                                </button>
+                            </div>
                         </div>
                     )}
                     <main className="flex-1 overflow-x-auto overflow-y-auto bg-light-bg p-4 sm:p-6 lg:p-8">

@@ -246,6 +246,7 @@ export interface Order {
     description: string;
     date: Date;
     createdAt?: Date; // Immutable creation date
+    updatedAt?: Date; // Last update time (for "sort by recently updated")
     dealStartDate?: Date; // The date when the deal effectively started (e.g. status changed to "In Graphics")
     customerId: string;
     contactId?: string;

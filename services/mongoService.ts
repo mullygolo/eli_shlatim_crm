@@ -92,20 +92,19 @@ export async function getOrders(): Promise<Order[]> {
     return apiRequest<Order[]>('/orders');
 }
 
-export async function getOrdersPaginated(filters: any, page: number = 1, limit: number = 50): Promise<any> {
+export async function getOrdersPaginated(filters: any, page: number = 1, limit: number = 50, options?: { signal?: AbortSignal }): Promise<any> {
     const queryParams = new URLSearchParams({
         page: page.toString(),
         limit: limit.toString(),
         filters: JSON.stringify(filters)
     });
-    
     const response = await fetch(`${API_BASE_URL}/orders/paginated?${queryParams}`, {
         headers: {
             'Authorization': `Bearer ${localStorage.getItem('authToken')}`,
             'Content-Type': 'application/json'
-        }
+        },
+        ...(options?.signal && { signal: options.signal })
     });
-    
     if (!response.ok) throw new Error('Failed to fetch paginated orders');
     return response.json();
 }

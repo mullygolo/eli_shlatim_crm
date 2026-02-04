@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Employee, AttendanceRecord, Order, OrderStatusConfiguration, AttendanceStatus, PaymentMethod, Attachment, PayrollOverrideMap } from '../types';
 import { ClockIcon, EditIcon, PlusIcon, ImportIcon, DownloadIcon } from './icons';
 import Modal from './Modal';
@@ -17,6 +17,7 @@ interface AttendancePageProps {
     statusConfigs: OrderStatusConfiguration[];
     payrollOverrides: PayrollOverrideMap;
     setPayrollOverrides: React.Dispatch<React.SetStateAction<PayrollOverrideMap>>;
+    onAttendanceMutationBusy?: (busy: boolean) => void;
 }
 
 // --- Helpers ---
@@ -325,7 +326,7 @@ const CorrectionRequestModal: React.FC<{
     );
 };
 
-const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, setRecords, orders, statusConfigs, payrollOverrides, setPayrollOverrides }) => {
+const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, setRecords, orders, statusConfigs, payrollOverrides, setPayrollOverrides, onAttendanceMutationBusy }) => {
     const { user } = useAuth();
     const isUserManager = user?.roleType === 'ADMIN' || user?.roleType === 'MANAGER';
     
@@ -350,6 +351,7 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
     const [viewingCertificate, setViewingCertificate] = useState<Attachment | null>(null);
     const [isClocking, setIsClocking] = useState(false);
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
+    const clockInRequestInProgressRef = useRef(false);
 
     // Dynamic Year List: Start from 2023 up to current year + 1
     const availableYears = useMemo(() => {
@@ -418,27 +420,26 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
         loadRecords();
     }, [currentEmployeeId, selectedMonth, selectedYear, currentPage, pageSize]);
     
-    // Auto-close old records on component mount and periodically
+    // Keep ref to latest setRecords so we don't re-run the effect when it changes (which would overwrite optimistic clock-out)
+    const setRecordsRef = useRef(setRecords);
+    setRecordsRef.current = setRecords;
+
+    // Auto-close old records on component mount and periodically only (not when setRecords identity changes)
     useEffect(() => {
         const checkAndCloseOldRecords = async () => {
             try {
-                // Refresh records from server (this will trigger auto-close on server side)
                 const updatedRecords = await mongoService.getAttendanceRecords();
-                setRecords(updatedRecords);
-                // Also refresh paginated records
+                setRecordsRef.current(updatedRecords);
                 refetchRecords();
             } catch (error) {
                 console.error('Error refreshing records to close old ones:', error);
             }
         };
-        
-        // Check immediately on mount
+
         checkAndCloseOldRecords();
-        
-        // Also check every 5 minutes to catch any old records
         const interval = setInterval(checkAndCloseOldRecords, 5 * 60 * 1000);
         return () => clearInterval(interval);
-    }, [setRecords]);
+    }, []);
     
     // עדכן currentEmployeeId אם המשתמש הוא עובד רגיל
     useEffect(() => {
@@ -473,7 +474,8 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
             .sort((a, b) => new Date(a.clockIn || 0).getTime() - new Date(b.clockIn || 0).getTime());
     }, [records, currentEmployeeId]);
 
-    const activeRecord = todaysRecords.find(r => !r.clockOut);
+    // Only real records (not optimistic att_opt_*) count as "active" for display/timer/clock-out
+    const activeRecord = todaysRecords.find(r => !r.clockOut && !String(r.id).startsWith('att_opt_'));
     const isClockedIn = !!activeRecord;
 
     // LIVE Shift Duration Logic
@@ -639,11 +641,15 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
         setErrorMessage(null);
 
         if (action === 'IN') {
-            if (activeRecord) {
+            if (clockInRequestInProgressRef.current) return;
+            if (todaysRecords.some(r => !r.clockOut)) {
                 setErrorMessage('כבר יש כניסה פעילה להיום');
                 return;
             }
 
+            clockInRequestInProgressRef.current = true;
+            setIsClocking(true);
+            if (import.meta.env.DEV) console.log('[Attendance] clock-in start');
             const optimisticId = `att_opt_${Date.now()}`;
             const now = new Date();
             const optimisticRecord: AttendanceRecord = {
@@ -654,14 +660,17 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
                 totalHours: 0,
                 status: isWFH ? 'WFH' : 'PRESENT',
             };
+            onAttendanceMutationBusy?.(true);
             setRecords(prev => [...prev, optimisticRecord]);
-            // No setIsClocking(true) — UI immediately shows "יציאה" from optimistic record
 
             try {
                 const savedRecord = await retryWithBackoff(() =>
                     mongoService.clockIn(currentEmployeeId, isWFH)
                 );
-                setRecords(prev => prev.map(r => r.id === optimisticId ? savedRecord : r));
+                setRecords(prev =>
+                    prev.map(r => r.id === optimisticId ? savedRecord : r).filter(r => !String(r.id).startsWith('att_opt_'))
+                );
+                if (import.meta.env.DEV) console.log('[Attendance] clock-in success', savedRecord.id);
                 setTimeout(async () => {
                     try {
                         const updatedRecords = await mongoService.getAttendanceRecords();
@@ -695,62 +704,124 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
                         }
                     }
                 }
+            } finally {
+                clockInRequestInProgressRef.current = false;
+                setIsClocking(false);
+                onAttendanceMutationBusy?.(false);
             }
             return;
         }
 
-        // action === 'OUT'
-        if (!activeRecord) {
-            setErrorMessage('אין כניסה פעילה');
-            return;
-        }
-        if (activeRecord.clockOut) {
-            setErrorMessage('כבר יצאת מהמשמרת');
-            return;
-        }
-
-        const recordToClockOut = activeRecord;
-        const now = new Date();
-        const optimisticUpdated: AttendanceRecord = {
-            ...recordToClockOut,
-            clockOut: now,
-            totalHours: recordToClockOut.clockIn
-                ? Math.max(0, (now.getTime() - new Date(recordToClockOut.clockIn).getTime()) / (1000 * 60 * 60))
-                : 0,
-        };
-        setRecords(prev => prev.map(r => r.id === recordToClockOut.id ? optimisticUpdated : r));
-        // No setIsClocking(true) — UI immediately shows "כניסה" after optimistic clock-out
-
-        try {
-            const savedRecord = await retryWithBackoff(() =>
-                mongoService.clockOut(recordToClockOut.id)
-            );
-            setRecords(prev => prev.map(r => r.id === recordToClockOut.id ? savedRecord : r));
-            setTimeout(async () => {
+        // action === 'OUT' — only close records that exist on the server (exclude optimistic ids from pending clock-in)
+        const toClose = todaysRecords.filter(r => !r.clockOut && !String(r.id).startsWith('att_opt_'));
+        if (toClose.length === 0) {
+            // Remove stale optimistic records (ghost entries) and sync with server
+            const hasStaleOptimistic = todaysRecords.some(r => !r.clockOut && String(r.id).startsWith('att_opt_'));
+            if (hasStaleOptimistic) {
+                setRecords(prev => prev.filter(r => !String(r.id).startsWith('att_opt_')));
                 try {
                     const updatedRecords = await mongoService.getAttendanceRecords();
                     setRecords(updatedRecords);
-                } catch (err) {
-                    console.error('Error refreshing records after clock-out:', err);
+                } catch (e) {
+                    console.error('Error syncing after filtering optimistic records:', e);
                 }
-            }, 500);
+            }
+            setErrorMessage('אין כניסה פעילה');
+            return;
+        }
+
+        setIsClocking(true);
+        if (import.meta.env.DEV) console.log('[Attendance] clock-out start', { toCloseCount: toClose.length, ids: toClose.map(r => r.id) });
+        const now = new Date();
+        const optimisticUpdates = Object.fromEntries(
+            toClose.map(r => [
+                r.id,
+                {
+                    ...r,
+                    clockOut: now,
+                    totalHours: r.clockIn
+                        ? Math.max(0, (now.getTime() - new Date(r.clockIn).getTime()) / (1000 * 60 * 60))
+                        : 0,
+                } as AttendanceRecord,
+            ])
+        );
+        onAttendanceMutationBusy?.(true);
+        setRecords(prev =>
+            prev.map(rec => (optimisticUpdates[rec.id] ? optimisticUpdates[rec.id] : rec))
+        );
+
+        let updatedFromServer: AttendanceRecord[] = [];
+        try {
+            let needRefetch = false;
+            for (const rec of toClose) {
+                try {
+                    const updatedRecord = await retryWithBackoff(() => mongoService.clockOut(rec.id));
+                    const withDates: AttendanceRecord = {
+                        ...updatedRecord,
+                        clockOut: updatedRecord.clockOut
+                            ? (updatedRecord.clockOut instanceof Date ? updatedRecord.clockOut : new Date(updatedRecord.clockOut as unknown as string))
+                            : undefined,
+                    };
+                    updatedFromServer.push(withDates);
+                } catch (perRecError: any) {
+                    const msg = perRecError?.message ?? '';
+                    if (msg.includes('already clocked out') || msg.includes('not found') || msg.includes('record not found')) {
+                        needRefetch = true;
+                        continue;
+                    }
+                    throw perRecError;
+                }
+            }
+            if (needRefetch || updatedFromServer.length < toClose.length) {
+                if (import.meta.env.DEV) console.log('[Attendance] clock-out refetch', { needRefetch, updatedCount: updatedFromServer.length, toCloseCount: toClose.length });
+                const updatedRecords = await mongoService.getAttendanceRecords();
+                setRecords(updatedRecords);
+                if (toClose.length > 1) setErrorMessage('חלק מהרשומות כבר נחתמו. המערכת עודכנה.');
+            } else {
+                if (import.meta.env.DEV) console.log('[Attendance] clock-out success', { updatedCount: updatedFromServer.length });
+                setRecords(prev =>
+                    prev.map(r => {
+                        const u = updatedFromServer.find(u => u.id === r.id);
+                        return u ?? r;
+                    }).filter(r => !String(r.id).startsWith('att_opt_'))
+                );
+            }
         } catch (error: any) {
             console.error('Error clocking out:', error);
-            setRecords(prev => prev.map(r => r.id === recordToClockOut.id ? recordToClockOut : r));
-
-            const isNetworkError = !navigator.onLine ||
-                (error.message && error.message.includes('fetch')) ||
-                (error.message && error.message.includes('network'));
-
-            if (isNetworkError) {
-                saveToOfflineQueue('OUT', { recordId: recordToClockOut.id });
-                setErrorMessage('אין חיבור לאינטרנט. הפעולה נשמרה ותתבצע אוטומטית כשהחיבור יחזור.');
+            const msg = error?.message ?? '';
+            const isAlreadyOrNotFound = msg.includes('already clocked out') || msg.includes('not found') || msg.includes('record not found');
+            if (isAlreadyOrNotFound || updatedFromServer.length > 0) {
+                // Sync from server instead of reverting (partial success or record already closed / not found)
+                try {
+                    const updatedRecords = await mongoService.getAttendanceRecords();
+                    setRecords(updatedRecords);
+                    setErrorMessage(toClose.length > 1 ? 'חלק מהרשומות כבר נחתמו. המערכת עודכנה.' : 'כבר בוצעה יציאה לרשומה זו.');
+                } catch (syncErr) {
+                    setRecords(prev =>
+                        prev.map(rec => (optimisticUpdates[rec.id] ? toClose.find(r => r.id === rec.id)! : rec))
+                    );
+                    setErrorMessage('כבר בוצעה יציאה לרשומה זו.');
+                }
             } else {
-                const msg = error.message && error.message.includes('already clocked out')
-                    ? 'כבר בוצעה יציאה לרשומה זו'
-                    : (error.message || 'שגיאה בביצוע הפעולה. אנא נסה שוב.');
-                setErrorMessage(msg);
+                setRecords(prev =>
+                    prev.map(rec => (optimisticUpdates[rec.id] ? toClose.find(r => r.id === rec.id)! : rec))
+                );
+                const isNetworkError = !navigator.onLine ||
+                    (error.message && error.message.includes('fetch')) ||
+                    (error.message && error.message.includes('network'));
+
+                if (isNetworkError) {
+                    for (const rec of toClose) {
+                        saveToOfflineQueue('OUT', { recordId: rec.id });
+                    }
+                    setErrorMessage('אין חיבור לאינטרנט. הפעולה נשמרה ותתבצע אוטומטית כשהחיבור יחזור.');
+                } else {
+                    setErrorMessage(error.message || 'שגיאה בביצוע הפעולה. אנא נסה שוב.');
+                }
             }
+        } finally {
+            setIsClocking(false);
+            onAttendanceMutationBusy?.(false);
         }
     };
 
@@ -1306,6 +1377,7 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
                                 {daysInMonth.map((date) => {
                                     const dateKey = getDateStringForComparison(date);
                                     const holiday = getJewishHoliday(date);
+                                    // All records for this day (one row per clock-in/out pair; allows multiple entries per day)
                                     const dayRecords = records
                                         .filter(r => r.employeeId === currentEmployeeId && getDateStringForComparison(r.date) === dateKey)
                                         .sort((a, b) => new Date(a.clockIn || 0).getTime() - new Date(b.clockIn || 0).getTime());

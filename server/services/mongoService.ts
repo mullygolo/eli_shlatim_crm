@@ -87,7 +87,7 @@ export function deserializeDates(obj: any): any {
     if (typeof obj === 'object') {
         const deserialized: any = {};
         for (const key in obj) {
-            if (key.includes('Date') || key.includes('date') || key === 'timestamp' || key === 'createdAt' || key === 'uploadedAt' || key === 'completedAt' || key === 'startDate' || key === 'endDate' || key === 'dueDate' || key === 'repaymentDate' || key === 'effectiveDate' || key === 'expectedCloseDate' || key === 'clockIn' || key === 'clockOut' || key === 'requestedClockIn' || key === 'requestedClockOut' || key === 'changedAt') {
+            if (key.includes('Date') || key.includes('date') || key === 'timestamp' || key === 'createdAt' || key === 'updatedAt' || key === 'uploadedAt' || key === 'completedAt' || key === 'startDate' || key === 'endDate' || key === 'dueDate' || key === 'repaymentDate' || key === 'effectiveDate' || key === 'expectedCloseDate' || key === 'clockIn' || key === 'clockOut' || key === 'requestedClockIn' || key === 'requestedClockOut' || key === 'changedAt') {
                 deserialized[key] = obj[key] ? new Date(obj[key]) : undefined;
             } else {
                 deserialized[key] = deserializeDates(obj[key]);
@@ -365,7 +365,9 @@ export async function createOrder(order: Order): Promise<Order> {
     try {
         const database = await getDb();
         const collection = database.collection<Order>('orders');
-        const serialized = serializeDates(order);
+        const now = new Date();
+        const withTimestamps = { ...order, createdAt: order.createdAt ?? now, updatedAt: now };
+        const serialized = serializeDates(withTimestamps);
         await collection.insertOne(serialized);
         return deserializeDates(serialized) as Order;
     } catch (error) {
@@ -378,11 +380,12 @@ export async function updateOrder(order: Order): Promise<Order> {
     try {
         const database = await getDb();
         const collection = database.collection<Order>('orders');
-        const serialized = serializeDates(order);
-        
+        const withUpdatedAt = { ...order, updatedAt: new Date() };
+        const serialized = serializeDates(withUpdatedAt);
+
         // Remove _id from serialized object to avoid MongoDB immutable field error
         const { _id, ...serializedWithoutId } = serialized as any;
-        
+
         await collection.replaceOne({ id: order.id }, serializedWithoutId);
         return deserializeDates(serialized) as Order;
     } catch (error) {
@@ -480,8 +483,9 @@ export async function getOrdersPaginated(filters: any, page: number = 1, limit: 
         // Build MongoDB query from filters
         const query: any = {};
         
-        // Collection mode / collection center: unpaid orders
-        const isCollectionMode = filters.isCollectionMode === true;
+        // Sort mode: 'date' | 'dueDate' | 'updatedAt'. dueDate = same filter as legacy "collection mode"
+        const sortBy = filters.sortBy === 'dueDate' || filters.sortBy === 'updatedAt' ? filters.sortBy : 'date';
+        const isCollectionMode = filters.isCollectionMode === true || sortBy === 'dueDate';
         const isCollectionCenterView = filters.collectionCenterView === true;
         if (isCollectionMode || isCollectionCenterView) {
             query.paymentStatus = { $ne: 'שולם' };
@@ -687,12 +691,18 @@ export async function getOrdersPaginated(filters: any, page: number = 1, limit: 
             totalBalanceInclVat: 0 
         });
         
-        // Sort orders
-        if (isCollectionMode) {
+        // Sort orders: single pass by sortBy
+        if (sortBy === 'dueDate') {
             allMatchingOrders.sort((a, b) => {
                 const dateA = calculateDueDate(a.dealStartDate || a.date, a.paymentTerms);
                 const dateB = calculateDueDate(b.dealStartDate || b.date, b.paymentTerms);
                 return dateA.getTime() - dateB.getTime();
+            });
+        } else if (sortBy === 'updatedAt') {
+            allMatchingOrders.sort((a, b) => {
+                const uA = a.updatedAt ? new Date(a.updatedAt).getTime() : (a.createdAt ? new Date(a.createdAt).getTime() : 0);
+                const uB = b.updatedAt ? new Date(b.updatedAt).getTime() : (b.createdAt ? new Date(b.createdAt).getTime() : 0);
+                return uB - uA;
             });
         } else {
             const dateKey = dateFilterType === 'ORDER_DATE' ? 'date' : 'dealStartDate';
@@ -1355,6 +1365,40 @@ export async function createActivity(activity: Activity): Promise<Activity> {
 }
 
 // ==================== STATUS CONFIGS ====================
+const DEFAULT_STATUS_CONFIGS: OrderStatusConfiguration[] = [
+    { id: 'st_1', label: 'ליד חדש', isActiveDeal: false, isLead: true, isQuote: false, isCompleted: false, isLost: false, color: 'bg-blue-100 text-blue-800', orderIndex: 1, isSystem: true },
+    { id: 'st_2', label: 'נשלח הצעת מחיר', isActiveDeal: false, isLead: false, isQuote: true, isCompleted: false, isLost: false, color: 'bg-purple-100 text-purple-800', orderIndex: 2, isSystem: true },
+    { id: 'st_3', label: 'בגרפיקה', isActiveDeal: true, isLead: false, isQuote: false, isCompleted: false, isLost: false, color: 'bg-yellow-100 text-yellow-800', orderIndex: 3, isSystem: true },
+    { id: 'st_4', label: 'ירד לביצוע', isActiveDeal: true, isLead: false, isQuote: false, isCompleted: false, isLost: false, color: 'bg-orange-100 text-orange-800', orderIndex: 4, isSystem: true },
+    { id: 'st_5', label: 'מוכן ממתין לאיסוף', isActiveDeal: true, isLead: false, isQuote: false, isCompleted: false, isLost: false, color: 'bg-cyan-100 text-cyan-800', orderIndex: 5, isSystem: true },
+    { id: 'st_6', label: 'מוכן ממתין למשלוח', isActiveDeal: true, isLead: false, isQuote: false, isCompleted: false, isLost: false, color: 'bg-cyan-100 text-cyan-800', orderIndex: 6, isSystem: true },
+    { id: 'st_7', label: 'מוכן ממתין להתקנה', isActiveDeal: true, isLead: false, isQuote: false, isCompleted: false, isLost: false, color: 'bg-cyan-100 text-cyan-800', orderIndex: 7, isSystem: true },
+    { id: 'st_8', label: 'נשלח', isActiveDeal: true, isLead: false, isQuote: false, isCompleted: true, isLost: false, color: 'bg-green-100 text-green-800', orderIndex: 8, isSystem: true },
+    { id: 'st_9', label: 'סופק במפעל', isActiveDeal: true, isLead: false, isQuote: false, isCompleted: true, isLost: false, color: 'bg-green-100 text-green-800', orderIndex: 9, isSystem: true },
+    { id: 'st_10', label: 'הותקן', isActiveDeal: true, isLead: false, isQuote: false, isCompleted: true, isLost: false, color: 'bg-green-100 text-green-800', orderIndex: 10, isSystem: true },
+    { id: 'st_11', label: 'בגביה', isActiveDeal: true, isLead: false, isQuote: false, isCompleted: false, isLost: false, color: 'bg-emerald-100 text-emerald-800', orderIndex: 11, isSystem: true },
+    { id: 'st_12', label: 'בוטל / לא רלוונטי', isActiveDeal: false, isLead: false, isQuote: false, isCompleted: false, isLost: true, color: 'bg-gray-100 text-gray-800', orderIndex: 12, isSystem: true },
+    { id: 'st_13', label: 'יקר', isActiveDeal: false, isLead: false, isQuote: false, isCompleted: false, isLost: true, color: 'bg-gray-100 text-gray-800', orderIndex: 13, isSystem: true },
+    { id: 'st_14', label: 'קנה במקום אחר', isActiveDeal: false, isLead: false, isQuote: false, isCompleted: false, isLost: true, color: 'bg-gray-100 text-gray-800', orderIndex: 14, isSystem: true },
+];
+
+/** Ensure statusConfigs collection has default configs if empty (e.g. first run or new DB). */
+export async function initializeStatusConfigs(): Promise<void> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<OrderStatusConfiguration>('statusConfigs');
+        const count = await collection.countDocuments();
+        if (count === 0) {
+            const serialized = DEFAULT_STATUS_CONFIGS.map(serializeDates);
+            await collection.insertMany(serialized);
+            console.log('Initialized statusConfigs with default configs');
+        }
+    } catch (error) {
+        console.error('Error initializing status configs:', error);
+        throw error;
+    }
+}
+
 export async function getStatusConfigs(): Promise<OrderStatusConfiguration[]> {
     try {
         const database = await getDb();

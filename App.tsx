@@ -1,5 +1,5 @@
 
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { Customer, Order, Activity, AddActivityOptions, Supplier, Employee, Page, OrderStatusConfiguration, FixedExpense, VariableExpense, Loan, EquityInvestment, Debt, AttendanceRecord, ManualEvent, PayrollOverrideMap, Receivable } from './types';
 import { useAuth } from './contexts/AuthContext';
 import ProtectedRoute from './components/ProtectedRoute';
@@ -82,6 +82,7 @@ const App: React.FC = () => {
     // Attendance State
     const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>([]);
     const [payrollOverrides, setPayrollOverrides] = useState<PayrollOverrideMap>({});
+    const attendanceMutationInProgressRef = useRef(false);
 
     // Calendar Manual Events
     const [manualEvents, setManualEvents] = useState<ManualEvent[]>([]);
@@ -255,8 +256,9 @@ const App: React.FC = () => {
             if (!cancelled) loadRestInBackground();
         });
 
-        // Set up automatic refresh for attendance records every 30 seconds
+        // Set up automatic refresh for attendance records every 30 seconds (skip while clock-in/out in progress to avoid overwriting optimistic state)
         const attendanceRefreshInterval = setInterval(async () => {
+            if (attendanceMutationInProgressRef.current) return;
             try {
                 const updatedRecords = await getAttendanceRecords();
                 setAttendanceRecords(updatedRecords);
@@ -465,11 +467,12 @@ const App: React.FC = () => {
                 return <AttendancePage 
                     employees={employees} 
                     records={attendanceRecords} 
-                    setRecords={setAttendanceRecordsWithSync} 
+                    setRecords={setAttendanceRecords}
                     orders={orders}
                     statusConfigs={statusConfigs}
                     payrollOverrides={payrollOverrides}
                     setPayrollOverrides={setPayrollOverridesWithSync}
+                    onAttendanceMutationBusy={(busy) => { attendanceMutationInProgressRef.current = busy; }}
                 />;
             case 'Settings':
                 return <SettingsPage 

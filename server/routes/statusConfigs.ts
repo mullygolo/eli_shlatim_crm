@@ -8,7 +8,9 @@ router.get('/', async (req, res) => {
         const configs = await getStatusConfigs();
         res.json(configs);
     } catch (error) {
-        res.status(500).json({ error: 'Failed to fetch status configs' });
+        console.error('GET /api/status-configs failed:', error);
+        const detail = error instanceof Error ? error.message : String(error);
+        res.status(500).json({ error: 'Failed to fetch status configs', detail });
     }
 });
 
@@ -17,7 +19,9 @@ router.put('/', async (req, res) => {
         const configs = await updateStatusConfigs(req.body);
         res.json(configs);
     } catch (error) {
-        res.status(500).json({ error: 'Failed to update status configs' });
+        console.error('PUT /api/status-configs failed:', error);
+        const detail = error instanceof Error ? error.message : String(error);
+        res.status(500).json({ error: 'Failed to update status configs', detail });
     }
 });
 

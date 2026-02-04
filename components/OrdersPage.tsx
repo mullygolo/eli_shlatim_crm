@@ -3383,6 +3383,8 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
     const [editingOrder, setEditingOrder] = useState<Order | null>(null);
     const [orderFormHeaderContent, setOrderFormHeaderContent] = useState<React.ReactNode>(null);
     const [searchTerm, setSearchTerm] = useState('');
+    const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
+    const abortControllerRef = useRef<AbortController | null>(null);
     const [customerFilter, setCustomerFilter] = useState<string[]>([]);
     const [customerIsImportPlaceholderOnly, setCustomerIsImportPlaceholderOnly] = useState(false);
     const [supplierFilter, setSupplierFilter] = useState<string[]>([]);
@@ -3393,8 +3395,8 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
     const [yearFilter, setYearFilter] = useState<string>('all');
     const [startDateFilter, setStartDateFilter] = useState<string>(''); // NEW: Date Range Start
     const [endDateFilter, setEndDateFilter] = useState<string>('');     // NEW: Date Range End
-    const [dateFilterType, setDateFilterType] = useState<'ORDER_DATE' | 'DEAL_DATE'>('ORDER_DATE'); // New Date Type Filter
-    const [isCollectionMode, setIsCollectionMode] = useState(false);
+    const [dateFilterType, setDateFilterType] = useState<'ORDER_DATE' | 'DEAL_DATE'>('ORDER_DATE');
+    const [sortBy, setSortBy] = useState<'date' | 'dueDate' | 'updatedAt'>('updatedAt');
     const [showCompletedOrders, setShowCompletedOrders] = useState(false); 
     
     // Pagination state
@@ -3429,8 +3431,15 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
         setIsModalOpen(true);
     };
 
+    // Debounce search: update debouncedSearchTerm 350ms after user stops typing
+    useEffect(() => {
+        const t = setTimeout(() => setDebouncedSearchTerm(searchTerm), 350);
+        return () => clearTimeout(t);
+    }, [searchTerm]);
+
     const resetFilters = () => {
         setSearchTerm('');
+        setDebouncedSearchTerm('');
         setCustomerFilter([]);
         setSupplierFilter([]);
         setEmployeeFilter([]);
@@ -3441,7 +3450,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
         setStartDateFilter('');
         setEndDateFilter('');
         setDateFilterType('ORDER_DATE');
-        setIsCollectionMode(false);
+        setSortBy('updatedAt');
         setShowCompletedOrders(false);
         setCustomerIsImportPlaceholderOnly(false);
         setCurrentPage(1); // Reset to first page
@@ -3508,6 +3517,9 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
 
     // Helper function to fetch paginated orders (silent = true: don't show loading spinner, for background refresh)
     const refetchOrders = async (silent: boolean = false) => {
+        if (abortControllerRef.current) abortControllerRef.current.abort();
+        abortControllerRef.current = new AbortController();
+        const signal = abortControllerRef.current.signal;
         if (!silent) setLoading(true);
         try {
             const includeCompleted =
@@ -3530,26 +3542,28 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                 startDateFilter,
                 endDateFilter,
                 dateFilterType,
-                searchTerm,
-                isCollectionMode,
+                searchTerm: debouncedSearchTerm,
+                sortBy,
                 showCompletedOrders: includeCompleted,
                 customerIsImportPlaceholderOnly
             };
-            const result = await mongoService.getOrdersPaginated(filters, currentPage, pageSize);
+            const result = await mongoService.getOrdersPaginated(filters, currentPage, pageSize, { signal });
+            if (signal.aborted) return;
             setPaginatedOrders(result.orders);
             setTotalCount(result.totalCount);
             setSummaryTotals(result.summaryTotals || { totalAmount: 0, totalProfit: 0, totalBalance: 0, totalCost: 0, totalAmountInclVat: 0, totalBalanceInclVat: 0 });
-        } catch (error) {
+        } catch (error: any) {
+            if (error?.name === 'AbortError') return;
             console.error('Error fetching paginated orders:', error);
         } finally {
-            if (!silent) setLoading(false);
+            if (!signal.aborted && !silent) setLoading(false);
         }
     };
 
-    // Reset to page 1 when filters change
+    // Reset to page 1 when filters change (use debounced search so page doesn't jump on every keystroke)
     useEffect(() => {
         setCurrentPage(1);
-    }, [customerFilter, supplierFilter, employeeFilter, orderStatusFilter, paymentStatusFilter, monthFilter, yearFilter, startDateFilter, endDateFilter, dateFilterType, searchTerm, isCollectionMode, showCompletedOrders, customerIsImportPlaceholderOnly]);
+    }, [customerFilter, supplierFilter, employeeFilter, orderStatusFilter, paymentStatusFilter, monthFilter, yearFilter, startDateFilter, endDateFilter, dateFilterType, debouncedSearchTerm, sortBy, showCompletedOrders, customerIsImportPlaceholderOnly]);
 
     // Fetch paginated orders when filters or pagination change; if orders already in props (e.g. from background load), show first page immediately then refetch in background
     useEffect(() => {
@@ -3589,7 +3603,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
         } else {
             refetchOrders();
         }
-    }, [currentPage, pageSize, customerFilter, supplierFilter, employeeFilter, orderStatusFilter, paymentStatusFilter, monthFilter, yearFilter, startDateFilter, endDateFilter, dateFilterType, searchTerm, isCollectionMode, showCompletedOrders, customerIsImportPlaceholderOnly]);
+    }, [currentPage, pageSize, customerFilter, supplierFilter, employeeFilter, orderStatusFilter, paymentStatusFilter, monthFilter, yearFilter, startDateFilter, endDateFilter, dateFilterType, debouncedSearchTerm, sortBy, showCompletedOrders, customerIsImportPlaceholderOnly]);
 
     useEffect(() => {
         if (initialOpenOrderId) {
@@ -3643,8 +3657,11 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                 return prev;
             });
             if (!exists) setTotalCount(c => c + 1);
-            // No refetch: server response is source of truth; list already updated above.
-            
+            // When "הזמנות עם לקוח מייבוא" is on, refetch so order that no longer matches disappears live
+            if (customerIsImportPlaceholderOnly) {
+                refetchOrders(true);
+            }
+
         if (keepOpen) {
                 setEditingOrder(savedOrder);
         } else {
@@ -3769,7 +3786,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                                 </select>
                             </div>
                             <div>
-                                <MultiSelectFilter label="לקוח" options={customerOptions} selectedValues={customerFilter} onChange={(v) => { setCustomerFilter(v); if (v.length === 0) { setCustomerIsImportPlaceholderOnly(false); setIsCollectionMode(false); } }} />
+                                <MultiSelectFilter label="לקוח" options={customerOptions} selectedValues={customerFilter} onChange={(v) => { setCustomerFilter(v); if (v.length === 0) setCustomerIsImportPlaceholderOnly(false); }} />
                             </div>
                             <div>
                                 <MultiSelectFilter label="עובד" options={employeeOptions} selectedValues={employeeFilter} onChange={setEmployeeFilter} />
@@ -3801,12 +3818,18 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                         </div>
                         <div className="flex items-center justify-between pt-2 border-t border-slate-100 flex-wrap gap-4">
                              <div className="flex items-center gap-3">
-                                <button onClick={() => setIsCollectionMode(!isCollectionMode)} className={`flex items-center px-4 py-2 rounded-md text-sm font-bold transition-colors shadow-sm ${isCollectionMode ? 'bg-red-600 text-white ring-2 ring-red-300' : 'bg-white text-slate-600 border border-slate-300 hover:bg-red-50 hover:text-red-600'}`}>
-                                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 me-2">
-                                        <path fillRule="evenodd" d="M1 4a1 1 0 011-1h16a1 1 0 011 1v8a1 1 0 01-1 1H2a1 1 0 01-1-1V4zm12 4a3 3 0 11-6 0 3 3 0 016 0zM4 9a1 1 0 100-2 1 1 0 000 2zm13-1a1 1 0 11-2 0 1 1 0 012 0zM1.75 14.5a.75.75 0 000 1.5c4.417 0 8.693.603 12.749 1.73 1.111.309 2.251-.512 2.251-1.696v-.784a.75.75 0 00-1.5 0v.784a2.718 2.718 0 01-.529.134c-4.303 1.256-8.99 1.582-13.676.832H1.75z" clipRule="evenodd" />
-                                    </svg>
-                                    {isCollectionMode ? 'יציאה ממצב גבייה' : 'מצב גבייה (חובות)'}
-                                </button>
+                                <div className="flex items-center gap-2">
+                                    <label className="text-xs font-bold text-slate-500 uppercase whitespace-nowrap">מיון לפי</label>
+                                    <select
+                                        value={sortBy}
+                                        onChange={e => setSortBy(e.target.value as 'date' | 'dueDate' | 'updatedAt')}
+                                        className={`text-sm font-medium px-3 py-2 rounded-md border focus:ring-2 focus:ring-primary/20 focus:outline-none transition-colors ${sortBy === 'dueDate' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-white border-slate-300 text-slate-700'}`}
+                                    >
+                                        <option value="date">תאריך (הזמנה/אישור)</option>
+                                        <option value="dueDate">מועד תשלום (חובות)</option>
+                                        <option value="updatedAt">עודכנו לאחרונה</option>
+                                    </select>
+                                </div>
                                 <button 
                                     onClick={() => setShowCompletedOrders(!showCompletedOrders)} 
                                     className={`flex items-center px-4 py-2 rounded-md text-sm font-medium transition-colors shadow-sm border ${showCompletedOrders ? 'bg-indigo-50 text-indigo-700 border-indigo-200' : 'bg-white text-slate-500 border-slate-300 hover:bg-slate-50'}`}

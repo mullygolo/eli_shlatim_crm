@@ -89,6 +89,9 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({
     const [customerDocs, setCustomerDocs] = useState<Array<{ id: string; type: number; number?: string; description?: string; amount?: number; date?: string }>>([]);
     const [loadingCustomerDocs, setLoadingCustomerDocs] = useState(false);
 
+    // מסמכים שאפשר לשייך — ללא מסמכים שכבר משויכים להזמנה (מונע כפילות)
+    const docsAvailableToLink = customerDocs.filter(d => !documents.some(doc => doc.id === d.id));
+
     // Fetch document details from API - stored IDs, OrderDocumentLinks, and search
     useEffect(() => {
         const fetchDocumentDetails = async () => {
@@ -421,19 +424,21 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({
                             <label className="block text-xs font-bold text-emerald-800 mb-1">בחר מסמך מרשימת הלקוח</label>
                             {loadingCustomerDocs ? (
                                 <div className="text-sm text-slate-500 py-2">טוען מסמכים...</div>
-                            ) : customerDocs.length > 0 ? (
+                            ) : docsAvailableToLink.length > 0 ? (
                                 <select
                                     value={linkDocId}
                                     onChange={e => setLinkDocId(e.target.value)}
                                     className="w-full text-sm border border-emerald-300 rounded px-2 py-1.5 bg-white"
                                 >
                                     <option value="">-- בחר מסמך --</option>
-                                    {customerDocs.map(d => (
+                                    {docsAvailableToLink.map(d => (
                                         <option key={d.id} value={d.id}>
                                             {docTypeLabel(Number(d.type))} #{d.number ?? d.id} — ₪{(d.amount ?? d.total ?? 0).toLocaleString()} — {(d.description || '').slice(0, 40)}
                                         </option>
                                     ))}
                                 </select>
+                            ) : customerDocs.length > 0 ? (
+                                <div className="text-xs text-amber-700">כל המסמכים כבר משויכים להזמנה</div>
                             ) : (
                                 <div className="text-xs text-slate-500">לא נמצאו מסמכים או שהלקוח לא משויך בחשבונית ירוקה</div>
                             )}
@@ -511,19 +516,21 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({
                             <label className="block text-xs font-bold text-emerald-800 mb-1">בחר מסמך מרשימת הלקוח</label>
                             {loadingCustomerDocs ? (
                                 <div className="text-sm text-slate-500 py-2">טוען מסמכים...</div>
-                            ) : customerDocs.length > 0 ? (
+                            ) : docsAvailableToLink.length > 0 ? (
                                 <select
                                     value={linkDocId}
                                     onChange={e => setLinkDocId(e.target.value)}
                                     className="w-full text-sm border border-emerald-300 rounded px-2 py-1.5 bg-white"
                                 >
                                     <option value="">-- בחר מסמך --</option>
-                                    {customerDocs.map(d => (
+                                    {docsAvailableToLink.map(d => (
                                         <option key={d.id} value={d.id}>
                                             {docTypeLabel(Number(d.type))} #{d.number ?? d.id} — ₪{(d.amount ?? d.total ?? 0).toLocaleString()} — {(d.description || '').slice(0, 40)}
                                         </option>
                                     ))}
                                 </select>
+                            ) : customerDocs.length > 0 ? (
+                                <div className="text-xs text-amber-700">כל המסמכים כבר משויכים להזמנה</div>
                             ) : (
                                 <div className="text-xs text-slate-500">לא נמצאו מסמכים או שהלקוח לא משויך בחשבונית ירוקה</div>
                             )}

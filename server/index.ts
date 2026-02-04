@@ -19,7 +19,7 @@ import priceListRouter from './routes/priceList.js';
 import greenInvoiceRouter from './routes/greenInvoice.js';
 import webhookCallsRouter from './routes/webhookCalls.js';
 import callLogsRouter from './routes/callLogs.js';
-import { initializeDefaultAdmin, autoCloseOldAttendanceRecords, initializeAttendanceIndexes, initializeCallLogsIndex, getDb } from './services/mongoService.js';
+import { initializeDefaultAdmin, autoCloseOldAttendanceRecords, initializeAttendanceIndexes, initializeCallLogsIndex, initializeStatusConfigs, getDb } from './services/mongoService.js';
 import { getDateStringIsrael } from './utils/timezone.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -131,6 +131,13 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
         console.log('✓ Default admin initialization completed');
     } catch (error) {
         console.error('✗ Failed to initialize default admin:', error);
+    }
+
+    try {
+        await initializeStatusConfigs();
+        console.log('✓ Status configs initialization completed');
+    } catch (error) {
+        console.error('✗ Failed to initialize status configs:', error);
     }
     
     // Initialize attendance indexes to prevent duplicates

@@ -77,12 +77,12 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     }, []);
 
     const logout = useCallback(async () => {
+        // Update UI immediately so user sees logged-out state
+        setUser(null);
         try {
             await authService.logout();
         } catch (error) {
             console.error('Logout error:', error);
-        } finally {
-            setUser(null);
         }
     }, []);
 

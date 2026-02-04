@@ -21,7 +21,7 @@ const EmployeeForm: React.FC<{
     const { user } = useAuth();
     const isAdminOrManager = user?.roleType === 'ADMIN' || user?.roleType === 'MANAGER';
     const [activeTab, setActiveTab] = useState<'PERSONAL' | 'JOB' | 'HISTORY'>('PERSONAL');
-    const [showPassword, setShowPassword] = useState(false);
+    const [showPassword, setShowPassword] = useState(true);
     const [showPasswordConfirm, setShowPasswordConfirm] = useState(false);
     const [passwordValue, setPasswordValue] = useState('');
     const [passwordConfirm, setPasswordConfirm] = useState('');
@@ -301,9 +301,7 @@ const EmployeeForm: React.FC<{
             delete finalData.passwordHash;
         }
         
-        // Reset password fields after save
-        setPasswordValue('');
-        setPasswordConfirm('');
+        // Keep password visible in field after save (do not clear)
         
         onSave(finalData);
     };

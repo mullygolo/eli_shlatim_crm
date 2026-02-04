@@ -75,6 +75,31 @@ export function getYesterdayStringIsrael(): string {
 }
 
 /**
+ * Get start and end of a single day in Israel timezone for MongoDB queries.
+ * dateStr must be YYYY-MM-DD. Returns Date objects for 00:00:00.000 and 23:59:59.999 that day in Israel.
+ * Uses Israel offset (+02:00 winter / +03:00 summer) so "מתחילת 2026" matches Dashboard "השנה".
+ */
+export function getDayRangeIsrael(dateStr: string): { start: Date; end: Date } {
+    const isoDateOnly = /^\d{4}-\d{2}-\d{2}$/;
+    if (!dateStr || !isoDateOnly.test(dateStr)) {
+        const now = new Date();
+        const today = getDateStringIsrael(now);
+        return getDayRangeIsrael(today);
+    }
+    // Israel: +02:00 winter, +03:00 summer; ISO parse respects offset
+    const start = new Date(dateStr + 'T00:00:00.000+02:00');
+    const end = new Date(dateStr + 'T23:59:59.999+02:00');
+    if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+        const [y, m, d] = dateStr.split('-').map(Number);
+        return {
+            start: new Date(y, m - 1, d, 0, 0, 0, 0),
+            end: new Date(y, m - 1, d, 23, 59, 59, 999)
+        };
+    }
+    return { start, end };
+}
+
+/**
  * Get start and end of a calendar month in Israel timezone for MongoDB queries.
  * Returns Date objects that represent 00:00:00.000 on the first day and 23:59:59.999 on the last day of the month in Israel.
  */

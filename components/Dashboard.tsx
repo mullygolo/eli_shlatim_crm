@@ -4,6 +4,7 @@ import DOMPurify from 'dompurify';
 import { Customer, Order, Activity, Employee, OrderStatusConfiguration, PaymentStatus, ManualEvent, PaymentMethod } from '../types';
 import { TaskIcon, SettingsIcon, MegaphoneIcon, TruckIcon, CashIcon, CalendarPlusIcon } from './icons'; 
 import { calculateOrderTotals, calculateDueDate } from '../utils/calculations';
+import { getDateStringIsrael } from '../utils/timezone';
 import Modal from './Modal'; 
 
 interface DashboardProps {
@@ -403,7 +404,6 @@ const StrongNumberCard: React.FC<{
     statusConfigs: OrderStatusConfiguration[];
     vatRate: number;
 }> = ({ orders, statusConfigs, vatRate }) => {
-    
     // Helper to calculate metrics for a filtered list of orders
     const calculateMetrics = (filteredOrders: Order[]): FinancialMetric => {
         const result = filteredOrders.reduce((acc, order) => {
@@ -427,26 +427,54 @@ const StrongNumberCard: React.FC<{
 
     const stats = useMemo(() => {
         const now = new Date();
-        const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        const todayStr = getDateStringIsrael(now);
+        const monthStr = todayStr.slice(0, 7);
+        const yearStr = todayStr.slice(0, 4);
         const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-        const startOfYear = new Date(now.getFullYear(), 0, 1);
         const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
 
-        // Filter active deals (Approved transactions)
+        // Active deals for collection/leads/quotes/lost (all isActiveDeal)
         const activeDeals = orders.filter(order => {
              const config = statusConfigs.find(c => c.label === order.orderStatus);
-             return config ? config.isActiveDeal : false;
+             return config ? config.isActiveDeal === true : false;
         });
 
-        // Helper to check date (uses dealStartDate if available, otherwise createdAt/date)
-        const checkDate = (order: Order, startDate: Date) => {
-            const dateToCheck = order.dealStartDate ? new Date(order.dealStartDate) : new Date(order.date);
-            return dateToCheck.getTime() >= startDate.getTime();
-        };
+        // Strong numbers: כל עסקאות מאושרות (isActiveDeal) – כולל שהסתיימו בהצלחה. חישוב לפי תאריך אישור העסקה (dealStartDate)
+        let activeDealsForStrongNumbers = orders.filter(order => {
+            const config = statusConfigs.find(c => c.label === order.orderStatus);
+            return config ? config.isActiveDeal === true : false;
+        });
 
-        const dailyDeals = activeDeals.filter(o => checkDate(o, startOfDay));
-        const monthlyDeals = activeDeals.filter(o => checkDate(o, startOfMonth));
-        const yearlyDeals = activeDeals.filter(o => checkDate(o, startOfYear));
+        // דדופליקציה לפי מספר הזמנה (כמו בשרת כש-dateFilterType=DEAL_DATE): שומרים רשומה אחת לכל מספר – לפי התאריך המאוחר ביותר בתאריך אישור העסקה
+        const dateKeyForDedup = (o: Order) => o.dealStartDate || o.date;
+        const seenByOrderNumber = new Map<string, Order>();
+        for (const order of activeDealsForStrongNumbers) {
+            const raw = (order.orderNumber != null && order.orderNumber !== '') ? String(order.orderNumber).trim() : '';
+            const key = raw !== '' ? raw.toUpperCase() : (order.id || '');
+            if (!key) continue;
+            const existing = seenByOrderNumber.get(key);
+            if (!existing) {
+                seenByOrderNumber.set(key, order);
+            } else {
+                const dNew = dateKeyForDedup(order) ? new Date(dateKeyForDedup(order) as string | Date).getTime() : 0;
+                const dOld = dateKeyForDedup(existing) ? new Date(dateKeyForDedup(existing) as string | Date).getTime() : 0;
+                if (dNew >= dOld) seenByOrderNumber.set(key, order);
+            }
+        }
+        activeDealsForStrongNumbers = Array.from(seenByOrderNumber.values());
+
+        // תאריך לחישוב = תאריך אישור העסקה (dealStartDate), או תאריך הזמנה אם אין – לצורכי דוחות והכנסות
+        const orderDateStr = (o: Order) => getDateStringIsrael(o.dealStartDate || o.date);
+
+        // רווח יומי = עסקאות מאושרות שאושרו היום (לפי תאריך אישור העסקה)
+        const dailyDeals = activeDealsForStrongNumbers.filter(o => orderDateStr(o) === todayStr);
+        // רווח חודשי = עסקאות מאושרות שאושרו בחודש הנוכחי (לפי תאריך אישור העסקה)
+        const monthlyDeals = activeDealsForStrongNumbers.filter(o => orderDateStr(o).slice(0, 7) === monthStr);
+        // רווח שנתי = עסקאות מאושרות שאושרו השנה, מתחילת ינואר עד היום (לפי תאריך אישור העסקה)
+        const yearlyDeals = activeDealsForStrongNumbers.filter(o => {
+            const d = orderDateStr(o);
+            return d.slice(0, 4) === yearStr && d <= todayStr;
+        });
 
         // Use the isLead flag configuration to count new leads
         const leadStatuses = new Set(statusConfigs.filter(c => c.isLead).map(c => c.label));
@@ -771,20 +799,33 @@ const Dashboard: React.FC<DashboardProps> = ({
         setIsGoalModalOpen(false);
     };
 
-    // Calculate current monthly revenue for the Goal Widget
+    // יעד הכנסות חודשי: כמו המספרים החזקים – עסקאות מאושרות אחרי דדופליקציה לפי מספר הזמנה, לפי תאריך אישור (dealStartDate) בחודש הנוכחי
     const currentMonthlyRevenue = useMemo(() => {
          const now = new Date();
-         const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-         return orders.reduce((sum, order) => {
-             const dateToCheck = order.dealStartDate ? new Date(order.dealStartDate) : new Date(order.date);
-             if (dateToCheck >= startOfMonth) {
-                 const config = statusConfigs.find(c => c.label === order.orderStatus);
-                 if (config && config.isActiveDeal) {
-                     return sum + calculateOrderTotals(order).totalAmount;
-                 }
+         const monthStr = getDateStringIsrael(now).slice(0, 7);
+         const activeDeals = orders.filter(order => {
+             const config = statusConfigs.find(c => c.label === order.orderStatus);
+             return config ? config.isActiveDeal === true : false;
+         });
+         const dateKeyForDedup = (o: Order) => o.dealStartDate || o.date;
+         const seenByOrderNumber = new Map<string, Order>();
+         for (const order of activeDeals) {
+             const raw = (order.orderNumber != null && order.orderNumber !== '') ? String(order.orderNumber).trim() : '';
+             const key = raw !== '' ? raw.toUpperCase() : (order.id || '');
+             if (!key) continue;
+             const existing = seenByOrderNumber.get(key);
+             if (!existing) {
+                 seenByOrderNumber.set(key, order);
+             } else {
+                 const dNew = dateKeyForDedup(order) ? new Date(dateKeyForDedup(order) as string | Date).getTime() : 0;
+                 const dOld = dateKeyForDedup(existing) ? new Date(dateKeyForDedup(existing) as string | Date).getTime() : 0;
+                 if (dNew >= dOld) seenByOrderNumber.set(key, order);
              }
-             return sum;
-         }, 0);
+         }
+         const deduped = Array.from(seenByOrderNumber.values());
+         const orderDateStr = (o: Order) => getDateStringIsrael(o.dealStartDate || o.date);
+         const monthlyDeals = deduped.filter(o => orderDateStr(o).slice(0, 7) === monthStr);
+         return monthlyDeals.reduce((sum, order) => sum + calculateOrderTotals(order).totalAmount, 0);
     }, [orders, statusConfigs]);
 
     return (

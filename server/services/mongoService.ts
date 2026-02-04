@@ -9,7 +9,7 @@ import {
     OrderDocumentLink
 } from '../types.js';
 import { hashPassword } from '../utils/password.js';
-import { getTodayRangeIsrael, getDateStringIsrael, getMonthRangeIsrael } from '../utils/timezone.js';
+import { getTodayRangeIsrael, getDateStringIsrael, getMonthRangeIsrael, getDayRangeIsrael } from '../utils/timezone.js';
 import { calculateOrderTotals, calculateDueDate } from '../utils/calculations.js';
 
 // MongoDB Connection Configuration
@@ -535,29 +535,31 @@ export async function getOrdersPaginated(filters: any, page: number = 1, limit: 
         const startDateStr = rawStart && isoDateOnly.test(rawStart) ? rawStart : '';
         const endDateStr = rawEnd && isoDateOnly.test(rawEnd) ? rawEnd : '';
         if (startDateStr || endDateStr) {
-            const gteStr = startDateStr ? startDateStr + 'T00:00:00.000Z' : '';
-            const lteStr = endDateStr ? endDateStr + 'T23:59:59.999Z' : '';
-            const gteValid = !!gteStr;
-            const lteValid = !!lteStr;
-            if (gteValid || lteValid) {
-                query[dateField] = {};
-                if (gteValid) query[dateField].$gte = gteStr;
-                if (lteValid) query[dateField].$lte = lteStr;
+            // Use Israel timezone for day boundaries; store query as ISO strings so MongoDB matches orders whose date/dealStartDate is stored as string (serializeDates on save)
+            if (startDateStr) {
+                const { start } = getDayRangeIsrael(startDateStr);
+                query[dateField] = query[dateField] || {};
+                query[dateField].$gte = start.toISOString();
+            }
+            if (endDateStr) {
+                const { end } = getDayRangeIsrael(endDateStr);
+                query[dateField] = query[dateField] || {};
+                query[dateField].$lte = end.toISOString();
             }
         } else if (filters.monthFilter && filters.monthFilter !== 'all') {
-            // Month/Year filter (Israel timezone so stored dates match)
+            // Month/Year filter (Israel timezone); use ISO strings so MongoDB matches orders whose date is stored as string (serializeDates)
             const month = parseInt(filters.monthFilter, 10);
             const year = filters.yearFilter && filters.yearFilter !== 'all' ? parseInt(filters.yearFilter, 10) : new Date().getFullYear();
             if (!isNaN(month) && month >= 1 && month <= 12 && !isNaN(year)) {
                 const { start: startDate, end: endDate } = getMonthRangeIsrael(year, month);
-                query[dateField] = { $gte: startDate, $lte: endDate };
+                query[dateField] = { $gte: startDate.toISOString(), $lte: endDate.toISOString() };
             }
         } else if (filters.yearFilter && filters.yearFilter !== 'all') {
-            // Year filter only
+            // Year filter only; use ISO strings to match string-stored dates
             const year = parseInt(filters.yearFilter);
             const startDate = new Date(year, 0, 1);
             const endDate = new Date(year, 11, 31, 23, 59, 59, 999);
-            query[dateField] = { $gte: startDate, $lte: endDate };
+            query[dateField] = { $gte: startDate.toISOString(), $lte: endDate.toISOString() };
         }
         
         // Search term (orderNumber, description, customer name, parent order)
@@ -591,7 +593,7 @@ export async function getOrdersPaginated(filters: any, page: number = 1, limit: 
         // Fetch all orders matching the query (for filtering and summary calculation)
         let allMatchingDocs = await collection.find(query).toArray();
         let allMatchingOrders = allMatchingDocs.map(deserializeDates) as Order[];
-        
+
         // Apply post-query filters that require statusConfigs or other complex logic
         // Collection center view: show all unpaid for customer; collection mode (e.g. Reports): only active deals
         if (isCollectionMode && !isCollectionCenterView) {
@@ -608,13 +610,14 @@ export async function getOrdersPaginated(filters: any, page: number = 1, limit: 
         }
         
         // Hide completed-by-status orders only when not in collection center (there we show all unpaid for customer)
+        const beforeShowCompleted = allMatchingOrders.length;
         if (!filters.showCompletedOrders && !isCollectionMode && !isCollectionCenterView) {
             allMatchingOrders = allMatchingOrders.filter(order => {
                 const config = statusConfigs.find(c => c.label === order.orderStatus);
                 return !config?.isCompleted;
             });
         }
-        
+
         // Filter by parent order search term (if applicable)
         if (filters.searchTerm && filters.searchTerm.trim()) {
             const lowercasedTerm = filters.searchTerm.toLowerCase();
@@ -704,7 +707,6 @@ export async function getOrdersPaginated(filters: any, page: number = 1, limit: 
         const totalCount = allMatchingOrders.length;
         const skip = (page - 1) * limit;
         const paginatedOrders = allMatchingOrders.slice(skip, skip + limit);
-        
         return {
             orders: paginatedOrders,
             totalCount,
@@ -797,7 +799,8 @@ export async function getPayableItems(
             return statusConfig ? statusConfig.isActiveDeal : true;
         });
         
-        const items: PayableItem[] = [];
+        // Build items with merge of duplicate logical lines (same order + description + cost + supplier)
+        const mergeKeyToItem = new Map<string, PayableItem>();
         
         activeOrders.forEach(order => {
             const currentOrderVat = order.vatRate ?? vatRate;
@@ -878,32 +881,51 @@ export async function getPayableItems(
                     status = 'שולם חלקית';
                 }
                 
-                items.push({
-                    uniqueId: `${order.id}_${type}_${index}`,
-                    supplierId: supplierId || 'unassigned',
-                    supplierName: supplier ? supplier.name : '⚠️ פריטים ללא ספק משויך',
-                    orderId: order.id,
-                    orderNumber: order.orderNumber,
-                    orderDescription: order.description,
-                    itemDescription: costItem.description,
-                    cost: totalItemCost, // Net
-                    costGross: costGross, // Gross
-                    paidAmount,
-                    remainingAmount: Math.max(0, remainingAmount),
-                    orderDate: ensureDate(order.date),
-                    dueDate,
-                    isCustomDueDate: !!costItem.customDueDate,
-                    status,
-                    timeStatus,
-                    payments,
-                    itemType: type,
-                    itemIndex: index,
-                });
+                const effSupplierId = supplierId || 'unassigned';
+                // Normalize so "same amount" and "same text" match: round cost to 2 decimals, collapse spaces in description
+                const costGrossNorm = (Math.round(costGross * 100) / 100).toFixed(2);
+                const descNorm = (costItem.description || '').trim().replace(/\s+/g, ' ');
+                const mergeKey = `${order.id}_${type}_${descNorm}_${costGrossNorm}_${effSupplierId}`;
+                const existing = mergeKeyToItem.get(mergeKey);
+                
+                if (existing) {
+                    existing.cost += totalItemCost;
+                    existing.costGross += costGross;
+                    existing.paidAmount += paidAmount;
+                    existing.remainingAmount = Math.max(0, existing.costGross - existing.paidAmount);
+                    existing.payments = [...existing.payments, ...payments];
+                    if (existing.remainingAmount <= 0.1) existing.status = 'שולם';
+                    else if (existing.paidAmount > 0) existing.status = 'שולם חלקית';
+                } else {
+                    mergeKeyToItem.set(mergeKey, {
+                        uniqueId: `${order.id}_${type}_${index}`,
+                        supplierId: effSupplierId,
+                        supplierName: supplier ? supplier.name : '⚠️ פריטים ללא ספק משויך',
+                        orderId: order.id,
+                        orderNumber: order.orderNumber,
+                        orderDescription: order.description,
+                        itemDescription: costItem.description,
+                        cost: totalItemCost,
+                        costGross: costGross,
+                        paidAmount,
+                        remainingAmount: Math.max(0, remainingAmount),
+                        orderDate: ensureDate(order.date),
+                        dueDate,
+                        isCustomDueDate: !!costItem.customDueDate,
+                        status,
+                        timeStatus,
+                        payments,
+                        itemType: type,
+                        itemIndex: index,
+                    });
+                }
             };
             
             order.lineItems.forEach((li, idx) => process(li, 'lineItem', idx));
             order.additionalServices.forEach((as, idx) => process(as, 'additionalService', idx));
         });
+        
+        const items = Array.from(mergeKeyToItem.values());
         
         // Apply filters
         let filteredItems = items;

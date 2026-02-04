@@ -68,7 +68,7 @@ const MultiSelectFilter: React.FC<MultiSelectFilterProps> = ({ label, options, s
                 </svg>
             </button>
             {isOpen && (
-                <div className="absolute z-10 mt-1 w-full bg-white shadow-lg border rounded-md max-h-60 overflow-y-auto">
+                <div className="absolute z-50 mt-1 w-full bg-white shadow-lg border rounded-md max-h-60 overflow-y-auto">
                     <div className="p-2 border-b">
                         <label className="flex items-center space-x-2 space-x-reverse px-2 cursor-pointer">
                             <input

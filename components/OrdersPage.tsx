@@ -3817,6 +3817,9 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                 <table className="min-w-full divide-y divide-slate-200 text-start">
                     <thead className="bg-slate-50 sticky top-0 z-10 shadow-sm">
                         <tr>
+                            <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">
+                                {dateFilterType === 'ORDER_DATE' ? 'תאריך הזמנה' : 'תאריך אישור'}
+                            </th>
                             <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">סטטוס</th>
                             <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">הזמנה</th>
                             <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">תיאור</th>
@@ -3825,9 +3828,6 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                             <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">מחיר הזמנה</th>
                             <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">עלות הזמנה</th>
                             <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">רווח</th>
-                            <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">
-                                {dateFilterType === 'ORDER_DATE' ? 'תאריך הזמנה' : 'תאריך אישור'}
-                            </th>
                             <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider bg-yellow-50/50">מועד תשלום</th>
                             <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">יתרה לתשלום</th>
                         </tr>
@@ -3891,6 +3891,9 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
 
                             return (
                                 <tr key={order.id} className={`hover:bg-slate-50 ${order.type === OrderType.SERVICE_CALL ? 'bg-red-50/50' : ''}`}>
+                                    <td className={`px-4 py-4 whitespace-nowrap text-sm ${dateFilterType === 'DEAL_DATE' ? 'font-bold text-indigo-700 bg-indigo-50/20' : 'text-slate-500'}`}>
+                                        {displayDate ? new Date(displayDate).toLocaleDateString('he-IL') : '—'}
+                                    </td>
                                     <td className="px-4 py-4 whitespace-nowrap text-sm">
                                         <div className="relative">
                                             <select value={order.orderStatus} onChange={(e) => handleStatusChange(order.id, e.target.value)} className={`appearance-none w-full cursor-pointer px-2 py-1 text-xs leading-5 font-semibold rounded-full focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary text-center ${getStatusBadge(order.orderStatus)}`} aria-label={`שנה סטטוס עבור הזמנה ${order.orderNumber}`}>
@@ -3956,9 +3959,6 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                                         <div>{profit.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
                                         <div className="text-xs font-normal opacity-80">({itemMarkup.toFixed(1)}%)</div>
                                     </td>
-                                    <td className={`px-4 py-4 whitespace-nowrap text-sm ${dateFilterType === 'DEAL_DATE' ? 'font-bold text-indigo-700 bg-indigo-50/20' : 'text-slate-500'}`}>
-                                        {displayDate ? new Date(displayDate).toLocaleDateString('he-IL') : '—'}
-                                    </td>
                                     <td className="px-4 py-4 whitespace-nowrap text-sm bg-yellow-50/30">
                                         <div className="flex flex-col">
                                             {isCompletionBased && !isFinished ? (
@@ -3990,7 +3990,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                     </tbody>
                     <tfoot className="bg-slate-100 font-semibold border-t-2 border-slate-300 sticky bottom-0 z-10">
                         <tr>
-                            <td className="px-4 py-3 text-end align-top" colSpan={5}>סה"כ</td>
+                            <td className="px-4 py-3 text-end align-top" colSpan={6}>סה"כ</td>
                             <td className="px-4 py-3 text-start text-green-700 align-top">
                                 <div>{summaryTotals.totalAmount.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
                                 <div className="text-[10px] text-slate-500 font-normal">
@@ -4015,7 +4015,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                                     ({summaryTotals.totalCost > 0 ? ((summaryTotals.totalProfit / summaryTotals.totalCost) * 100).toFixed(1) : (summaryTotals.totalAmount > 0 ? '100' : '0')}% רווח מהעלות)
                                 </div>
                             </td>
-                            <td colSpan={2}></td>
+                            <td colSpan={1}></td>
                             <td className="px-4 py-3 text-start text-red-700 font-bold align-top">
                                 <div>{summaryTotals.totalBalance.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
                                 <div className="text-[10px] text-red-500 font-normal">

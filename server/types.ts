@@ -192,7 +192,7 @@ export type ActivityEntityType =
 
 export type ActivityAction =
     | 'create' | 'update' | 'delete' | 'status_change' | 'payment' | 'merge'
-    | 'sync' | 'login' | 'login_failed' | 'logout' | 'other';
+    | 'sync' | 'login' | 'logout' | 'other';
 
 export interface Activity {
     id: string;

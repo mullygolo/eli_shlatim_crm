@@ -36,27 +36,6 @@ function sanitizeEmployee(employee: Employee): Omit<Employee, 'passwordHash'> {
     return sanitized;
 }
 
-// Audit: log failed login (fire-and-forget, does not block response)
-function logFailedLogin(
-    req: Request,
-    attemptedUsername: string,
-    reason: 'user_not_found' | 'wrong_password' | 'no_password' | 'account_inactive',
-    employee?: Employee
-): void {
-    const metadata: Record<string, unknown> = { reason, username: attemptedUsername };
-    if (req.ip) metadata.ip = req.ip;
-    createActivity({
-        id: `act_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
-        description: 'ניסיון התחברות כושל',
-        timestamp: new Date(),
-        userId: employee?.id,
-        username: attemptedUsername,
-        action: 'login_failed',
-        entityType: 'system',
-        metadata,
-    }).catch((err) => console.error('Audit log login_failed failed:', err));
-}
-
 // POST /api/auth/login
 router.post('/login', async (req: Request, res: Response) => {
     try {
@@ -68,23 +47,19 @@ router.post('/login', async (req: Request, res: Response) => {
 
         const employee = await getEmployeeByUsername(username);
         if (!employee) {
-            logFailedLogin(req, username, 'user_not_found');
             return res.status(401).json({ error: 'שם משתמש או סיסמה שגויים' });
         }
 
         if (!employee.passwordHash) {
-            logFailedLogin(req, username, 'no_password', employee);
             return res.status(401).json({ error: 'סיסמה לא הוגדרה עבור משתמש זה' });
         }
 
         if (employee.status === 'INACTIVE') {
-            logFailedLogin(req, username, 'account_inactive', employee);
             return res.status(403).json({ error: 'חשבון זה מושבת' });
         }
 
         const isValidPassword = await verifyPassword(password, employee.passwordHash);
         if (!isValidPassword) {
-            logFailedLogin(req, username, 'wrong_password', employee);
             return res.status(401).json({ error: 'שם משתמש או סיסמה שגויים' });
         }
 

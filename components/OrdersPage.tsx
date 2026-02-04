@@ -788,7 +788,7 @@ const OrderForm: React.FC<{
             const docLogEvent: TimelineEvent = {
                 id: `log_doc_${Date.now()}`,
                 timestamp: new Date(),
-                user: user?.name ?? 'מערכת',
+                user: employees.find(emp => emp.id === order.employeeId)?.name || 'מערכת',
                 type: 'LOG',
                 content: `נוצר מסמך ${docLabel} בחשבונית ירוקה`
             };
@@ -849,7 +849,7 @@ const OrderForm: React.FC<{
             const draftLogEvent: TimelineEvent = {
                 id: `log_draft_${Date.now()}`,
                 timestamp: new Date(),
-                user: user?.name ?? 'מערכת',
+                user: employees.find(emp => emp.id === order.employeeId)?.name || 'מערכת',
                 type: 'LOG',
                 content: `נוצרה טיוטת מסמך ${draftDocLabel} בחשבונית ירוקה`
             };
@@ -1247,6 +1247,7 @@ const OrderForm: React.FC<{
         if (!paymentIdToDelete) return;
         
         const targetPayment = formData.payments.find(p => p.id === paymentIdToDelete);
+        const user = employees.find(emp => emp.id === formData.employeeId)?.name || 'מערכת';
         const payDateStr = targetPayment?.date ? new Date(targetPayment.date).toLocaleDateString('he-IL') : '';
         const parts = [`תשלום הוסר: ₪${targetPayment?.amount.toLocaleString()} (${targetPayment?.method})`, payDateStr];
         if (targetPayment?.reference) parts.push(`אסמכתא: ${targetPayment.reference}`);
@@ -1259,7 +1260,7 @@ const OrderForm: React.FC<{
             timeline: [{
                 id: `log_pay_del_${Date.now()}`,
                 timestamp: new Date(),
-                user: user?.name ?? 'מערכת',
+                user,
                 type: 'LOG',
                 content
             }, ...prev.timeline]
@@ -1539,7 +1540,7 @@ const OrderForm: React.FC<{
 
     const handleAddTimelineEvent = () => {
         if (!newTimelineEntry.content.trim()) return;
-        const currentUser = user?.name ?? 'מערכת';
+        const currentUser = employees.find(emp => emp.id === formData.employeeId)?.name || 'מערכת';
         const targetAssigneeId = newTimelineEntry.assigneeId || formData.employeeId;
 
         const newEvent: TimelineEvent = {
@@ -1570,7 +1571,7 @@ const OrderForm: React.FC<{
     };
 
     const handleToggleTaskComplete = (eventId: string, currentStatus: boolean) => {
-        const currentUser = user?.name ?? 'מערכת';
+        const currentUser = employees.find(emp => emp.id === formData.employeeId)?.name || 'מערכת';
         let taskContent = '';
 
         const updatedTimeline = formData.timeline.map(event => {
@@ -1988,7 +1989,7 @@ const OrderForm: React.FC<{
              }
         }
 
-        const loggedInUserName = user?.name ?? 'מערכת';
+        const user = employees.find(emp => emp.id === formData.employeeId)?.name || 'מערכת';
         
         let finalDealStartDate = formData.dealStartDate;
         if (dealStartDateString) {
@@ -2017,7 +2018,7 @@ const OrderForm: React.FC<{
                 id: `log_${Date.now()}`,
                 timestamp: new Date(),
                 content: 'הזמנה נוצרה',
-                user: loggedInUserName,
+                user,
                 type: 'LOG'
             });
             updatedFormData.statusHistory = [{ status: updatedFormData.orderStatus, startDate: new Date() }];
@@ -2029,7 +2030,7 @@ const OrderForm: React.FC<{
                      id: `log_audit_${Date.now()}`,
                      timestamp: new Date(),
                      content: 'עדכון פרטי הזמנה',
-                     user: loggedInUserName,
+                     user,
                      type: 'LOG',
                      changes: diff
                  });
@@ -3037,7 +3038,7 @@ const OrderForm: React.FC<{
                                 const linkLogEvent: TimelineEvent = {
                                     id: `log_link_${Date.now()}`,
                                     timestamp: new Date(),
-                                    user: user?.name ?? 'מערכת',
+                                    user: employees.find(emp => emp.id === order.employeeId)?.name || 'מערכת',
                                     type: 'LOG',
                                     content: `שויך מסמך חשבונית ירוקה להזמנה (${paymentsAdded} תשלומים)`
                                 };
@@ -3377,7 +3378,6 @@ const OrderForm: React.FC<{
 };
 
 const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLocal, customers, setCustomers, suppliers, setSuppliers, employees, addActivity, initialOpenOrderId, onOrderOpened, openNewOrderRequest, onClearedOpenNewOrderRequest, statusConfigs, getNextOrderNumber, vatRate }) => {
-    const { user: authUser } = useAuth();
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [isImportModalOpen, setIsImportModalOpen] = useState(false);
     const [editingOrder, setEditingOrder] = useState<Order | null>(null);
@@ -3458,6 +3458,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
         const originalOrder = paginatedOrders.find(o => o.id === orderId) || orders.find(o => o.id === orderId);
         if (!originalOrder || originalOrder.orderStatus === newStatus) return;
         
+        const user = employees.find(emp => emp.id === originalOrder.employeeId)?.name || 'מערכת';
         const config = statusConfigs.find(c => c.label === newStatus);
         const isNowActiveDeal = config ? config.isActiveDeal : false;
         let newDealStartDate = originalOrder.dealStartDate;
@@ -3468,7 +3469,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
             id: `log_${Date.now()}`,
             timestamp: new Date(),
             content: `שינוי סטטוס`,
-            user: authUser?.name ?? 'מערכת',
+            user: user,
             type: 'LOG',
             changes: [
                 { field: 'orderStatus', label: 'סטטוס', oldValue: originalOrder.orderStatus, newValue: newStatus, action: 'UPDATED' }
@@ -3885,7 +3886,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                             <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">סטטוס</th>
                             <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">הזמנה</th>
                             <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">תיאור</th>
-                            <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider min-w-[180px]">לקוח</th>
+                            <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">לקוח</th>
                             <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">ספקים</th>
                             <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">מחיר הזמנה</th>
                             <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">עלות הזמנה</th>
@@ -3977,23 +3978,13 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                                         <div className="line-clamp-2 break-words">{order.description}</div>
                                         {order.parentOrderId && <div className="text-xs text-slate-400">מקושר להזמנת אב</div>}
                                     </td>
-                                    <td className="px-4 py-4 text-sm text-slate-500 min-w-[180px] max-w-[260px] align-top relative group">
+                                    <td className="px-4 py-4 text-sm text-slate-500 max-w-[140px]" title={getCustomerName(order.customerId)}>
                                         <div className="flex items-center gap-2 min-w-0">
-                                            <span className="line-clamp-2 break-words flex-1 min-w-0 font-medium text-slate-700">{getCustomerName(order.customerId)}</span>
-                                            {whatsappUrl && <a href={whatsappUrl} target="crm_whatsapp" title={`שלח וואטסאפ ל-${primaryContact?.phone}`} className="text-green-500 hover:text-green-700 flex-shrink-0"><WhatsAppIcon className="h-5 w-5"/></a>}
-                                            {gmailUrl && <a href={gmailUrl} target="crm_email" title={`שלח אימייל ל-${primaryContact?.email}`} className="text-slate-500 hover:text-primary flex-shrink-0"><EmailIcon className="h-5 w-5"/></a>}
-                                            {telUrl && <a href={telUrl} title={`התקשר ל-${primaryContact?.phone}`} className="text-slate-500 hover:text-primary flex-shrink-0"><PhoneIcon className="h-5 w-5"/></a>}
+                                            <span className="truncate">{getCustomerName(order.customerId)}</span>
+                                            {whatsappUrl && <a href={whatsappUrl} target="crm_whatsapp" title={`שלח וואטסאפ ל-${primaryContact?.phone}`} className="text-green-500 hover:text-green-700"><WhatsAppIcon className="h-5 w-5"/></a>}
+                                            {gmailUrl && <a href={gmailUrl} target="crm_email" title={`שלח אימייל ל-${primaryContact?.email}`} className="text-slate-500 hover:text-primary"><EmailIcon className="h-5 w-5"/></a>}
+                                            {telUrl && <a href={telUrl} title={`התקשר ל-${primaryContact?.phone}`} className="text-slate-500 hover:text-primary"><PhoneIcon className="h-5 w-5"/></a>}
                                         </div>
-                                        {customer && (
-                                            <div className="absolute bottom-full start-0 mb-1 z-50 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-opacity duration-150 pointer-events-none">
-                                                <div className="bg-slate-800 text-white text-xs rounded-lg shadow-xl px-3 py-2.5 max-w-[280px] border border-slate-600">
-                                                    <div className="font-bold text-white mb-1.5">{customer.name}</div>
-                                                    {primaryContact?.phone && <div className="text-slate-200">טלפון: {primaryContact.phone}</div>}
-                                                    {primaryContact?.email && <div className="text-slate-200 mt-0.5">אימייל: {primaryContact.email}</div>}
-                                                    {!primaryContact?.phone && !primaryContact?.email && <div className="text-slate-400 text-[11px]">אין פרטי קשר</div>}
-                                                </div>
-                                            </div>
-                                        )}
                                     </td>
                                     <td className="px-4 py-4 text-sm text-slate-500">
                                         <div className="flex flex-col gap-1">

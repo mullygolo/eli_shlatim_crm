@@ -16,6 +16,7 @@ import { getProducts } from '../services/priceListService';
 import { addSalesHistoryEntry, createAdHocProduct, sendQuoteRequests } from '../services/priceListService';
 import { calculateProductPrice } from '../utils/priceCalculations';
 import { useAsyncAction } from '../hooks/useAsyncAction';
+import { useAuth } from '../contexts/AuthContext';
 
 interface OrdersPageProps {
     orders: Order[];
@@ -640,6 +641,8 @@ const OrderForm: React.FC<{
     });
 
     const isEditMode = !!order;
+    const { user } = useAuth();
+    const isAdmin = user?.roleType === 'ADMIN';
 
     const [formData, setFormData] = useState<Omit<Order, 'id' | 'orderNumber'>>(
         order 
@@ -682,6 +685,14 @@ const OrderForm: React.FC<{
              return '';
          }
      });
+    const [createdAtString, setCreatedAtString] = useState(() => {
+        try {
+            const d = formData.createdAt ? new Date(formData.createdAt) : (formData.date ? new Date(formData.date) : new Date());
+            return d && !isNaN(d.getTime()) ? d.toISOString().split('T')[0] : new Date().toISOString().split('T')[0];
+        } catch (e) {
+            return new Date().toISOString().split('T')[0];
+        }
+    });
 
     const [isNewSupplierModalOpen, setIsNewSupplierModalOpen] = useState(false);
     const [newServiceSupplierFor, setNewServiceSupplierFor] = useState<number | null>(null);
@@ -982,10 +993,13 @@ const OrderForm: React.FC<{
                 setDateString(new Date(order.date).toISOString().split('T')[0]);
                 const dsd = order.dealStartDate ? new Date(order.dealStartDate) : null;
                 setDealStartDateString(dsd && !isNaN(dsd.getTime()) ? dsd.toISOString().split('T')[0] : '');
+                const created = order.createdAt ? new Date(order.createdAt) : (order.date ? new Date(order.date) : new Date());
+                setCreatedAtString(created && !isNaN(created.getTime()) ? created.toISOString().split('T')[0] : new Date().toISOString().split('T')[0]);
             } catch (e) {
                 console.error("Error parsing order dates", e);
                 setDateString(new Date().toISOString().split('T')[0]);
                 setDealStartDateString('');
+                setCreatedAtString(new Date().toISOString().split('T')[0]);
             }
             setCustomerMode('EXISTING');
             setShowNewCustomerForm(false);
@@ -1222,6 +1236,10 @@ const OrderForm: React.FC<{
         }
         if (name === 'dealStartDate') {
              setDealStartDateString(value);
+        }
+        if (name === 'createdAt') {
+            setCreatedAtString(value);
+            setFormData(prev => ({ ...prev, createdAt: value ? new Date(value) : undefined }));
         }
     };
 
@@ -1687,6 +1705,13 @@ const OrderForm: React.FC<{
                 changes.push({ field: 'dealStartDate', label: 'תאריך אישור עסקה', oldValue: oldVal, newValue: newVal, action: 'UPDATED' });
             }
         }
+        const oldCreated = oldOrder.createdAt ? new Date(oldOrder.createdAt).getTime() : (oldOrder.date ? new Date(oldOrder.date).getTime() : 0);
+        const newCreated = newOrder.createdAt ? new Date(newOrder.createdAt).getTime() : (newOrder.date ? new Date(newOrder.date).getTime() : 0);
+        if (oldCreated !== newCreated) {
+            const oldVal = oldOrder.createdAt ? new Date(oldOrder.createdAt).toLocaleDateString('he-IL') : (oldOrder.date ? new Date(oldOrder.date).toLocaleDateString('he-IL') : 'לא הוגדר');
+            const newVal = newOrder.createdAt ? new Date(newOrder.createdAt).toLocaleDateString('he-IL') : (newOrder.date ? new Date(newOrder.date).toLocaleDateString('he-IL') : 'לא הוגדר');
+            changes.push({ field: 'createdAt', label: 'תאריך יצירה', oldValue: oldVal, newValue: newVal, action: 'UPDATED' });
+        }
 
         // GreenInvoice document links (show "שויך" / "לא שויך" only, not document IDs)
         const gi = (v: string | undefined) => (v && v.trim() ? 'שויך' : 'לא שויך');
@@ -2018,11 +2043,13 @@ const OrderForm: React.FC<{
              }
         }
         
+        const finalCreatedAt = (isAdmin && createdAtString) ? new Date(createdAtString) : (formData.createdAt ?? new Date());
         const finalOrder = {
             ...updatedFormData,
             id: order?.id || `ord_${Date.now()}`,
             orderNumber: order?.orderNumber || getNextOrderNumber(), 
             date: new Date(dateString),
+            createdAt: finalCreatedAt,
             dealStartDate: updatedFormData.dealStartDate, 
             timeline: finalTimeline,
         };
@@ -2158,9 +2185,19 @@ const OrderForm: React.FC<{
         if (!setHeaderContent) return;
         setHeaderContent(
             <div className="flex items-center gap-3 px-3 py-1.5 rounded-lg bg-slate-50 border border-slate-100 text-xs text-slate-600">
-                <span className="flex items-center gap-1.5" title="נוצר בתאריך">
+                <span className="flex items-center gap-1.5" title="תאריך יצירה">
                     <span className="text-slate-400 font-medium">נוצר:</span>
-                    <span className="font-mono font-semibold text-slate-700">{createdDateDisplay}</span>
+                    {isAdmin ? (
+                        <input
+                            type="date"
+                            name="createdAt"
+                            value={createdAtString}
+                            onChange={handleMasterChange}
+                            className="w-[6.5rem] py-1 px-1.5 rounded border border-slate-200 text-slate-700 text-xs font-medium bg-white cursor-pointer"
+                        />
+                    ) : (
+                        <span className="font-mono font-semibold text-slate-700">{createdDateDisplay}</span>
+                    )}
                 </span>
                 <span className="w-px h-4 bg-slate-200 flex-shrink-0" aria-hidden />
                 <span className={`flex items-center gap-1.5 ${iDealActiveAndDated ? 'text-green-700' : 'text-slate-500'}`} title={hasDealDate ? 'תאריך אישור עסקה' : 'טרם אושרה עסקה'}>
@@ -2177,7 +2214,7 @@ const OrderForm: React.FC<{
             </div>
         );
         return () => { setHeaderContent(null); };
-    }, [setHeaderContent, createdDateDisplay, dealStartDateString, hasDealDate, iDealActiveAndDated, minDealDate]);
+    }, [setHeaderContent, createdDateDisplay, createdAtString, dealStartDateString, hasDealDate, iDealActiveAndDated, isAdmin, minDealDate]);
 
     return (
         <>

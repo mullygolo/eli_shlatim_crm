@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { getOrders, createOrder, updateOrder, deleteOrder, getOrdersPaginated, getSettings, getOrderById, getOrdersByParentId, getPayableItems, getPreparationStatusSuggestions } from '../services/mongoService.js';
 import { buildImportPreview, executeImport } from '../services/orderImportService.js';
+import { verifyToken, AuthRequest } from '../middleware/auth.js';
 
 const router = Router();
 
@@ -122,8 +123,21 @@ router.post('/', async (req, res) => {
     }
 });
 
-router.put('/:id', async (req, res) => {
+router.put('/:id', verifyToken, async (req: AuthRequest, res) => {
     try {
+        const body = req.body as { id?: string; createdAt?: string | Date };
+        const orderId = req.params.id || body?.id;
+        if (body?.createdAt != null && orderId) {
+            const existing = await getOrderById(orderId);
+            if (existing) {
+                const existingTime = existing.createdAt ? new Date(existing.createdAt).getTime() : null;
+                const incomingTime = body.createdAt ? new Date(body.createdAt).getTime() : null;
+                const createdAtChanged = existingTime !== incomingTime;
+                if (createdAtChanged && req.user?.roleType !== 'ADMIN') {
+                    body.createdAt = existing.createdAt ?? existing.date;
+                }
+            }
+        }
         const order = await updateOrder(req.body);
         res.json(order);
     } catch (error) {

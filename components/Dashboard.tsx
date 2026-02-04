@@ -5,7 +5,8 @@ import { Customer, Order, Activity, Employee, OrderStatusConfiguration, PaymentS
 import { TaskIcon, SettingsIcon, MegaphoneIcon, TruckIcon, CashIcon, CalendarPlusIcon } from './icons'; 
 import { calculateOrderTotals, calculateDueDate } from '../utils/calculations';
 import { getDateStringIsrael } from '../utils/timezone';
-import Modal from './Modal'; 
+import Modal from './Modal';
+import { useAuth } from '../contexts/AuthContext'; 
 
 interface DashboardProps {
     customers: Customer[];
@@ -40,7 +41,8 @@ const MonthlyGoalWidget: React.FC<{
     current: number;
     target: number;
     onEdit: () => void;
-}> = ({ current, target, onEdit }) => {
+    canEdit?: boolean;
+}> = ({ current, target, onEdit, canEdit = false }) => {
     const percentage = Math.min(100, Math.max(0, (current / target) * 100));
     
     let message = "זו רק ההתחלה, יש לנו דרך לעשות!";
@@ -65,9 +67,11 @@ const MonthlyGoalWidget: React.FC<{
         <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 relative overflow-hidden h-full flex flex-col justify-between min-h-[180px]">
             <div className="flex justify-between items-start mb-2">
                 <h3 className="text-lg font-bold text-slate-800">יעד הכנסות חודשי</h3>
-                <button onClick={onEdit} className="text-slate-400 hover:text-primary transition-colors">
-                    <SettingsIcon className="w-5 h-5" />
-                </button>
+                {canEdit && (
+                    <button onClick={onEdit} className="text-slate-400 hover:text-primary transition-colors" title="עריכת יעד (מנהל מערכת)">
+                        <SettingsIcon className="w-5 h-5" />
+                    </button>
+                )}
             </div>
             
             <div className="flex items-end gap-2 mb-4">
@@ -740,8 +744,9 @@ const TaskItem: React.FC<{ task: any, onNavigate: (id: string) => void }> = ({ t
 
 // --- Dashboard Component ---
 const Dashboard: React.FC<DashboardProps> = ({ 
-    customers, orders, activities, monthlyGoal, setMonthlyGoal, employees, onNavigateToOrder, statusConfigs, vatRate, systemMessage, manualEvents, addManualEvent 
+    customers, orders, activities, monthlyGoal, setMonthlyGoal, employees, onNavigateToOrder, statusConfigs, vatRate, systemMessage, manualEvents, addManualEvent
 }) => {
+    const { user } = useAuth();
     const [isGoalModalOpen, setIsGoalModalOpen] = useState(false);
     const [newGoal, setNewGoal] = useState(monthlyGoal);
     const [taskFilter, setTaskFilter] = useState<'TODAY' | 'OVERDUE' | 'FUTURE'>('TODAY');
@@ -833,7 +838,7 @@ const Dashboard: React.FC<DashboardProps> = ({
             {/* Top Row: Goal, System Message */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
                 <div className="md:col-span-1 h-full">
-                    <MonthlyGoalWidget current={currentMonthlyRevenue} target={monthlyGoal} onEdit={() => setIsGoalModalOpen(true)} />
+                    <MonthlyGoalWidget current={currentMonthlyRevenue} target={monthlyGoal} onEdit={() => setIsGoalModalOpen(true)} canEdit={user?.roleType === 'ADMIN'} />
                 </div>
                 <div className="md:col-span-2 h-full">
                     <SystemMessageWidget message={systemMessage} />

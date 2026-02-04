@@ -1208,6 +1208,7 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
     const [isCollectionCenterOpen, setIsCollectionCenterOpen] = useState(false);
     const [viewingCustomer, setViewingCustomer] = useState<Customer | null>(null);
     const [searchTerm, setSearchTerm] = useState('');
+    const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
     
     // Duplicate Detection State
     const [duplicateFound, setDuplicateFound] = useState<Customer | null>(null);
@@ -1227,11 +1228,17 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
     const [loading, setLoading] = useState(true);
     const [paginatedCustomers, setPaginatedCustomers] = useState<(Customer & { debt?: number })[]>([]);
 
+    // Debounce search: update debouncedSearchTerm 350ms after user stops typing (reduces API calls)
+    useEffect(() => {
+        const t = setTimeout(() => setDebouncedSearchTerm(searchTerm), 350);
+        return () => clearTimeout(t);
+    }, [searchTerm]);
+
     // Load customers from API with pagination (silent = true: don't show loading, for background refresh)
     const refetchCustomers = async (silent: boolean = false) => {
         if (!silent) setLoading(true);
         try {
-            const filters = { searchTerm: searchTerm || undefined };
+            const filters = { searchTerm: debouncedSearchTerm || undefined };
             const result = await mongoService.getCustomersPaginated(filters, currentPage, pageSize);
             setPaginatedCustomers(result.customers);
             setTotalCount(result.totalCount);
@@ -1242,10 +1249,10 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
         }
     };
 
-    // Load customers when search term or pagination changes; if customers already in props, show first page immediately then refetch in background
+    // Load customers when debounced search term or pagination changes; if customers already in props, show first page immediately then refetch in background
     useEffect(() => {
         // Only show in-memory slice when we have no active search (avoid showing unfiltered slice when search is applied)
-        if (customers.length > 0 && paginatedCustomers.length === 0 && !searchTerm) {
+        if (customers.length > 0 && paginatedCustomers.length === 0 && !debouncedSearchTerm) {
             const start = (currentPage - 1) * pageSize;
             const slice = customers.slice(start, start + pageSize);
             setPaginatedCustomers(slice);
@@ -1255,12 +1262,12 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
         } else {
             refetchCustomers();
         }
-    }, [searchTerm, currentPage, pageSize]);
+    }, [debouncedSearchTerm, currentPage, pageSize]);
 
     // Reset to page 1 when search term changes (avoid empty list / wrong range when filtered results have fewer pages)
     useEffect(() => {
         setCurrentPage(1);
-    }, [searchTerm]);
+    }, [debouncedSearchTerm]);
 
     // Use paginated customers for display; dedupe by logical key as safety net (server already dedupes)
     const filteredCustomers = useMemo(() => {
@@ -1477,7 +1484,7 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
         
         setCustomersLocal(prev => prev.map(c => c.id === updatedCustomer.id ? updatedCustomer : c));
         setPaginatedCustomers(prev => prev.map(c => c.id === updatedCustomer.id ? { ...c, ...updatedCustomer } : c));
-        refetchCustomers(true);
+        // No refetch: we already have the server response; saves one round-trip for instant feedback
         
         // Automatic cascading update for Payment Terms
         if (originalCustomer && updatedCustomer.paymentTerms && originalCustomer.paymentTerms !== updatedCustomer.paymentTerms) {

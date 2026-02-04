@@ -484,9 +484,24 @@ const StrongNumberCard: React.FC<{
         const leadStatuses = new Set(statusConfigs.filter(c => c.isLead).map(c => c.label));
         const untouchedLeads = orders.filter(o => leadStatuses.has(o.orderStatus));
         
-        // Use the isQuote flag configuration to count open quotes
+        // Use the isQuote flag configuration to count open quotes (deduplicated by orderNumber, like Orders page)
         const quoteStatuses = new Set(statusConfigs.filter(c => c.isQuote).map(c => c.label));
-        const openQuotes = orders.filter(o => quoteStatuses.has(o.orderStatus));
+        const openQuotesRaw = orders.filter(o => quoteStatuses.has(o.orderStatus));
+        const quoteDedupMap = new Map<string, Order>();
+        for (const order of openQuotesRaw) {
+            const raw = (order.orderNumber != null && order.orderNumber !== '') ? String(order.orderNumber).trim() : '';
+            const key = raw !== '' ? raw.toUpperCase() : (order.id || '');
+            if (!key) continue;
+            const existing = quoteDedupMap.get(key);
+            if (!existing) {
+                quoteDedupMap.set(key, order);
+            } else {
+                const dNew = dateKeyForDedup(order) ? new Date(dateKeyForDedup(order) as string | Date).getTime() : 0;
+                const dOld = dateKeyForDedup(existing) ? new Date(dateKeyForDedup(existing) as string | Date).getTime() : 0;
+                if (dNew >= dOld) quoteDedupMap.set(key, order);
+            }
+        }
+        const openQuotes = Array.from(quoteDedupMap.values());
 
         // Lost Deals Calculation (Current Month - Event Based Logic)
         const lostStatuses = new Set(statusConfigs.filter(c => c.isLost).map(c => c.label));

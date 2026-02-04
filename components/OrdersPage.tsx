@@ -788,7 +788,7 @@ const OrderForm: React.FC<{
             const docLogEvent: TimelineEvent = {
                 id: `log_doc_${Date.now()}`,
                 timestamp: new Date(),
-                user: employees.find(emp => emp.id === order.employeeId)?.name || 'מערכת',
+                user: user?.name ?? 'מערכת',
                 type: 'LOG',
                 content: `נוצר מסמך ${docLabel} בחשבונית ירוקה`
             };
@@ -849,7 +849,7 @@ const OrderForm: React.FC<{
             const draftLogEvent: TimelineEvent = {
                 id: `log_draft_${Date.now()}`,
                 timestamp: new Date(),
-                user: employees.find(emp => emp.id === order.employeeId)?.name || 'מערכת',
+                user: user?.name ?? 'מערכת',
                 type: 'LOG',
                 content: `נוצרה טיוטת מסמך ${draftDocLabel} בחשבונית ירוקה`
             };
@@ -1247,7 +1247,6 @@ const OrderForm: React.FC<{
         if (!paymentIdToDelete) return;
         
         const targetPayment = formData.payments.find(p => p.id === paymentIdToDelete);
-        const user = employees.find(emp => emp.id === formData.employeeId)?.name || 'מערכת';
         const payDateStr = targetPayment?.date ? new Date(targetPayment.date).toLocaleDateString('he-IL') : '';
         const parts = [`תשלום הוסר: ₪${targetPayment?.amount.toLocaleString()} (${targetPayment?.method})`, payDateStr];
         if (targetPayment?.reference) parts.push(`אסמכתא: ${targetPayment.reference}`);
@@ -1260,7 +1259,7 @@ const OrderForm: React.FC<{
             timeline: [{
                 id: `log_pay_del_${Date.now()}`,
                 timestamp: new Date(),
-                user,
+                user: user?.name ?? 'מערכת',
                 type: 'LOG',
                 content
             }, ...prev.timeline]
@@ -1540,7 +1539,7 @@ const OrderForm: React.FC<{
 
     const handleAddTimelineEvent = () => {
         if (!newTimelineEntry.content.trim()) return;
-        const currentUser = employees.find(emp => emp.id === formData.employeeId)?.name || 'מערכת';
+        const currentUser = user?.name ?? 'מערכת';
         const targetAssigneeId = newTimelineEntry.assigneeId || formData.employeeId;
 
         const newEvent: TimelineEvent = {
@@ -1571,7 +1570,7 @@ const OrderForm: React.FC<{
     };
 
     const handleToggleTaskComplete = (eventId: string, currentStatus: boolean) => {
-        const currentUser = employees.find(emp => emp.id === formData.employeeId)?.name || 'מערכת';
+        const currentUser = user?.name ?? 'מערכת';
         let taskContent = '';
 
         const updatedTimeline = formData.timeline.map(event => {
@@ -1989,7 +1988,7 @@ const OrderForm: React.FC<{
              }
         }
 
-        const user = employees.find(emp => emp.id === formData.employeeId)?.name || 'מערכת';
+        const loggedInUserName = user?.name ?? 'מערכת';
         
         let finalDealStartDate = formData.dealStartDate;
         if (dealStartDateString) {
@@ -2018,7 +2017,7 @@ const OrderForm: React.FC<{
                 id: `log_${Date.now()}`,
                 timestamp: new Date(),
                 content: 'הזמנה נוצרה',
-                user,
+                user: loggedInUserName,
                 type: 'LOG'
             });
             updatedFormData.statusHistory = [{ status: updatedFormData.orderStatus, startDate: new Date() }];
@@ -2030,7 +2029,7 @@ const OrderForm: React.FC<{
                      id: `log_audit_${Date.now()}`,
                      timestamp: new Date(),
                      content: 'עדכון פרטי הזמנה',
-                     user,
+                     user: loggedInUserName,
                      type: 'LOG',
                      changes: diff
                  });
@@ -3038,7 +3037,7 @@ const OrderForm: React.FC<{
                                 const linkLogEvent: TimelineEvent = {
                                     id: `log_link_${Date.now()}`,
                                     timestamp: new Date(),
-                                    user: employees.find(emp => emp.id === order.employeeId)?.name || 'מערכת',
+                                    user: user?.name ?? 'מערכת',
                                     type: 'LOG',
                                     content: `שויך מסמך חשבונית ירוקה להזמנה (${paymentsAdded} תשלומים)`
                                 };
@@ -3378,6 +3377,7 @@ const OrderForm: React.FC<{
 };
 
 const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLocal, customers, setCustomers, suppliers, setSuppliers, employees, addActivity, initialOpenOrderId, onOrderOpened, openNewOrderRequest, onClearedOpenNewOrderRequest, statusConfigs, getNextOrderNumber, vatRate }) => {
+    const { user: authUser } = useAuth();
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [isImportModalOpen, setIsImportModalOpen] = useState(false);
     const [editingOrder, setEditingOrder] = useState<Order | null>(null);
@@ -3397,7 +3397,6 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
     const [endDateFilter, setEndDateFilter] = useState<string>('');     // NEW: Date Range End
     const [dateFilterType, setDateFilterType] = useState<'ORDER_DATE' | 'DEAL_DATE'>('ORDER_DATE');
     const [sortBy, setSortBy] = useState<'date' | 'dueDate' | 'updatedAt'>('updatedAt');
-    const [showCompletedOrders, setShowCompletedOrders] = useState(false); 
     
     // Pagination state
     const [currentPage, setCurrentPage] = useState(1);
@@ -3451,7 +3450,6 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
         setEndDateFilter('');
         setDateFilterType('ORDER_DATE');
         setSortBy('updatedAt');
-        setShowCompletedOrders(false);
         setCustomerIsImportPlaceholderOnly(false);
         setCurrentPage(1); // Reset to first page
     };
@@ -3460,7 +3458,6 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
         const originalOrder = paginatedOrders.find(o => o.id === orderId) || orders.find(o => o.id === orderId);
         if (!originalOrder || originalOrder.orderStatus === newStatus) return;
         
-        const user = employees.find(emp => emp.id === originalOrder.employeeId)?.name || 'מערכת';
         const config = statusConfigs.find(c => c.label === newStatus);
         const isNowActiveDeal = config ? config.isActiveDeal : false;
         let newDealStartDate = originalOrder.dealStartDate;
@@ -3471,7 +3468,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
             id: `log_${Date.now()}`,
             timestamp: new Date(),
             content: `שינוי סטטוס`,
-            user: user,
+            user: authUser?.name ?? 'מערכת',
             type: 'LOG',
             changes: [
                 { field: 'orderStatus', label: 'סטטוס', oldValue: originalOrder.orderStatus, newValue: newStatus, action: 'UPDATED' }
@@ -3522,15 +3519,6 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
         const signal = abortControllerRef.current.signal;
         if (!silent) setLoading(true);
         try {
-            const includeCompleted =
-                orderStatusFilter.length === 0
-                    ? true
-                    : showCompletedOrders || Boolean(
-                        statusConfigs && orderStatusFilter.some(s => {
-                            const config = statusConfigs.find(c => c.label === s);
-                            return config?.isCompleted === true;
-                        })
-                    );
             const filters = {
                 customerFilter,
                 supplierFilter,
@@ -3544,7 +3532,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                 dateFilterType,
                 searchTerm: debouncedSearchTerm,
                 sortBy,
-                showCompletedOrders: includeCompleted,
+                showCompletedOrders: true,
                 customerIsImportPlaceholderOnly
             };
             const result = await mongoService.getOrdersPaginated(filters, currentPage, pageSize, { signal });
@@ -3563,15 +3551,51 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
     // Reset to page 1 when filters change (use debounced search so page doesn't jump on every keystroke)
     useEffect(() => {
         setCurrentPage(1);
-    }, [customerFilter, supplierFilter, employeeFilter, orderStatusFilter, paymentStatusFilter, monthFilter, yearFilter, startDateFilter, endDateFilter, dateFilterType, debouncedSearchTerm, sortBy, showCompletedOrders, customerIsImportPlaceholderOnly]);
+    }, [customerFilter, supplierFilter, employeeFilter, orderStatusFilter, paymentStatusFilter, monthFilter, yearFilter, startDateFilter, endDateFilter, dateFilterType, debouncedSearchTerm, sortBy, customerIsImportPlaceholderOnly]);
 
-    // Fetch paginated orders when filters or pagination change; if orders already in props (e.g. from background load), show first page immediately then refetch in background
+    // Fetch paginated orders when filters or pagination change; if orders already in props, show first page immediately (sorted by sortBy for instant paint) then refetch in background
     useEffect(() => {
         if (orders.length > 0 && paginatedOrders.length === 0) {
+            const dateKey = dateFilterType === 'DEAL_DATE' ? 'dealStartDate' : 'date';
+            const list = orders;
+            const byKey = new Map<string, Order>();
+            for (const order of list) {
+                const raw = (order.orderNumber != null && order.orderNumber !== '') ? String(order.orderNumber).trim() : '';
+                const key = raw !== '' ? raw.toUpperCase() : (order.id || '');
+                if (!key) continue;
+                const existing = byKey.get(key);
+                if (!existing) {
+                    byKey.set(key, order);
+                } else {
+                    const dNew = order[dateKey] ? new Date(order[dateKey] as string).getTime() : 0;
+                    const dOld = existing[dateKey] ? new Date(existing[dateKey] as string).getTime() : 0;
+                    if (dNew >= dOld) byKey.set(key, order);
+                }
+            }
+            let deduped = Array.from(byKey.values());
+            if (sortBy === 'dueDate') {
+                deduped.sort((a, b) => {
+                    const dateA = calculateDueDate(a.dealStartDate || a.date, a.paymentTerms);
+                    const dateB = calculateDueDate(b.dealStartDate || b.date, b.paymentTerms);
+                    return dateA.getTime() - dateB.getTime();
+                });
+            } else if (sortBy === 'updatedAt') {
+                deduped.sort((a, b) => {
+                    const uA = a.updatedAt ? new Date(a.updatedAt).getTime() : (a.createdAt ? new Date(a.createdAt).getTime() : 0);
+                    const uB = b.updatedAt ? new Date(b.updatedAt).getTime() : (b.createdAt ? new Date(b.createdAt).getTime() : 0);
+                    return uB - uA;
+                });
+            } else {
+                deduped.sort((a, b) => {
+                    const dA = a[dateKey] ? new Date(a[dateKey] as string).getTime() : 0;
+                    const dB = b[dateKey] ? new Date(b[dateKey] as string).getTime() : 0;
+                    return dB - dA;
+                });
+            }
             const start = (currentPage - 1) * pageSize;
-            const slice = orders.slice(start, start + pageSize);
+            const slice = deduped.slice(start, start + pageSize);
             setPaginatedOrders(slice);
-            setTotalCount(orders.length);
+            setTotalCount(deduped.length);
             const totals = slice.reduce(
                 (acc, order) => {
                     const t = calculateOrderTotals(order);
@@ -3603,7 +3627,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
         } else {
             refetchOrders();
         }
-    }, [currentPage, pageSize, customerFilter, supplierFilter, employeeFilter, orderStatusFilter, paymentStatusFilter, monthFilter, yearFilter, startDateFilter, endDateFilter, dateFilterType, debouncedSearchTerm, sortBy, showCompletedOrders, customerIsImportPlaceholderOnly]);
+    }, [orders, currentPage, pageSize, customerFilter, supplierFilter, employeeFilter, orderStatusFilter, paymentStatusFilter, monthFilter, yearFilter, startDateFilter, endDateFilter, dateFilterType, debouncedSearchTerm, sortBy, customerIsImportPlaceholderOnly, statusConfigs, vatRate]);
 
     useEffect(() => {
         if (initialOpenOrderId) {
@@ -3830,15 +3854,6 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                                         <option value="updatedAt">עודכנו לאחרונה</option>
                                     </select>
                                 </div>
-                                <button 
-                                    onClick={() => setShowCompletedOrders(!showCompletedOrders)} 
-                                    className={`flex items-center px-4 py-2 rounded-md text-sm font-medium transition-colors shadow-sm border ${showCompletedOrders ? 'bg-indigo-50 text-indigo-700 border-indigo-200' : 'bg-white text-slate-500 border-slate-300 hover:bg-slate-50'}`}
-                                >
-                                    <span className={`w-4 h-4 me-2 rounded flex items-center justify-center border ${showCompletedOrders ? 'bg-indigo-600 border-indigo-600' : 'bg-white border-slate-400'}`}>
-                                        {showCompletedOrders && <svg className="w-3 h-3 text-white" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" /></svg>}
-                                    </span>
-                                    הצג עסקאות שהסתיימו
-                                </button>
                                 <button
                                     type="button"
                                     onClick={() => setIsImportModalOpen(true)}
@@ -3857,19 +3872,6 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                                 נקה את כל המסננים
                              </button>
                         </div>
-                        
-                        {/* Status Hint Message */}
-                        {dateFilterType === 'DEAL_DATE' && !showCompletedOrders && (
-                            <div className="flex items-center gap-2 text-indigo-600 text-xs bg-indigo-50/50 p-2 rounded-md border border-indigo-100 transition-all">
-                                <span className="text-sm">💡</span>
-                                <p className="font-medium">
-                                    מציג עסקאות פעילות בלבד. כדי לראות גם עסקאות מהעבר (ארכיון), לחץ על 
-                                    <span className="font-bold underline mx-1 cursor-pointer hover:text-indigo-800" onClick={() => setShowCompletedOrders(true)}>
-                                        'הצג עסקאות שהסתיימו'
-                                    </span>.
-                                </p>
-                            </div>
-                        )}
                     </div>
                 </div>
             </div>
@@ -3883,7 +3885,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                             <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">סטטוס</th>
                             <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">הזמנה</th>
                             <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">תיאור</th>
-                            <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">לקוח</th>
+                            <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider min-w-[180px]">לקוח</th>
                             <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">ספקים</th>
                             <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">מחיר הזמנה</th>
                             <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">עלות הזמנה</th>
@@ -3975,13 +3977,23 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                                         <div className="line-clamp-2 break-words">{order.description}</div>
                                         {order.parentOrderId && <div className="text-xs text-slate-400">מקושר להזמנת אב</div>}
                                     </td>
-                                    <td className="px-4 py-4 text-sm text-slate-500 max-w-[140px]" title={getCustomerName(order.customerId)}>
+                                    <td className="px-4 py-4 text-sm text-slate-500 min-w-[180px] max-w-[260px] align-top relative group">
                                         <div className="flex items-center gap-2 min-w-0">
-                                            <span className="truncate">{getCustomerName(order.customerId)}</span>
-                                            {whatsappUrl && <a href={whatsappUrl} target="crm_whatsapp" title={`שלח וואטסאפ ל-${primaryContact?.phone}`} className="text-green-500 hover:text-green-700"><WhatsAppIcon className="h-5 w-5"/></a>}
-                                            {gmailUrl && <a href={gmailUrl} target="crm_email" title={`שלח אימייל ל-${primaryContact?.email}`} className="text-slate-500 hover:text-primary"><EmailIcon className="h-5 w-5"/></a>}
-                                            {telUrl && <a href={telUrl} title={`התקשר ל-${primaryContact?.phone}`} className="text-slate-500 hover:text-primary"><PhoneIcon className="h-5 w-5"/></a>}
+                                            <span className="line-clamp-2 break-words flex-1 min-w-0 font-medium text-slate-700">{getCustomerName(order.customerId)}</span>
+                                            {whatsappUrl && <a href={whatsappUrl} target="crm_whatsapp" title={`שלח וואטסאפ ל-${primaryContact?.phone}`} className="text-green-500 hover:text-green-700 flex-shrink-0"><WhatsAppIcon className="h-5 w-5"/></a>}
+                                            {gmailUrl && <a href={gmailUrl} target="crm_email" title={`שלח אימייל ל-${primaryContact?.email}`} className="text-slate-500 hover:text-primary flex-shrink-0"><EmailIcon className="h-5 w-5"/></a>}
+                                            {telUrl && <a href={telUrl} title={`התקשר ל-${primaryContact?.phone}`} className="text-slate-500 hover:text-primary flex-shrink-0"><PhoneIcon className="h-5 w-5"/></a>}
                                         </div>
+                                        {customer && (
+                                            <div className="absolute bottom-full start-0 mb-1 z-50 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-opacity duration-150 pointer-events-none">
+                                                <div className="bg-slate-800 text-white text-xs rounded-lg shadow-xl px-3 py-2.5 max-w-[280px] border border-slate-600">
+                                                    <div className="font-bold text-white mb-1.5">{customer.name}</div>
+                                                    {primaryContact?.phone && <div className="text-slate-200">טלפון: {primaryContact.phone}</div>}
+                                                    {primaryContact?.email && <div className="text-slate-200 mt-0.5">אימייל: {primaryContact.email}</div>}
+                                                    {!primaryContact?.phone && !primaryContact?.email && <div className="text-slate-400 text-[11px]">אין פרטי קשר</div>}
+                                                </div>
+                                            </div>
+                                        )}
                                     </td>
                                     <td className="px-4 py-4 text-sm text-slate-500">
                                         <div className="flex flex-col gap-1">

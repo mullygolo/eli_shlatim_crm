@@ -90,6 +90,7 @@ const App: React.FC = () => {
     // Loading and Error States
     const [isLoading, setIsLoading] = useState<boolean>(true);
     const [error, setError] = useState<string | null>(null);
+    const [backgroundLoadError, setBackgroundLoadError] = useState<string | null>(null);
     
     // Auth context
     const { logout, isAuthenticated } = useAuth();
@@ -136,7 +137,7 @@ const App: React.FC = () => {
 
     // Load data in two phases: critical first (show app fast), then rest in background
     const CRITICAL_TIMEOUT_MS = 10000;
-    const BACKGROUND_TIMEOUT_MS = 20000;
+    const BACKGROUND_TIMEOUT_MS = 60000; // 60s – טעינת לקוחות, הזמנות, ספקים וכו' יכולה לקחת זמן ברשת איטית או DB כבד
     useEffect(() => {
         let cancelled = false;
 
@@ -159,6 +160,7 @@ const App: React.FC = () => {
         const loadCritical = async () => {
             setIsLoading(true);
             setError(null);
+            setBackgroundLoadError(null);
             const entries: { label: string; fn: () => Promise<any> }[] = [
                 { label: 'סטטוסים', fn: getStatusConfigs },
                 { label: 'הגדרות', fn: getSettings },
@@ -222,7 +224,10 @@ const App: React.FC = () => {
             try {
                 results = await Promise.race([loadPromise, timeoutPromise]);
             } catch (err) {
-                if (!cancelled) console.error('Background data load timeout or error:', err);
+                if (!cancelled) {
+                    console.error('Background data load timeout or error:', err);
+                    setBackgroundLoadError('טעינת הנתונים נכשלה (timeout). וודא שהשרת רץ ורענן את הדף.');
+                }
                 return;
             }
             if (cancelled) return;
@@ -231,6 +236,10 @@ const App: React.FC = () => {
                 .filter((x): x is { label: string; err: unknown } => x !== null);
             if (failed.length > 0) {
                 console.error('Error loading background data (partial):', failed);
+                const msg = failed.length >= entries.length
+                    ? 'הנתונים לא נטענו. ייתכן שהשרת לא זמין או שיש בעיית התחברות. נסה לרענן את הדף.'
+                    : `חלק מהנתונים לא נטענו (${failed.map(f => f.label).join(', ')}). נסה לרענן את הדף.`;
+                setBackgroundLoadError(msg);
             }
             const getValue = (r: PromiseSettledResult<any>, fallback: any) => (r.status === 'fulfilled' ? r.value : fallback);
             if (cancelled) return;
@@ -286,6 +295,13 @@ const App: React.FC = () => {
         setCurrentPage('Orders');
         setOpenOrderId(orderId);
     }, []);
+
+    // When opening Reports (payments to suppliers), refresh orders so the list matches the payables API and navigation to order works
+    useEffect(() => {
+        if (currentPage === 'Reports') {
+            getOrders().then(setOrders).catch((err) => console.error('Error refreshing orders for Reports:', err));
+        }
+    }, [currentPage]);
     
     const onOrderOpened = useCallback(() => {
         setOpenOrderId(null);
@@ -865,6 +881,18 @@ const App: React.FC = () => {
                         showAddOrderWidget={['Dashboard', 'Orders', 'Customers', 'Suppliers', 'PriceList', 'Attendance', 'CallCenter'].includes(currentPage)}
                         onAddOrder={handleAddOrderFromHeader}
                     />
+                    {backgroundLoadError && (
+                        <div className="mx-4 mt-2 sm:mx-6 lg:mx-8 flex items-center justify-between gap-3 rounded-lg bg-amber-50 border border-amber-200 px-4 py-3 text-amber-800" role="alert">
+                            <span className="text-sm font-medium">{backgroundLoadError}</span>
+                            <button
+                                type="button"
+                                onClick={() => window.location.reload()}
+                                className="shrink-0 rounded-md bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-700"
+                            >
+                                רענן דף
+                            </button>
+                        </div>
+                    )}
                     <main className="flex-1 overflow-x-auto overflow-y-auto bg-light-bg p-4 sm:p-6 lg:p-8">
                         {renderPage()}
                     </main>

@@ -178,8 +178,13 @@ function customerLogicalKey(c: Customer): string {
     return (c.name || '').trim().toLowerCase() + '|' + (c.businessId || '').trim().toLowerCase();
 }
 
+// Escape special regex characters for safe MongoDB $regex
+function escapeRegex(s: string): string {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 // Get customers with server-side filtering, pagination, and debt calculation.
-// Duplicates (same name + businessId) are merged into one row; debt is summed across all duplicate IDs.
+// Uses MongoDB query for search (no full scan); loads orders only for current page's customers.
 export async function getCustomersPaginated(
     filters: { searchTerm?: string },
     page: number = 1,
@@ -191,88 +196,81 @@ export async function getCustomersPaginated(
         const customersCollection = database.collection<Customer>('customers');
         const ordersCollection = database.collection<Order>('orders');
         
-        // Load statusConfigs for active deal filtering
         const statusConfigs = await getStatusConfigs();
         
-        // Load all customers (we'll filter after to match searchTerm logic)
-        const allCustomersDocs = await customersCollection.find({}).toArray();
-        let allCustomers = allCustomersDocs.map(deserializeDates) as Customer[];
-        // Apply search filter (matching client-side logic); guard against missing contacts or null fields
-        if (filters.searchTerm) {
-            const lowercasedTerm = filters.searchTerm.toLowerCase();
-            allCustomers = allCustomers.filter(customer => {
-                try {
-                    const nameMatch = (customer.name && typeof customer.name === 'string') && customer.name.toLowerCase().includes(lowercasedTerm);
-                    const hpMatch = customer.businessId?.toLowerCase().includes(lowercasedTerm);
-                    if (nameMatch || hpMatch) return true;
-                    const contacts = customer.contacts;
-                    if (!Array.isArray(contacts)) return false;
-                    return contacts.some(contact => {
-                        const n = contact?.name != null ? String(contact.name).toLowerCase().includes(lowercasedTerm) : false;
-                        const e = contact?.email != null ? String(contact.email).toLowerCase().includes(lowercasedTerm) : false;
-                        const p = contact?.phone != null ? String(contact.phone).toLowerCase().includes(lowercasedTerm) : false;
-                        return n || e || p;
-                    });
-                } catch {
-                    return false;
-                }
-            });
+        // Build MongoDB query for search (avoids loading all customers when searching)
+        const query: any = {};
+        if (filters.searchTerm && filters.searchTerm.trim()) {
+            const term = escapeRegex(filters.searchTerm.trim());
+            const re = new RegExp(term, 'i');
+            query.$or = [
+                { name: re },
+                { businessId: re },
+                { 'contacts.name': re },
+                { 'contacts.email': re },
+                { 'contacts.phone': re }
+            ];
         }
         
-        // Load all orders once for debt calculation
-        const allOrdersDocs = await ordersCollection.find({}).toArray();
-        const allOrders = allOrdersDocs.map(deserializeDates) as Order[];
+        const allCustomersDocs = await customersCollection.find(query).toArray();
+        const allCustomers = allCustomersDocs.map(deserializeDates) as Customer[];
         
-        // Calculate debt for each customer
-        const customersWithDebt = allCustomers.map(customer => {
-            // Filter orders for this customer (active deals only)
-            const customerOrders = allOrders.filter(o => {
-                if (o.customerId !== customer.id) return false;
-                const config = statusConfigs.find(c => c.label === o.orderStatus);
-                return config?.isActiveDeal === true;
-            });
-            
-            // Calculate total debt
-            const debt = customerOrders.reduce((sum, order) => {
-                const { totalAmount, totalPaid } = calculateOrderTotals(order);
-                const currentOrderVat = order.vatRate ?? vatRate;
-                const gross = totalAmount * (1 + currentOrderVat / 100);
-                const remaining = Math.max(0, gross - totalPaid);
-                return sum + remaining;
-            }, 0);
-            
-            return {
-                ...customer,
-                debt: Number(debt.toFixed(2))
-            };
-        });
-        
-        // Deduplicate by logical key (name + businessId): keep one row per key, sum debt
-        const byKey = new Map<string, (Customer & { debt: number })[]>();
-        for (const c of customersWithDebt) {
+        // Deduplicate by logical key (name + businessId): keep one row per key
+        const byKey = new Map<string, Customer[]>();
+        for (const c of allCustomers) {
             const key = customerLogicalKey(c);
             if (!byKey.has(key)) byKey.set(key, []);
             byKey.get(key)!.push(c);
         }
-        const dedupedCustomers: (Customer & { debt: number })[] = [];
+        const dedupedList: Customer[] = [];
         for (const group of byKey.values()) {
             if (group.length === 0) continue;
-            // Prefer representative with greenInvoiceClientId, else first
             const representative = group.find(c => c.greenInvoiceClientId) || group[0];
-            const mergedDebt = group.reduce((sum, c) => sum + c.debt, 0);
-            dedupedCustomers.push({
-                ...representative,
-                debt: Number(mergedDebt.toFixed(2))
-            });
+            dedupedList.push(representative);
+        }
+        dedupedList.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'he'));
+        
+        const totalCount = dedupedList.length;
+        const skip = (page - 1) * limit;
+        const pageReps = dedupedList.slice(skip, skip + limit);
+        
+        // Collect all customer IDs that belong to the page's groups (for debt merge)
+        const pageGroupMemberIds = new Set<string>();
+        for (const rep of pageReps) {
+            const key = customerLogicalKey(rep);
+            const group = byKey.get(key) || [];
+            group.forEach(c => pageGroupMemberIds.add(c.id));
         }
         
-        // Sort customers (by name by default)
-        dedupedCustomers.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'he'));
+        // Load orders only for customers on this page (major optimization: no full orders scan)
+        const orderDocs = pageGroupMemberIds.size > 0
+            ? await ordersCollection.find({ customerId: { $in: Array.from(pageGroupMemberIds) } }).toArray()
+            : [];
+        const ordersForPage = orderDocs.map(deserializeDates) as Order[];
         
-        // Paginate
-        const totalCount = dedupedCustomers.length;
-        const skip = (page - 1) * limit;
-        const paginatedCustomers = dedupedCustomers.slice(skip, skip + limit);
+        const activeDealLabels = new Set(
+            statusConfigs.filter(c => c.isActiveDeal).map(c => c.label)
+        );
+        
+        const debtByCustomerId = new Map<string, number>();
+        for (const order of ordersForPage) {
+            if (!order.customerId || !activeDealLabels.has(order.orderStatus)) continue;
+            const { totalAmount, totalPaid } = calculateOrderTotals(order);
+            const gross = totalAmount * (1 + (order.vatRate ?? vatRate) / 100);
+            const remaining = Math.max(0, gross - totalPaid);
+            debtByCustomerId.set(
+                order.customerId,
+                (debtByCustomerId.get(order.customerId) ?? 0) + remaining
+            );
+        }
+        
+        const paginatedCustomers: (Customer & { debt: number })[] = pageReps.map(rep => {
+            const key = customerLogicalKey(rep);
+            const group = byKey.get(key) || [];
+            const mergedDebt = group.reduce((sum, c) => sum + (debtByCustomerId.get(c.id) ?? 0), 0);
+            return { ...rep, debt: Number(mergedDebt.toFixed(2)) };
+        });
+        
         return {
             customers: paginatedCustomers,
             totalCount,
@@ -756,7 +754,7 @@ interface PayableItem {
 
 // Get payable items for supplier payments report with filtering, pagination, and summary stats
 export async function getPayableItems(
-    filters: {
+        filters: {
         supplierFilterId?: string;
         dateStart?: string;
         dateEnd?: string;
@@ -804,10 +802,27 @@ export async function getPayableItems(
         };
         
         // Filter out non-deal orders based on dynamic status configuration
-        const activeOrders = allOrders.filter(order => {
+        const activeOrdersFiltered = allOrders.filter(order => {
             const statusConfig = statusConfigs.find(c => c.label === order.orderStatus);
             return statusConfig ? statusConfig.isActiveDeal : true;
         });
+
+        // Deduplicate by orderNumber (one document per order number — keep latest by date). Aligns with Orders page and PnL so totals match.
+        const seenByOrderNumber = new Map<string, Order>();
+        for (const order of activeOrdersFiltered) {
+            const raw = (order.orderNumber != null && order.orderNumber !== '') ? String(order.orderNumber).trim() : '';
+            const key = raw !== '' ? raw.toUpperCase() : (order.id || '');
+            if (!key) continue;
+            const existing = seenByOrderNumber.get(key);
+            if (!existing) {
+                seenByOrderNumber.set(key, order);
+            } else {
+                const dNew = new Date(order.dealStartDate || order.date).getTime();
+                const dOld = new Date(existing.dealStartDate || existing.date).getTime();
+                if (dNew >= dOld) seenByOrderNumber.set(key, order);
+            }
+        }
+        const activeOrders = Array.from(seenByOrderNumber.values());
         
         // Build items with merge of duplicate logical lines (same order + description + cost + supplier)
         const mergeKeyToItem = new Map<string, PayableItem>();
@@ -892,10 +907,14 @@ export async function getPayableItems(
                 }
                 
                 const effSupplierId = supplierId || 'unassigned';
-                // Normalize so "same amount" and "same text" match: round cost to 2 decimals, collapse spaces in description
-                const costGrossNorm = (Math.round(costGross * 100) / 100).toFixed(2);
-                const descNorm = (costItem.description || '').trim().replace(/\s+/g, ' ');
-                const mergeKey = `${order.id}_${type}_${descNorm}_${costGrossNorm}_${effSupplierId}`;
+                // Merge by (orderNumber, supplier, description) so one row per logical order+supplier+item. Uses orderNumber so duplicate order documents (same order number, different id) merge into one row.
+                const orderKey = (order.orderNumber || order.id || '').trim().toUpperCase().replace(/\s+/g, '');
+                const descNorm = (costItem.description || '')
+                    .trim()
+                    .replace(/\s+/g, ' ')
+                    .replace(/\s*\/\s*/g, '/')
+                    .replace(/\s*-\s*/g, '-');
+                const mergeKey = `${orderKey}_${descNorm}_${effSupplierId}`;
                 const existing = mergeKeyToItem.get(mergeKey);
                 
                 if (existing) {
@@ -2668,9 +2687,7 @@ export async function deleteAttendanceRecord(recordId: string): Promise<void> {
 }
 
 // Initialize index for attendance records (query performance).
-// Duplicate active clock-ins are prevented in application logic (clockInAttendance).
-// We do not create a unique index: legacy data has dateString null / duplicates, and
-// partial index ($exists, $ne) triggers "Expression not supported: $not" on MongoDB.
+// One active clock-in per employee per day: partial unique index on (employeeId, dateString) where clockOut doesn't exist.
 export async function initializeAttendanceIndexes(): Promise<void> {
     try {
         const database = await getDb();
@@ -2684,6 +2701,23 @@ export async function initializeAttendanceIndexes(): Promise<void> {
         } catch (error: any) {
             if (error.code !== 85 && error.codeName !== 'IndexOptionsConflict') {
                 console.warn('Could not create attendance index (might already exist):', error.message);
+            }
+        }
+        try {
+            await collection.createIndex(
+                { employeeId: 1, dateString: 1 },
+                {
+                    unique: true,
+                    partialFilterExpression: { clockOut: { $exists: false } },
+                    name: 'attendance_one_active_per_employee_day'
+                }
+            );
+            console.log('Attendance partial unique index (one active per day) created successfully');
+        } catch (error: any) {
+            if (error.code === 11000 || error.codeName === 'IndexOptionsConflict' || error.code === 85) {
+                console.warn('Could not create attendance partial unique index (may already exist or duplicates in DB):', error.message);
+            } else {
+                console.warn('Attendance partial unique index:', error.message);
             }
         }
     } catch (error) {

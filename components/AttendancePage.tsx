@@ -642,12 +642,13 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
 
         if (action === 'IN') {
             if (clockInRequestInProgressRef.current) return;
+            clockInRequestInProgressRef.current = true;
             if (todaysRecords.some(r => !r.clockOut)) {
                 setErrorMessage('כבר יש כניסה פעילה להיום');
+                clockInRequestInProgressRef.current = false;
                 return;
             }
 
-            clockInRequestInProgressRef.current = true;
             setIsClocking(true);
             if (import.meta.env.DEV) console.log('[Attendance] clock-in start');
             const optimisticId = `att_opt_${Date.now()}`;

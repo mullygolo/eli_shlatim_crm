@@ -78,27 +78,19 @@ router.put('/:id', async (req, res) => {
     try {
         const customer = await updateCustomer(req.body);
         
-        // Sync to GreenInvoice if enabled (skip placeholder customers from import – link manually later)
+        // Sync to GreenInvoice in background so save responds immediately (non-blocking)
         if (process.env.GREENINVOICE_SYNC_ENABLED === 'true' && !customer.isImportPlaceholder) {
-            try {
-                const clientData = mapCustomerToClient(customer);
-                
-                if (customer.greenInvoiceClientId) {
-                    // Update existing client
-                    await updateClient(customer.greenInvoiceClientId, clientData);
-                } else {
-                    // Create new client if doesn't exist
-                    const greenInvoiceClient = await createOrGetClient(clientData, customer.businessId);
-                    const updatedCustomer = await updateCustomer({
-                        ...customer,
-                        greenInvoiceClientId: greenInvoiceClient.id
-                    });
-                    res.json(updatedCustomer);
-                    return;
-                }
-            } catch (greenInvoiceError) {
-                console.error('Error syncing customer to GreenInvoice:', greenInvoiceError);
-                // Continue even if GreenInvoice sync fails
+            const clientData = mapCustomerToClient(customer);
+            if (customer.greenInvoiceClientId) {
+                updateClient(customer.greenInvoiceClientId, clientData).catch(err =>
+                    console.error('GreenInvoice updateClient (background):', err)
+                );
+            } else {
+                createOrGetClient(clientData, customer.businessId)
+                    .then(greenInvoiceClient =>
+                        updateCustomer({ ...customer, greenInvoiceClientId: greenInvoiceClient.id })
+                    )
+                    .catch(err => console.error('GreenInvoice createOrGetClient (background):', err));
             }
         }
         

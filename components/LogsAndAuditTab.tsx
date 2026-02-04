@@ -24,6 +24,7 @@ const ACTION_LABELS: Record<string, string> = {
     merge: 'מיזוג',
     sync: 'סנכרון',
     login: 'התחברות',
+    login_failed: 'התחברות נכשלה',
     logout: 'התנתקות',
     other: 'אחר',
 };
@@ -38,12 +39,23 @@ const ACTION_OPTIONS: { value: string; label: string }[] = [
     ...Object.entries(ACTION_LABELS).map(([value, label]) => ({ value, label })),
 ];
 
+/** Hebrew labels for failed login reason (for display) */
+const LOGIN_FAILED_REASON_LABELS: Record<string, string> = {
+    user_not_found: 'משתמש לא קיים',
+    wrong_password: 'סיסמה שגויה',
+    no_password: 'סיסמה לא הוגדרה',
+    account_inactive: 'חשבון מושבת',
+};
+
 /** Hebrew labels for metadata keys (for display) */
 const METADATA_KEY_LABELS: Record<string, string> = {
     orderNumber: 'הזמנה',
     oldStatus: 'היה',
     newStatus: 'הפך ל',
     name: 'שם',
+    username: 'שם משתמש',
+    reason: 'סיבה',
+    ip: 'כתובת IP',
     amount: 'סכום',
     victimName: 'מיזוג מ',
     targetName: 'לתוך',
@@ -112,6 +124,10 @@ function formatActivityDetails(a: Activity): ActivityDisplayDetails {
         case 'delete':
             if (meta.label) summary = String(meta.label);
             break;
+        case 'login_failed':
+            if (meta.username) summary = String(meta.username);
+            if (meta.reason) summary = summary ? `${summary} — ${LOGIN_FAILED_REASON_LABELS[String(meta.reason)] ?? String(meta.reason)}` : (LOGIN_FAILED_REASON_LABELS[String(meta.reason)] ?? String(meta.reason));
+            break;
         default:
             if (meta.orderNumber) summary = `הזמנה ${meta.orderNumber}`;
             if (meta.name) summary = summary ? `${summary}; ${meta.name}` : String(meta.name);
@@ -119,9 +135,14 @@ function formatActivityDetails(a: Activity): ActivityDisplayDetails {
 
     const detailLines = Object.entries(meta).map(([k, v]) => {
         const label = METADATA_KEY_LABELS[k] ?? k;
-        const val = typeof v === 'number' && (k === 'amount' || k === 'paymentsCount' || k === 'paymentsAdded' || k === 'created' || k === 'updated')
-            ? (k === 'amount' ? `₪${v.toLocaleString()}` : String(v))
-            : String(v);
+        let val: string;
+        if (k === 'reason') {
+            val = LOGIN_FAILED_REASON_LABELS[String(v)] ?? String(v);
+        } else if (typeof v === 'number' && (k === 'amount' || k === 'paymentsCount' || k === 'paymentsAdded' || k === 'created' || k === 'updated')) {
+            val = k === 'amount' ? `₪${v.toLocaleString()}` : String(v);
+        } else {
+            val = String(v);
+        }
         return `${label}: ${val}`;
     });
 

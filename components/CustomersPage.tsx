@@ -38,6 +38,26 @@ const findDuplicateCustomer = (customers: Customer[], name: string, hp?: string,
     });
 };
 
+// Visual badges: origin (from GI vs app) and sync status to Green Invoice
+const fromGreenInvoice = (c: Customer) => (c.notes || '').trim().startsWith('יובא מחשבונית ירוקה');
+const syncedToGreenInvoice = (c: Customer) => !!c.greenInvoiceClientId;
+
+const CustomerSyncBadges: React.FC<{ customer: Customer; compact?: boolean }> = ({ customer, compact }) => {
+    const fromGI = fromGreenInvoice(customer);
+    const toGI = syncedToGreenInvoice(customer);
+    const badge = (label: string, title: string, bg: string) => (
+        <span key={label} title={title} className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium ${bg}`}>
+            {label}
+        </span>
+    );
+    return (
+        <div className={`flex flex-wrap gap-1 ${compact ? 'mt-0.5' : 'mt-2'}`}>
+            {fromGI ? badge('סונכרן מחשבונית ירוקה', 'הלקוח יובא/סונכרן מחשבונית ירוקה', 'bg-emerald-100 text-emerald-800') : badge('נוצר בתוכנה', 'הלקוח נוצר במערכת זו', 'bg-indigo-100 text-indigo-800')}
+            {toGI && badge('מסונכרן לחשבונית ירוקה', 'הלקוח מקושר ומופיע בחשבונית ירוקה', 'bg-amber-100 text-amber-800')}
+        </div>
+    );
+};
+
 // Enhanced document linking with list selection, allocation editing, and validation
 interface DocumentLinkingState {
     selectedDoc: { id: string; amount: number; type: number; description: string; date?: string } | null;
@@ -913,6 +933,7 @@ const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, custo
 
     return (
         <div className="flex flex-col text-start">
+            <CustomerSyncBadges customer={editableCustomer} />
              <div className="border-b border-slate-200">
                 <nav className="-mb-px flex space-x-6 space-x-reverse px-1">
                     <button onClick={() => setActiveTab('details')} className={`whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm ${activeTab === 'details' ? 'border-primary text-primary' : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'}`}>פרטים</button>
@@ -1643,10 +1664,13 @@ ${results.errors.length > 0 ? `\n- שגיאות: ${results.errors.length}` : ''}
 
                             return(
                                 <tr key={customer.id} className="hover:bg-slate-50">
-                                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                                        <button onClick={() => handleViewCustomer(customer)} className="text-primary hover:text-indigo-800 font-semibold">
-                                            {customer.name} {customer.isSpecial && <span title="לקוח מיוחד">⭐</span>}
-                                        </button>
+                                    <td className="px-6 py-4 text-sm font-medium">
+                                        <div>
+                                            <button onClick={() => handleViewCustomer(customer)} className="text-primary hover:text-indigo-800 font-semibold">
+                                                {customer.name} {customer.isSpecial && <span title="לקוח מיוחד">⭐</span>}
+                                            </button>
+                                            <CustomerSyncBadges customer={customer} compact />
+                                        </div>
                                     </td>
                                     <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-500">{customer.businessId || '---'}</td>
                                     <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-500">

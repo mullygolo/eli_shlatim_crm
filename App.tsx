@@ -37,11 +37,12 @@ import FinancePage from './components/FinancePage';
 import AttendancePage from './components/AttendancePage';
 import PriceListPage from './components/PriceListPage';
 import CallCenterPage from './components/CallCenterPage';
+import ImprovementSuggestionsPage from './components/ImprovementSuggestionsPage';
 
 // A map for page titles
 export const PAGE_TITLES: Record<Page, string> = {
     Dashboard: 'לוח בקרה',
-    Orders: 'הזמנות',
+    Orders: 'לוח הזמנות',
     Customers: 'לקוחות',
     Suppliers: 'ספקים',
     Employees: 'עובדים',
@@ -55,6 +56,7 @@ export const PAGE_TITLES: Record<Page, string> = {
     Attendance: 'נוכחות ושכר',
     PriceList: 'מחירון',
     CallCenter: 'מרכזייה',
+    ImprovementSuggestions: 'הצעות ייעול',
 };
 
 const App: React.FC = () => {
@@ -520,6 +522,8 @@ const App: React.FC = () => {
                 return <PriceListPage suppliers={suppliers} />;
             case 'CallCenter':
                 return <CallCenterPage />;
+            case 'ImprovementSuggestions':
+                return <ImprovementSuggestionsPage currentPage={currentPage} />;
             default:
                 return <Dashboard customers={customers} orders={orders} activities={activities} monthlyGoal={monthlyGoal} setMonthlyGoal={setMonthlyGoalWithSync} employees={employees} onNavigateToOrder={handleNavigateToOrder} statusConfigs={statusConfigs} vatRate={vatRate} systemMessage={systemMessage} manualEvents={manualEvents} addManualEvent={addManualEvent} />;
         }

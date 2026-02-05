@@ -1,12 +1,13 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import DOMPurify from 'dompurify';
 // Fixed error: Removed 'OrderStatus' which is not exported from '../types'
-import { Customer, Order, Activity, Employee, OrderStatusConfiguration, PaymentStatus, ManualEvent, PaymentMethod } from '../types';
-import { TaskIcon, SettingsIcon, MegaphoneIcon, TruckIcon, CashIcon, CalendarPlusIcon } from './icons'; 
+import { Customer, Order, Activity, Employee, OrderStatusConfiguration, PaymentStatus, ManualEvent, WallPost, PaymentMethod } from '../types';
+import { TaskIcon, SettingsIcon, MegaphoneIcon, TruckIcon, CashIcon, CalendarPlusIcon, InstallationIcon, NoteIcon } from './icons'; 
 import { calculateOrderTotals, calculateDueDate } from '../utils/calculations';
 import { getDateStringIsrael } from '../utils/timezone';
 import Modal from './Modal';
-import { useAuth } from '../contexts/AuthContext'; 
+import { useAuth } from '../contexts/AuthContext';
+import * as mongoService from '../services/mongoService'; 
 
 interface DashboardProps {
     customers: Customer[];
@@ -30,6 +31,7 @@ interface CalendarItem {
     type: 'LOGISTICS' | 'FINANCE' | 'MANUAL';
     title: string;
     subtitle?: string;
+    details?: string; // Address, contact etc. for logistics
     colorClass: string;
     icon: React.ReactNode;
     time?: string;
@@ -192,8 +194,27 @@ const OperationsCalendarWidget: React.FC<{
     const calendarItems = useMemo(() => {
         const items: CalendarItem[] = [];
 
-        // Logistics (Services from Orders)
+        // Logistics (from line items with serviceType + scheduledDate, and legacy additionalServices)
         orders.forEach(order => {
+            (order.lineItems || []).filter(li => (li.serviceType === 'DELIVERY' || li.serviceType === 'INSTALLATION') && li.serviceDetails?.scheduledDate).forEach(li => {
+                const d = new Date(li.serviceDetails!.scheduledDate!);
+                const sd = li.serviceDetails!;
+                const detailsParts = [sd.address, sd.siteContactName, sd.siteContactDetails].filter(Boolean);
+                const details = detailsParts.length > 0 ? detailsParts.join(' | ') : undefined;
+                const isDelivery = li.serviceType === 'DELIVERY';
+                items.push({
+                    id: li.id,
+                    date: d,
+                    type: 'LOGISTICS',
+                    title: li.description || (isDelivery ? 'משלוח' : 'התקנה'),
+                    subtitle: `${order.orderNumber} - ${order.description}`,
+                    details,
+                    colorClass: isDelivery ? 'bg-blue-100 text-blue-700 border-blue-200' : 'bg-emerald-100 text-emerald-700 border-emerald-200',
+                    icon: isDelivery ? <TruckIcon className="w-4 h-4" /> : <InstallationIcon className="w-4 h-4" />,
+                    time: d.toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' }),
+                    refId: order.id
+                });
+            });
             order.additionalServices.forEach(service => {
                 if (service.scheduledDate) {
                     items.push({
@@ -202,6 +223,7 @@ const OperationsCalendarWidget: React.FC<{
                         type: 'LOGISTICS',
                         title: service.description || 'שירות/התקנה',
                         subtitle: `${order.orderNumber} - ${order.description}`,
+                        details: [service.address, service.siteContactName, service.siteContactDetails].filter(Boolean).join(' | ') || undefined,
                         colorClass: 'bg-blue-100 text-blue-700 border-blue-200',
                         icon: <TruckIcon className="w-4 h-4" />,
                         time: new Date(service.scheduledDate).toLocaleTimeString('he-IL', {hour:'2-digit', minute:'2-digit'}),
@@ -209,7 +231,7 @@ const OperationsCalendarWidget: React.FC<{
                     });
                 }
             });
-            
+
             // Finance (Check Repayment)
             order.payments.forEach(payment => {
                 if (payment.method === PaymentMethod.CHECK && payment.repaymentDate) {
@@ -376,6 +398,7 @@ const OperationsCalendarWidget: React.FC<{
                                     {item.time && <span className="text-xs font-mono bg-white/50 px-1 rounded">{item.time}</span>}
                                 </div>
                                 {item.subtitle && <p className="text-xs text-slate-600 line-clamp-2">{item.subtitle}</p>}
+                                {item.details && <p className="text-xs text-slate-500 mt-0.5 line-clamp-2" title={item.details}>{item.details}</p>}
                             </div>
                         ))
                     )}
@@ -407,7 +430,9 @@ const StrongNumberCard: React.FC<{
     orders: Order[]; 
     statusConfigs: OrderStatusConfiguration[];
     vatRate: number;
-}> = ({ orders, statusConfigs, vatRate }) => {
+    roleType?: string;
+}> = ({ orders, statusConfigs, vatRate, roleType }) => {
+    const isEmployee = roleType === 'EMPLOYEE';
     // Helper to calculate metrics for a filtered list of orders
     const calculateMetrics = (filteredOrders: Order[]): FinancialMetric => {
         const result = filteredOrders.reduce((acc, order) => {
@@ -587,7 +612,7 @@ const StrongNumberCard: React.FC<{
 
     const formatCurrency = (val: number) => val.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 0, maximumFractionDigits: 0 });
     
-    const TimeFrameBlock = ({ title, data, colorClass, bgClass }: { title: string, data: FinancialMetric, colorClass: string, bgClass: string }) => (
+    const TimeFrameBlock = ({ title, data, colorClass, bgClass, hideProfitAndMargin }: { title: string, data: FinancialMetric, colorClass: string, bgClass: string; hideProfitAndMargin?: boolean }) => (
         <div className={`p-4 rounded-xl border border-slate-100 flex flex-col justify-between min-h-[130px] hover:shadow-md transition-all ${bgClass}`}>
             <div className="flex justify-between items-start mb-2">
                 <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider">{title}</h4>
@@ -601,16 +626,18 @@ const StrongNumberCard: React.FC<{
                 <div className="text-[10px] text-slate-400 font-medium">לא כולל מע"מ</div>
             </div>
             
-            <div className="space-y-1 pt-2 border-t border-slate-200/50">
-                <div className="flex justify-between text-xs items-center">
-                    <span className="text-slate-500">רווח:</span>
-                    <span className="font-bold text-emerald-600">{formatCurrency(data.profit)}</span>
+            {!hideProfitAndMargin && (
+                <div className="space-y-1 pt-2 border-t border-slate-200/50">
+                    <div className="flex justify-between text-xs items-center">
+                        <span className="text-slate-500">רווח:</span>
+                        <span className="font-bold text-emerald-600">{formatCurrency(data.profit)}</span>
+                    </div>
+                    <div className="flex justify-between text-xs items-center">
+                        <span className="text-slate-500">אחוז:</span>
+                        <span className="font-medium text-slate-700 bg-white px-1.5 rounded">{data.margin.toFixed(1)}%</span>
+                    </div>
                 </div>
-                <div className="flex justify-between text-xs items-center">
-                    <span className="text-slate-500">אחוז:</span>
-                    <span className="font-medium text-slate-700 bg-white px-1.5 rounded">{data.margin.toFixed(1)}%</span>
-                </div>
-            </div>
+            )}
         </div>
     );
 
@@ -631,9 +658,9 @@ const StrongNumberCard: React.FC<{
             </div>
             
             <div className="p-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-4 bg-white">
-                <TimeFrameBlock title="היום" data={stats.daily} colorClass="text-indigo-600" bgClass="bg-indigo-50/30" />
-                <TimeFrameBlock title="החודש" data={stats.monthly} colorClass="text-blue-600" bgClass="bg-blue-50/30" />
-                <TimeFrameBlock title="השנה" data={stats.yearly} colorClass="text-sky-700" bgClass="bg-sky-50/30" />
+                <TimeFrameBlock title="היום" data={stats.daily} colorClass="text-indigo-600" bgClass="bg-indigo-50/30" hideProfitAndMargin={isEmployee} />
+                <TimeFrameBlock title="החודש" data={stats.monthly} colorClass="text-blue-600" bgClass="bg-blue-50/30" hideProfitAndMargin={isEmployee} />
+                {!isEmployee && <TimeFrameBlock title="השנה" data={stats.yearly} colorClass="text-sky-700" bgClass="bg-sky-50/30" />}
 
                 {/* Collection Stats (New) */}
                 <div className="bg-rose-50/40 border border-rose-100 p-4 rounded-xl flex flex-col justify-between min-h-[130px] hover:shadow-md transition-all">
@@ -765,6 +792,37 @@ const Dashboard: React.FC<DashboardProps> = ({
     const [isGoalModalOpen, setIsGoalModalOpen] = useState(false);
     const [newGoal, setNewGoal] = useState(monthlyGoal);
     const [taskFilter, setTaskFilter] = useState<'TODAY' | 'OVERDUE' | 'FUTURE'>('TODAY');
+    const [wallPosts, setWallPosts] = useState<WallPost[]>([]);
+    const [wallInput, setWallInput] = useState('');
+    const [wallSending, setWallSending] = useState(false);
+
+    useEffect(() => {
+        let cancelled = false;
+        mongoService.getWallPosts().then(data => { if (!cancelled) setWallPosts(data); }).catch(() => {});
+        return () => { cancelled = true; };
+    }, []);
+
+    const handleSendWallPost = async () => {
+        const content = wallInput.trim();
+        if (!content || !user) return;
+        setWallSending(true);
+        try {
+            const post: WallPost = {
+                id: `wall_${Date.now()}`,
+                authorId: user.id,
+                authorName: user.name ?? 'משתמש',
+                content,
+                createdAt: new Date(),
+            };
+            const created = await mongoService.createWallPost(post);
+            setWallPosts(prev => [created, ...prev]);
+            setWallInput('');
+        } catch (e) {
+            console.error('Failed to create wall post:', e);
+        } finally {
+            setWallSending(false);
+        }
+    };
 
     // Aggregate Tasks
     const allTasks = useMemo(() => {
@@ -845,7 +903,8 @@ const Dashboard: React.FC<DashboardProps> = ({
          const deduped = Array.from(seenByOrderNumber.values());
          const orderDateStr = (o: Order) => getDateStringIsrael(o.dealStartDate || o.date);
          const monthlyDeals = deduped.filter(o => orderDateStr(o).slice(0, 7) === monthStr);
-         return monthlyDeals.reduce((sum, order) => sum + calculateOrderTotals(order).totalAmount, 0);
+         const forGoal = monthlyDeals.filter(o => !o.hiddenFromSalesGoal);
+         return forGoal.reduce((sum, order) => sum + calculateOrderTotals(order).totalAmount, 0);
     }, [orders, statusConfigs]);
 
     return (
@@ -861,7 +920,7 @@ const Dashboard: React.FC<DashboardProps> = ({
             </div>
 
             {/* Strong Numbers Row */}
-            <StrongNumberCard orders={orders} statusConfigs={statusConfigs} vatRate={vatRate} />
+            <StrongNumberCard orders={orders} statusConfigs={statusConfigs} vatRate={vatRate} roleType={user?.roleType} />
 
             {/* Bottom Section: Operations Calendar & Tasks */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -926,6 +985,71 @@ const Dashboard: React.FC<DashboardProps> = ({
                      <div className="p-3 bg-slate-50 text-xs text-center text-slate-400 border-t border-slate-100 rounded-b-lg">
                         מציג {displayedTasks.length} משימות מתוך {allTasks.length} סה"כ
                      </div>
+                </div>
+            </div>
+
+            {/* Wall - קיר צוות */}
+            <div className="max-w-3xl mx-auto bg-white rounded-xl shadow-md border border-slate-200 overflow-hidden">
+                <div className="p-4 border-b border-slate-200 flex items-center gap-2 bg-slate-50/50">
+                    <div className="bg-primary/10 p-2 rounded-lg">
+                        <NoteIcon className="w-5 h-5 text-primary" />
+                    </div>
+                    <h2 className="text-lg font-bold text-slate-800">קיר צוות</h2>
+                </div>
+                <div className="p-4 border-b border-slate-100">
+                    <div className="flex gap-2">
+                        <textarea
+                            value={wallInput}
+                            onChange={e => setWallInput(e.target.value)}
+                            placeholder="כתוב הודעה לצוות..."
+                            rows={2}
+                            className="flex-1 rounded-lg border-2 border-slate-200 bg-white py-2 px-3 text-sm focus:border-primary focus:ring-primary resize-none"
+                            dir="rtl"
+                        />
+                        <button
+                            type="button"
+                            onClick={handleSendWallPost}
+                            disabled={!wallInput.trim() || !user || wallSending}
+                            className="px-4 py-2 bg-primary text-white rounded-lg font-medium text-sm hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed shrink-0 self-end"
+                        >
+                            {wallSending ? 'שולח...' : 'שלח'}
+                        </button>
+                    </div>
+                </div>
+                <div className="min-h-[640px] max-h-[640px] overflow-y-auto p-4 space-y-3 custom-scrollbar">
+                    {wallPosts.length === 0 ? (
+                        <p className="text-center text-slate-400 text-sm py-6">אין הודעות עדיין. התחל לכתוב.</p>
+                    ) : (
+                        wallPosts.map(post => {
+                            const created = post.createdAt instanceof Date ? post.createdAt : new Date(post.createdAt);
+                            const isNew = (Date.now() - created.getTime()) < 24 * 60 * 60 * 1000;
+                            return (
+                                <div key={post.id} className="p-3 rounded-lg border border-slate-100 bg-slate-50/50 hover:bg-slate-50">
+                                    <div className="flex justify-between items-start gap-2">
+                                        <p className="text-sm text-slate-800 flex-1 whitespace-pre-wrap" dir="rtl">{post.content}</p>
+                                        {isNew && <span className="text-[10px] font-bold text-emerald-600 bg-emerald-100 px-1.5 py-0.5 rounded shrink-0">חדש</span>}
+                                    </div>
+                                    <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                                        <span className="font-medium text-slate-600">{post.authorName}</span>
+                                        <span>·</span>
+                                        <span>{created.toLocaleString('he-IL', { dateStyle: 'short', timeStyle: 'short' })}</span>
+                                        {post.orderId && post.orderNumber && (
+                                            <>
+                                                <span>·</span>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => onNavigateToOrder && onNavigateToOrder(post.orderId!)}
+                                                    className="text-primary hover:underline font-medium"
+                                                >
+                                                    הזמנה {post.orderNumber}
+                                                </button>
+                                            </>
+                                        )}
+                                    </div>
+                                </div>
+                            );
+                        })
+                    )}
                 </div>
             </div>
 

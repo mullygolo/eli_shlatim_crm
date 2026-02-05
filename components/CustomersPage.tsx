@@ -821,8 +821,8 @@ const NewCustomerForm: React.FC<{ onSave: (customer: Partial<Customer>, firstCon
                         <input type="text" name="role" value={contactData.role} onChange={handleContactChange} placeholder="לדוג': מנכ''ל, מנהל רכש" className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
                     </div>
                     <div>
-                        <label className="block text-sm font-medium text-slate-700">אימייל <span className="text-red-500">*</span></label>
-                        <input type="email" name="email" value={contactData.email} onChange={handleContactChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" required />
+                        <label className="block text-sm font-medium text-slate-700">אימייל</label>
+                        <input type="email" name="email" value={contactData.email} onChange={handleContactChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
                     </div>
                      <div>
                         <label className="block text-sm font-medium text-slate-700">טלפון</label>

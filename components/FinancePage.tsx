@@ -1459,6 +1459,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
     fixedExpenses, setFixedExpenses, variableExpenses, setVariableExpenses, loans, setLoans, debts, setDebts, receivables, setReceivables, equity, setEquity, addActivity, vatRate, orders, setOrders, employees, attendanceRecords, statusConfigs, payrollOverrides, onNavigateToOrder
 }) => {
     const [activeTab, setActiveTab] = useState<'FIXED' | 'VARIABLE' | 'LOANS' | 'DEBTS' | 'RECEIVABLES' | 'EQUITY' | 'CHECKS' | 'PNL'>('PNL');
+    const [pnlOrders, setPnlOrders] = useState<Order[] | null>(null);
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
     const [isAmortizationModalOpen, setIsAmortizationModalOpen] = useState(false);
@@ -1533,6 +1534,24 @@ const FinancePage: React.FC<FinancePageProps> = ({
     const [expandedInvestors, setExpandedInvestors] = useState<Set<string>>(new Set());
     const [expandedDebts, setExpandedDebts] = useState<Set<string>>(new Set());
     const [expandedReceivables, setExpandedReceivables] = useState<Set<string>>(new Set());
+
+    // P&L report: same order set as Orders page (getOrdersPaginated with active-deal-only, cap 15k) so הכנסות/עלות המכר match
+    useEffect(() => {
+        if (activeTab !== 'PNL' || !statusConfigs?.length) return;
+        const activeDealLabels = statusConfigs.filter(c => c.isActiveDeal).map(c => c.label);
+        const filters = {
+            orderStatusFilter: activeDealLabels.length > 0 ? activeDealLabels : undefined,
+            showCompletedOrders: true
+        };
+        mongoService.getOrdersPaginated(filters, 1, 15000)
+            .then((result: { orders: Order[] }) => {
+                setPnlOrders(result?.orders ?? []);
+            })
+            .catch((err) => {
+                console.error('Error fetching P&L report orders:', err);
+                setPnlOrders([]);
+            });
+    }, [activeTab, statusConfigs]);
 
     // Available years for Variable Expenses Filter
     const vAvailableYears = useMemo(() => {
@@ -2683,7 +2702,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
                     {activeTab === 'PNL' && (
                         <ErrorBoundary>
                             <PnLReport 
-                                orders={orders} 
+                                orders={pnlOrders ?? orders} 
                                 fixedExpenses={fixedExpenses} 
                                 variableExpenses={variableExpenses} 
                                 loans={loans} 

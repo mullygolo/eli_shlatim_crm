@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { getOrders, createOrder, updateOrder, deleteOrder, getOrdersPaginated, getSettings, getOrderById, getOrdersByParentId, getPayableItems, getPreparationStatusSuggestions } from '../services/mongoService.js';
+import { getOrders, createOrder, updateOrder, deleteOrder, getOrdersPaginated, getSettings, getOrderById, getOrdersByParentId, getPayableItems, getPreparationStatusSuggestions, getOrderLock, acquireOrderLock, releaseOrderLock } from '../services/mongoService.js';
 import { buildImportPreview, executeImport } from '../services/orderImportService.js';
 import { verifyToken, AuthRequest } from '../middleware/auth.js';
 
@@ -54,6 +54,43 @@ router.get('/preparation-status-suggestions', async (req, res) => {
     } catch (error) {
         console.error('Error fetching preparation status suggestions:', error);
         res.status(500).json({ error: 'Failed to fetch suggestions' });
+    }
+});
+
+router.get('/:id/lock', verifyToken, async (req: AuthRequest, res) => {
+    try {
+        const lock = await getOrderLock(req.params.id);
+        if (!lock) return res.json({ lockedBy: null });
+        res.json({ lockedBy: { userId: lock.userId, userName: lock.userName, lockedAt: lock.lockedAt } });
+    } catch (error) {
+        console.error('Error fetching order lock:', error);
+        res.status(500).json({ error: 'Failed to fetch lock' });
+    }
+});
+
+router.post('/:id/lock', verifyToken, async (req: AuthRequest, res) => {
+    try {
+        const orderId = req.params.id;
+        const userId = req.user?.employeeId;
+        const userName = typeof req.body?.userName === 'string' ? req.body.userName : (req.user?.username || 'משתמש');
+        if (!userId) return res.status(401).json({ error: 'לא מאומת' });
+        const result = await acquireOrderLock(orderId, userId, userName);
+        res.json(result);
+    } catch (error) {
+        console.error('Error acquiring order lock:', error);
+        res.status(500).json({ error: 'Failed to acquire lock' });
+    }
+});
+
+router.delete('/:id/lock', verifyToken, async (req: AuthRequest, res) => {
+    try {
+        const userId = req.user?.employeeId;
+        if (!userId) return res.status(401).json({ error: 'לא מאומת' });
+        await releaseOrderLock(req.params.id, userId);
+        res.status(204).send();
+    } catch (error) {
+        console.error('Error releasing order lock:', error);
+        res.status(500).json({ error: 'Failed to release lock' });
     }
 });
 

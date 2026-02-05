@@ -607,23 +607,44 @@ interface ReportsPageProps {
     vatRate: number; // Added VAT rate
 }
 
+const REPORTS_VIEW_STORAGE_KEY = 'eli_reports_view';
+
+function getReportsViewFromStorage(): Partial<{
+    viewMode: 'forecast' | 'purchase_history' | 'payment_log';
+    supplierFilterId: string;
+    dateStart: string;
+    dateEnd: string;
+    showPaid: boolean;
+    currentPage: number;
+    pageSize: number;
+}> {
+    try {
+        const s = sessionStorage.getItem(REPORTS_VIEW_STORAGE_KEY);
+        if (s) return JSON.parse(s);
+    } catch (_) {}
+    return {};
+}
+
+function defaultDateStart(): string {
+    const d = new Date();
+    d.setMonth(d.getMonth() - 3);
+    return d.toISOString().split('T')[0];
+}
+
 const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigateToOrder, setOrders, statusConfigs, vatRate }) => {
     const { user } = useAuth();
     const isEmployee = user?.roleType === 'EMPLOYEE';
-    
+
+    const savedView = useRef(getReportsViewFromStorage()).current;
+
     // --- State ---
-    const [viewMode, setViewMode] = useState<'forecast' | 'purchase_history' | 'payment_log'>('forecast');
-    
+    const [viewMode, setViewMode] = useState<'forecast' | 'purchase_history' | 'payment_log'>(() => (savedView.viewMode === 'forecast' || savedView.viewMode === 'purchase_history' || savedView.viewMode === 'payment_log') ? savedView.viewMode : 'forecast');
+
     // Filters
-    const [supplierFilterId, setSupplierFilterId] = useState<string>('all');
-    // Default start date: 3 months ago to show recent history + future
-    const [dateStart, setDateStart] = useState<string>(() => {
-        const d = new Date();
-        d.setMonth(d.getMonth() - 3);
-        return d.toISOString().split('T')[0];
-    });
-    const [dateEnd, setDateEnd] = useState<string>(''); // Open ended by default
-    const [showPaid, setShowPaid] = useState(false);
+    const [supplierFilterId, setSupplierFilterId] = useState<string>(() => savedView.supplierFilterId ?? 'all');
+    const [dateStart, setDateStart] = useState<string>(() => savedView.dateStart ?? defaultDateStart());
+    const [dateEnd, setDateEnd] = useState<string>(() => savedView.dateEnd ?? '');
+    const [showPaid, setShowPaid] = useState(() => savedView.showPaid ?? false);
 
     // Expansion
     const [expandedMonths, setExpandedMonths] = useState<Set<string>>(new Set());
@@ -652,9 +673,24 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
         thisMonthDue: 0,
         unassignedCount: 0
     });
-    const [currentPage, setCurrentPage] = useState(1);
-    const [pageSize, setPageSize] = useState(50); // Default page size
+    const [currentPage, setCurrentPage] = useState(() => typeof savedView.currentPage === 'number' && savedView.currentPage >= 1 ? savedView.currentPage : 1);
+    const [pageSize, setPageSize] = useState(() => typeof savedView.pageSize === 'number' && savedView.pageSize >= 1 ? savedView.pageSize : 50);
     const [totalCount, setTotalCount] = useState(0);
+
+    // Persist filters/view to sessionStorage so they survive navigation between pages
+    useEffect(() => {
+        try {
+            sessionStorage.setItem(REPORTS_VIEW_STORAGE_KEY, JSON.stringify({
+                viewMode,
+                supplierFilterId,
+                dateStart,
+                dateEnd,
+                showPaid,
+                currentPage,
+                pageSize,
+            }));
+        } catch (_) {}
+    }, [viewMode, supplierFilterId, dateStart, dateEnd, showPaid, currentPage, pageSize]);
     
     // Refetch function to reload payable items after payment updates or filter changes
     const refetchPayables = async () => {

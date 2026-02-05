@@ -1,7 +1,57 @@
-
 import React, { useMemo } from 'react';
 import { Employee, AttendanceRecord } from '../types';
 import { useAuth } from '../contexts/AuthContext';
+
+function formatHeaderDate(date: Date) {
+    const weekday = new Intl.DateTimeFormat('he-IL', { weekday: 'long' }).format(date);
+    const gregorian = new Intl.DateTimeFormat('he-IL', { day: 'numeric', month: 'long', year: 'numeric' }).format(date);
+    let hebrewDate: string;
+    try {
+        const parts = new Intl.DateTimeFormat('he-IL-u-ca-hebrew', { day: 'numeric', month: 'long', year: 'numeric' }).formatToParts(date);
+        const dayStr = parts.find(p => p.type === 'day')?.value ?? '';
+        const month = parts.find(p => p.type === 'month')?.value ?? '';
+        const yearPart = parts.find(p => p.type === 'year')?.value ?? '';
+        const yearNum = parseInt(yearPart, 10);
+        let hebrewYear = yearNum >= 5000 ? toHebrewYear(yearNum - 5000) : yearPart;
+        if (hebrewYear.length > 1) hebrewYear = hebrewYear.slice(0, -1) + '\u05F3' + hebrewYear.slice(-1);
+        const dayNum = parseInt(dayStr, 10);
+        const dayHebrew = !isNaN(dayNum) ? toHebrewDay(dayNum) : dayStr;
+        hebrewDate = month ? `${dayHebrew} ב${month} ${hebrewYear}` : `${dayHebrew} ${hebrewYear}`;
+    } catch {
+        hebrewDate = '';
+    }
+    return { weekday, gregorian, hebrewDate };
+}
+
+// 
+const __unused = 'אבגדהוזחטיכסעפצקרשת';
+const GERESH = '\u05F3';
+const HEBREW_NUM: Record<number, string> = { 1: 'א', 2: 'ב', 3: 'ג', 4: 'ד', 5: 'ה', 6: 'ו', 7: 'ז', 8: 'ח', 9: 'ט', 10: 'י', 20: 'כ', 30: 'ל', 40: 'מ', 50: 'נ', 60: 'ס', 70: 'ע', 80: 'פ', 90: 'צ', 100: 'ק', 200: 'ר', 300: 'ש', 400: 'ת' };
+
+/** יום בחודש (1–30) לאותיות עבריות עם גרש, למשל 18 → י"ח */
+function toHebrewDay(day: number): string {
+    if (day < 1 || day > 30) return String(day);
+    if (day <= 9) return HEBREW_NUM[day] ?? '';
+    if (day === 10) return 'י';
+    if (day <= 19) {
+        if (day === 15) return 'ט"ו';
+        if (day === 16) return 'ט"ז';
+        return 'י' + GERESH + (HEBREW_NUM[day - 10] ?? '');
+    }
+    if (day === 20) return 'כ';
+    if (day <= 29) return 'כ' + GERESH + (HEBREW_NUM[day - 20] ?? '');
+    return 'ל';
+}
+
+function toHebrewYear(n: number): string {
+    if (n <= 0) return '';
+    if (n < 10) return HEBREW_NUM[n] ?? '';
+    if (n < 100) return (HEBREW_NUM[Math.floor(n / 10) * 10] ?? '') + (n % 10 ? HEBREW_NUM[n % 10] : '');
+    const hundreds = Math.floor(n / 100) * 100;
+    const rest = n % 100;
+    const h = hundreds === 500 ? 'תק' : hundreds === 600 ? 'תר' : hundreds === 700 ? 'תש' : hundreds === 800 ? 'תת' : hundreds === 900 ? 'תתק' : HEBREW_NUM[hundreds];
+    return (h ?? '') + toHebrewYear(rest);
+}
 
 interface HeaderProps {
     title: string;
@@ -63,12 +113,27 @@ const Header: React.FC<HeaderProps> = ({ title, employees = [], attendanceRecord
         }
     };
 
+    const dateDisplay = formatHeaderDate(new Date());
+
     return (
         <header className="h-20 flex items-center justify-between px-8 bg-white border-b border-slate-200">
-            <h1 className="text-2xl font-semibold text-slate-800">{title}</h1>
-            
+            <div className="flex items-center gap-5 min-w-0">
+                <h1 className="text-2xl font-semibold text-slate-800 truncate">{title}</h1>
+                <div className="hidden sm:flex items-center gap-3 shrink-0 py-2 px-4 rounded-xl bg-slate-50/90 border border-slate-100">
+                    <span className="font-bold text-slate-700 text-sm">{dateDisplay.weekday}</span>
+                    <span className="text-slate-300" aria-hidden>·</span>
+                    <span className="text-sm text-slate-600">{dateDisplay.gregorian}</span>
+                    {dateDisplay.hebrewDate && (
+                        <>
+                            <span className="text-slate-300" aria-hidden>·</span>
+                            <span className="text-sm text-slate-600" dir="rtl">{dateDisplay.hebrewDate}</span>
+                        </>
+                    )}
+                </div>
+            </div>
+
             <div className="flex items-center gap-4">
-            {/* Add Order widget - prominent, widget-style */}
+            {/* Order: הוסף הזמנה → מחוברים כעת → מחובר כ: → התנתק */}
             {showAddOrderWidget && onAddOrder && (
                 <button
                     type="button"
@@ -82,26 +147,7 @@ const Header: React.FC<HeaderProps> = ({ title, employees = [], attendanceRecord
                     הוסף הזמנה
                 </button>
             )}
-            {/* User Info & Logout */}
-            {user && (
-                <div className="flex items-center gap-3">
-                    <div className="text-right">
-                        <p className="text-xs text-slate-500 font-bold">מחובר כ:</p>
-                        <p className="text-sm font-bold text-slate-800">{user.name}</p>
-                    </div>
-                    <button
-                        onClick={handleLogout}
-                        className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-sm font-bold transition-colors flex items-center gap-2"
-                    >
-                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
-                        </svg>
-                        התנתק
-                    </button>
-                </div>
-            )}
-            
-            {/* Active Employees Widget */}
+            {/* מחוברים כעת */}
             {activeEmployees.length > 0 && (
                 <div className="relative group">
                     <div className="flex items-center gap-3 bg-slate-50 px-4 py-2 rounded-full border border-slate-200 shadow-sm cursor-help">
@@ -140,6 +186,24 @@ const Header: React.FC<HeaderProps> = ({ title, employees = [], attendanceRecord
                         </div>
                     </div>
                 </div>
+            )}
+            {user && (
+                <div className="text-right">
+                    <p className="text-xs text-slate-500 font-bold">מחובר כ:</p>
+                    <p className="text-sm font-bold text-slate-800">{user.name}</p>
+                </div>
+            )}
+            {/* התנתק */}
+            {user && (
+                <button
+                    onClick={handleLogout}
+                    className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-sm font-bold transition-colors flex items-center gap-2"
+                >
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                    </svg>
+                    התנתק
+                </button>
             )}
             </div>
         </header>

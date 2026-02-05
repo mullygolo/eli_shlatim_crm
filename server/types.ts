@@ -1,5 +1,27 @@
 
-export type Page = 'Dashboard' | 'Orders' | 'Customers' | 'Suppliers' | 'Employees' | 'Deals' | 'Transactions' | 'Timesheets' | 'Quotes' | 'Reports' | 'Settings' | 'Finance' | 'Attendance' | 'CallCenter';
+export type Page = 'Dashboard' | 'Orders' | 'Customers' | 'Suppliers' | 'Employees' | 'Deals' | 'Transactions' | 'Timesheets' | 'Quotes' | 'Reports' | 'Settings' | 'Finance' | 'Attendance' | 'CallCenter' | 'ImprovementSuggestions';
+
+export type ImprovementSuggestionType = 'BUG' | 'IMPROVEMENT' | 'OTHER';
+export type ImprovementSuggestionStatus = 'NEW' | 'IN_PROGRESS' | 'DONE';
+export type ImprovementSuggestionPriority = 'LOW' | 'MEDIUM' | 'HIGH';
+
+export interface ImprovementSuggestion {
+    id: string;
+    type: ImprovementSuggestionType;
+    title: string;
+    description: string;
+    pageContext?: string;
+    priority?: ImprovementSuggestionPriority;
+    status: ImprovementSuggestionStatus;
+    attachments?: Attachment[];
+    authorId: string;
+    authorName: string;
+    createdAt: Date;
+    updatedAt?: Date;
+    adminComment?: string;
+    voteCount: number;
+    votedBy?: string[];
+}
 
 export enum PaymentMethod {
     BANK_TRANSFER = 'העברה בנקאית',
@@ -130,6 +152,14 @@ export interface LineItem {
     variantId?: string; // Selected variant ID from price list
     notes?: string; // General notes
     preparationStatus?: string; // Free-text preparation status per item
+    serviceType?: 'DELIVERY' | 'INSTALLATION'; // For delivery/installation line items
+    serviceDetails?: {
+        scheduledDate?: Date;
+        address?: string;
+        siteContactName?: string;
+        siteContactDetails?: string;
+        notes?: string;
+    };
 }
 
 export interface AdditionalService {
@@ -264,6 +294,8 @@ export interface Order {
     greenInvoiceReceiptId?: string; // ID of receipt in GreenInvoice
     greenInvoiceCreditId?: string; // ID of credit invoice in GreenInvoice
     greenInvoiceEstimateId?: string; // ID of estimate in GreenInvoice
+    /** When true, this order is excluded from the Dashboard monthly sales goal widget (admin only) */
+    hiddenFromSalesGoal?: boolean;
 }
 
 /** שיוך מסמך חשבונית ירוקה להזמנה — טבלת קישור many-to-many */
@@ -560,6 +592,17 @@ export interface ManualEvent {
     description?: string;
     date: Date;
     time?: string;
+}
+
+export interface WallPost {
+    id: string;
+    authorId: string;
+    authorName: string;
+    content: string;
+    createdAt: Date;
+    orderId?: string;
+    orderNumber?: string;
+    timelineEventId?: string;
 }
 
 export interface CallLog {

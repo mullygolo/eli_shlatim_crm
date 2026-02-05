@@ -2,11 +2,11 @@ import { MongoClient, Db } from 'mongodb';
 import {
     Customer, Order, Supplier, Employee, Activity, ActivityFilters, ActivitiesResult, OrderStatusConfiguration,
     FixedExpense, VariableExpense, Loan, Debt, Receivable, EquityInvestment,
-    AttendanceRecord, ManualEvent, CallLog, EmployeeStatus, EmployeeRole,
+    AttendanceRecord, ManualEvent, WallPost, CallLog, EmployeeStatus, EmployeeRole,
     PriceListProduct, SalesHistoryEntry, AdHocProduct,
     LineItem, AdditionalService, SupplierPayment, TransactionStatus,
     PaymentMethod, CustomerPayment, ReceivablePayment, DebtPayment,
-    OrderDocumentLink
+    OrderDocumentLink, ImprovementSuggestion, ImprovementSuggestionStatus, ImprovementSuggestionType
 } from '../types.js';
 import { hashPassword } from '../utils/password.js';
 import { getTodayRangeIsrael, getDateStringIsrael, getMonthRangeIsrael, getDayRangeIsrael } from '../utils/timezone.js';
@@ -25,6 +25,11 @@ const ORDERS_INITIAL_LOAD_LIMIT = typeof process.env.ORDERS_INITIAL_LOAD_LIMIT !
 const CUSTOMERS_INITIAL_LOAD_LIMIT = typeof process.env.CUSTOMERS_INITIAL_LOAD_LIMIT !== 'undefined'
     ? Math.max(500, parseInt(process.env.CUSTOMERS_INITIAL_LOAD_LIMIT, 10) || 3000)
     : 3000;
+
+/** Max orders loaded in getOrdersPaginated (before dedup/sort/paginate) to keep response time bounded. */
+const ORDERS_PAGINATED_LOAD_LIMIT = typeof process.env.ORDERS_PAGINATED_LOAD_LIMIT !== 'undefined'
+    ? Math.max(2000, parseInt(process.env.ORDERS_PAGINATED_LOAD_LIMIT, 10) || 15000)
+    : 15000;
 
 // Connection cache
 let client: MongoClient | null = null;
@@ -484,229 +489,264 @@ export async function getOrderDocumentLinksByDocumentIds(documentIds: string[]):
     }
 }
 
+/** Stream all matching orders and compute summary totals (no limit). Used when paginated fetch hit the cap so totals match Reports. */
+async function streamOrdersSummaryTotals(
+    collection: any,
+    query: any,
+    dateFieldForSort: string,
+    dateFilterType: string,
+    filters: any,
+    statusConfigs: OrderStatusConfiguration[],
+    vatRate: number
+): Promise<{ totalAmount: number; totalProfit: number; totalBalance: number; totalCost: number; totalAmountInclVat: number; totalBalanceInclVat: number }> {
+    const dateKeyForDedup = dateFilterType === 'DEAL_DATE' ? 'dealStartDate' : 'date';
+    const isCollectionMode = filters.isCollectionMode === true || filters.sortBy === 'dueDate';
+    const isCollectionCenterView = filters.collectionCenterView === true;
+    const summaryTotals = {
+        totalAmount: 0,
+        totalProfit: 0,
+        totalBalance: 0,
+        totalCost: 0,
+        totalAmountInclVat: 0,
+        totalBalanceInclVat: 0
+    };
+    const seenByOrderNumber = new Set<string>();
+
+    const cursor = collection.find(query).sort({ [dateFieldForSort]: -1 });
+    for await (const doc of cursor) {
+        const order = deserializeDates(doc) as Order;
+        if (isCollectionMode && !isCollectionCenterView) {
+            const config = statusConfigs.find(c => c.label === order.orderStatus);
+            if (!config || !config.isActiveDeal) continue;
+        }
+        if (filters.customerFilter && filters.customerFilter.length > 0) {
+            if (!order.customerId || !filters.customerFilter.includes(order.customerId)) continue;
+        }
+        if (!filters.showCompletedOrders && !isCollectionMode && !isCollectionCenterView) {
+            const config = statusConfigs.find(c => c.label === order.orderStatus);
+            if (config?.isCompleted) continue;
+        }
+        const raw = (order.orderNumber != null && order.orderNumber !== '') ? String(order.orderNumber).trim() : '';
+        const key = raw !== '' ? raw.toUpperCase() : (order.id || '');
+        if (!key) continue;
+        if (seenByOrderNumber.has(key)) continue;
+        seenByOrderNumber.add(key);
+
+        const { totalAmount, profit, totalCost, totalPaid } = calculateOrderTotals(order);
+        const currentOrderVat = order.vatRate ?? vatRate;
+        summaryTotals.totalAmount += totalAmount;
+        summaryTotals.totalProfit += profit;
+        summaryTotals.totalCost += totalCost;
+        summaryTotals.totalAmountInclVat += totalAmount * (1 + currentOrderVat / 100);
+        const statusConfig = statusConfigs.find(c => c.label === order.orderStatus);
+        const isActiveDeal = statusConfig ? statusConfig.isActiveDeal : true;
+        if (isActiveDeal) {
+            const dueWithVat = totalAmount * (1 + currentOrderVat / 100);
+            summaryTotals.totalBalance += Math.max(0, totalAmount - totalPaid);
+            summaryTotals.totalBalanceInclVat += Math.max(0, dueWithVat - totalPaid);
+        }
+    }
+    return summaryTotals;
+}
+
+/** Build MongoDB query for orders (shared by getOrdersPaginated and getPayableItems so both use same order set). */
+function buildOrdersQuery(filters: any, customers: Customer[]): { query: any; dateFieldForSort: string; dateFilterType: string } {
+    const query: any = {};
+    const sortBy = filters.sortBy === 'dueDate' || filters.sortBy === 'updatedAt' ? filters.sortBy : 'date';
+    const isCollectionMode = filters.isCollectionMode === true || sortBy === 'dueDate';
+    const isCollectionCenterView = filters.collectionCenterView === true;
+    if (isCollectionMode || isCollectionCenterView) {
+        query.paymentStatus = { $ne: 'שולם' };
+    }
+    if (!isCollectionMode && filters.paymentStatusFilter && filters.paymentStatusFilter.length > 0) {
+        query.paymentStatus = { $in: filters.paymentStatusFilter };
+    }
+    if (filters.orderStatusFilter && filters.orderStatusFilter.length > 0) {
+        query.orderStatus = { $in: filters.orderStatusFilter };
+    }
+    if (filters.customerFilter && filters.customerFilter.length > 0) {
+        query.customerId = { $in: filters.customerFilter };
+    }
+    if (filters.customerIsImportPlaceholderOnly === true) {
+        const placeholderCustomerIds = customers
+            .filter((c: Customer) => c.isImportPlaceholder === true)
+            .map((c: Customer) => c.id);
+        query.customerId = placeholderCustomerIds.length > 0 ? { $in: placeholderCustomerIds } : { $in: [] };
+    }
+    if (filters.employeeFilter && filters.employeeFilter.length > 0) {
+        query.employeeId = { $in: filters.employeeFilter };
+    }
+    if (filters.supplierFilter && filters.supplierFilter.length > 0) {
+        query.$or = [
+            { supplierId: { $in: filters.supplierFilter } },
+            { 'lineItems.supplierId': { $in: filters.supplierFilter } },
+            { 'additionalServices.supplierId': { $in: filters.supplierFilter } }
+        ];
+    }
+    const dateFilterType = filters.dateFilterType || 'ORDER_DATE';
+    const dateField = dateFilterType === 'DEAL_DATE' ? 'dealStartDate' : 'date';
+    const isoDateOnly = /^\d{4}-\d{2}-\d{2}$/;
+    const rawStart = filters.startDateFilter != null ? String(filters.startDateFilter).trim() : '';
+    const rawEnd = filters.endDateFilter != null ? String(filters.endDateFilter).trim() : '';
+    const startDateStr = rawStart && isoDateOnly.test(rawStart) ? rawStart : '';
+    const endDateStr = rawEnd && isoDateOnly.test(rawEnd) ? rawEnd : '';
+    if (startDateStr || endDateStr) {
+        if (startDateStr) {
+            const { start } = getDayRangeIsrael(startDateStr);
+            query[dateField] = query[dateField] || {};
+            query[dateField].$gte = start.toISOString();
+        }
+        if (endDateStr) {
+            const { end } = getDayRangeIsrael(endDateStr);
+            query[dateField] = query[dateField] || {};
+            query[dateField].$lte = end.toISOString();
+        }
+    } else if (filters.monthFilter && filters.monthFilter !== 'all') {
+        const month = parseInt(filters.monthFilter, 10);
+        const year = filters.yearFilter && filters.yearFilter !== 'all' ? parseInt(filters.yearFilter, 10) : new Date().getFullYear();
+        if (!isNaN(month) && month >= 1 && month <= 12 && !isNaN(year)) {
+            const { start: startDate, end: endDate } = getMonthRangeIsrael(year, month);
+            query[dateField] = { $gte: startDate.toISOString(), $lte: endDate.toISOString() };
+        }
+    } else if (filters.yearFilter && filters.yearFilter !== 'all') {
+        const year = parseInt(filters.yearFilter);
+        const startDate = new Date(year, 0, 1);
+        const endDate = new Date(year, 11, 31, 23, 59, 59, 999);
+        query[dateField] = { $gte: startDate.toISOString(), $lte: endDate.toISOString() };
+    }
+    if (filters.searchTerm) {
+        const lowercasedTerm = filters.searchTerm.toLowerCase();
+        const searchConditions: any[] = [
+            { orderNumber: { $regex: lowercasedTerm, $options: 'i' } },
+            { description: { $regex: lowercasedTerm, $options: 'i' } }
+        ];
+        const matchingCustomerIds = customers
+            .filter(c => c.name.toLowerCase().includes(lowercasedTerm))
+            .map(c => c.id);
+        if (matchingCustomerIds.length > 0) searchConditions.push({ customerId: { $in: matchingCustomerIds } });
+        if (lowercasedTerm.includes('שירות') || lowercasedTerm.includes('תיקון') || lowercasedTerm.includes('service')) {
+            searchConditions.push({ type: 'קריאת שירות' });
+        }
+        query.$and = query.$and || [];
+        query.$and.push({ $or: searchConditions });
+    }
+    const dateFieldForSort = dateFilterType === 'DEAL_DATE' ? 'dealStartDate' : 'date';
+    return { query, dateFieldForSort, dateFilterType };
+}
+
+/** Post-filter and dedupe orders (shared logic so Orders page and Payables report use same set). */
+function postFilterAndDedupeOrders(
+    allMatchingOrders: Order[],
+    allMatchingDocs: any[],
+    filters: any,
+    statusConfigs: OrderStatusConfiguration[],
+    dateFilterType: string
+): Order[] {
+    const sortBy = filters.sortBy === 'dueDate' || filters.sortBy === 'updatedAt' ? filters.sortBy : 'date';
+    const isCollectionMode = filters.isCollectionMode === true || sortBy === 'dueDate';
+    const isCollectionCenterView = filters.collectionCenterView === true;
+    let orders = allMatchingOrders;
+    if (isCollectionMode && !isCollectionCenterView) {
+        orders = orders.filter(order => {
+            const config = statusConfigs.find(c => c.label === order.orderStatus);
+            return config ? config.isActiveDeal : false;
+        });
+    }
+    if (filters.customerFilter && filters.customerFilter.length > 0) {
+        const allowedIds = new Set(filters.customerFilter);
+        orders = orders.filter(o => o.customerId && allowedIds.has(o.customerId));
+    }
+    if (!filters.showCompletedOrders && !isCollectionMode && !isCollectionCenterView) {
+        orders = orders.filter(order => {
+            const config = statusConfigs.find(c => c.label === order.orderStatus);
+            return !config?.isCompleted;
+        });
+    }
+    if (filters.searchTerm && filters.searchTerm.trim()) {
+        const lowercasedTerm = filters.searchTerm.toLowerCase();
+        const parentOrderNumbers = new Set<string>();
+        orders.forEach(order => {
+            if (order.parentOrderId) {
+                const parentDoc = allMatchingDocs.find((d: any) => d.id === order.parentOrderId);
+                if (parentDoc && parentDoc.orderNumber?.toLowerCase().includes(lowercasedTerm)) {
+                    parentOrderNumbers.add(order.id);
+                }
+            }
+        });
+        orders = orders.filter(order => parentOrderNumbers.has(order.id) || true);
+    }
+    const dateKeyForDedup = dateFilterType === 'DEAL_DATE' ? 'dealStartDate' : 'date';
+    const seenByOrderNumber = new Map<string, Order>();
+    for (const order of orders) {
+        const raw = (order.orderNumber != null && order.orderNumber !== '') ? String(order.orderNumber).trim() : '';
+        const key = raw !== '' ? raw.toUpperCase() : (order.id || '');
+        if (!key) continue;
+        const existing = seenByOrderNumber.get(key);
+        if (!existing) {
+            seenByOrderNumber.set(key, order);
+        } else {
+            const dNew = order[dateKeyForDedup] ? new Date(order[dateKeyForDedup]!).getTime() : 0;
+            const dOld = existing[dateKeyForDedup] ? new Date(existing[dateKeyForDedup]!).getTime() : 0;
+            if (dNew >= dOld) seenByOrderNumber.set(key, order);
+        }
+    }
+    return Array.from(seenByOrderNumber.values());
+}
+
+/** Get the same filtered order set used by Orders page and Payables report (single source of truth). */
+async function getFilteredOrderSet(
+    collection: any,
+    filters: any,
+    statusConfigs: OrderStatusConfiguration[],
+    customers: Customer[]
+): Promise<{ orders: Order[]; allMatchingDocs: any[] }> {
+    const { query, dateFieldForSort, dateFilterType } = buildOrdersQuery(filters, customers);
+    const allMatchingDocs = await collection
+        .find(query)
+        .sort({ [dateFieldForSort]: -1 })
+        .limit(ORDERS_PAGINATED_LOAD_LIMIT)
+        .toArray();
+    const allMatchingOrders = allMatchingDocs.map(deserializeDates) as Order[];
+    const orders = postFilterAndDedupeOrders(allMatchingOrders, allMatchingDocs, filters, statusConfigs, dateFilterType);
+    return { orders, allMatchingDocs };
+}
+
 // Get orders with server-side filtering and pagination (IMPROVED VERSION)
 export async function getOrdersPaginated(filters: any, page: number = 1, limit: number = 50, vatRate: number = 0): Promise<any> {
     try {
         const database = await getDb();
         const collection = database.collection<Order>('orders');
-        
-        // Load statusConfigs and customers for filtering
-        const [statusConfigs, customers] = await Promise.all([
-            getStatusConfigs(),
-            getCustomers()
-        ]);
-        
-        // Build MongoDB query from filters
-        const query: any = {};
-        
-        // Sort mode: 'date' | 'dueDate' | 'updatedAt'. dueDate = same filter as legacy "collection mode"
+        const [statusConfigs, customers] = await Promise.all([getStatusConfigs(), getCustomers()]);
+
         const sortBy = filters.sortBy === 'dueDate' || filters.sortBy === 'updatedAt' ? filters.sortBy : 'date';
-        const isCollectionMode = filters.isCollectionMode === true || sortBy === 'dueDate';
-        const isCollectionCenterView = filters.collectionCenterView === true;
-        if (isCollectionMode || isCollectionCenterView) {
-            query.paymentStatus = { $ne: 'שולם' };
-            // isCollectionMode: we'll filter by isActiveDeal after fetching
-            // collectionCenterView: show ALL unpaid orders for the customer (no isActiveDeal filter)
-        }
-        
-        // Payment status filter (only if not in collection mode)
-        if (!isCollectionMode && filters.paymentStatusFilter && filters.paymentStatusFilter.length > 0) {
-            query.paymentStatus = { $in: filters.paymentStatusFilter };
-        }
-        
-        // Order status filter
-        if (filters.orderStatusFilter && filters.orderStatusFilter.length > 0) {
-            query.orderStatus = { $in: filters.orderStatusFilter };
-        }
-        
-        // Customer filter
-        if (filters.customerFilter && filters.customerFilter.length > 0) {
-            query.customerId = { $in: filters.customerFilter };
-        }
-        
-        // Only orders whose customer is import placeholder (לא תואם לחשבונית ירוקה)
-        if (filters.customerIsImportPlaceholderOnly === true) {
-            const placeholderCustomerIds = customers
-                .filter((c: Customer) => c.isImportPlaceholder === true)
-                .map((c: Customer) => c.id);
-            query.customerId = placeholderCustomerIds.length > 0 ? { $in: placeholderCustomerIds } : { $in: [] };
-        }
-        
-        // Employee filter
-        if (filters.employeeFilter && filters.employeeFilter.length > 0) {
-            query.employeeId = { $in: filters.employeeFilter };
-        }
-        
-        // Supplier filter (check in lineItems and additionalServices)
-        if (filters.supplierFilter && filters.supplierFilter.length > 0) {
-            query.$or = [
-                { supplierId: { $in: filters.supplierFilter } },
-                { 'lineItems.supplierId': { $in: filters.supplierFilter } },
-                { 'additionalServices.supplierId': { $in: filters.supplierFilter } }
-            ];
-        }
-        
-        // Date filters (client sends YYYY-MM-DD from type="date" inputs; reject "undefined" or invalid)
+        const { orders: allMatchingOrders, allMatchingDocs } = await getFilteredOrderSet(collection, filters, statusConfigs, customers);
         const dateFilterType = filters.dateFilterType || 'ORDER_DATE';
-        const dateField = dateFilterType === 'DEAL_DATE' ? 'dealStartDate' : 'date';
-        const isoDateOnly = /^\d{4}-\d{2}-\d{2}$/;
-        const rawStart = filters.startDateFilter != null ? String(filters.startDateFilter).trim() : '';
-        const rawEnd = filters.endDateFilter != null ? String(filters.endDateFilter).trim() : '';
-        const startDateStr = rawStart && isoDateOnly.test(rawStart) ? rawStart : '';
-        const endDateStr = rawEnd && isoDateOnly.test(rawEnd) ? rawEnd : '';
-        if (startDateStr || endDateStr) {
-            // Use Israel timezone for day boundaries; store query as ISO strings so MongoDB matches orders whose date/dealStartDate is stored as string (serializeDates on save)
-            if (startDateStr) {
-                const { start } = getDayRangeIsrael(startDateStr);
-                query[dateField] = query[dateField] || {};
-                query[dateField].$gte = start.toISOString();
-            }
-            if (endDateStr) {
-                const { end } = getDayRangeIsrael(endDateStr);
-                query[dateField] = query[dateField] || {};
-                query[dateField].$lte = end.toISOString();
-            }
-        } else if (filters.monthFilter && filters.monthFilter !== 'all') {
-            // Month/Year filter (Israel timezone); use ISO strings so MongoDB matches orders whose date is stored as string (serializeDates)
-            const month = parseInt(filters.monthFilter, 10);
-            const year = filters.yearFilter && filters.yearFilter !== 'all' ? parseInt(filters.yearFilter, 10) : new Date().getFullYear();
-            if (!isNaN(month) && month >= 1 && month <= 12 && !isNaN(year)) {
-                const { start: startDate, end: endDate } = getMonthRangeIsrael(year, month);
-                query[dateField] = { $gte: startDate.toISOString(), $lte: endDate.toISOString() };
-            }
-        } else if (filters.yearFilter && filters.yearFilter !== 'all') {
-            // Year filter only; use ISO strings to match string-stored dates
-            const year = parseInt(filters.yearFilter);
-            const startDate = new Date(year, 0, 1);
-            const endDate = new Date(year, 11, 31, 23, 59, 59, 999);
-            query[dateField] = { $gte: startDate.toISOString(), $lte: endDate.toISOString() };
-        }
-        
-        // Search term (orderNumber, description, customer name, parent order)
-        if (filters.searchTerm) {
-            const lowercasedTerm = filters.searchTerm.toLowerCase();
-            const searchConditions: any[] = [
-                { orderNumber: { $regex: lowercasedTerm, $options: 'i' } },
-                { description: { $regex: lowercasedTerm, $options: 'i' } }
-            ];
-            
-            // Search by customer name
-            const matchingCustomerIds = customers
-                .filter(c => c.name.toLowerCase().includes(lowercasedTerm))
-                .map(c => c.id);
-            if (matchingCustomerIds.length > 0) {
-                searchConditions.push({ customerId: { $in: matchingCustomerIds } });
-            }
-            
-            // Search by parent order (service calls)
-            if (lowercasedTerm.includes('שירות') || lowercasedTerm.includes('תיקון') || lowercasedTerm.includes('service')) {
-                searchConditions.push({ type: 'קריאת שירות' });
-            }
-            
-            query.$and = query.$and || [];
-            query.$and.push({ $or: searchConditions });
-            
-            // Parent order search (requires loading parent orders - simplified for now)
-            // This is a bit complex, so we'll do it post-query for now
-        }
-        
-        // Fetch all orders matching the query (for filtering and summary calculation)
-        let allMatchingDocs = await collection.find(query).toArray();
-        let allMatchingOrders = allMatchingDocs.map(deserializeDates) as Order[];
+        const dateFieldForSort = dateFilterType === 'DEAL_DATE' ? 'dealStartDate' : 'date';
 
-        // Apply post-query filters that require statusConfigs or other complex logic
-        // Collection center view: show all unpaid for customer; collection mode (e.g. Reports): only active deals
-        if (isCollectionMode && !isCollectionCenterView) {
-            allMatchingOrders = allMatchingOrders.filter(order => {
-                const config = statusConfigs.find(c => c.label === order.orderStatus);
-                const isActive = config ? config.isActiveDeal : false;
-                return isActive;
-            });
-        }
-        // Defensive: when customerFilter is set, ensure only that customer's orders are returned
-        if (filters.customerFilter && filters.customerFilter.length > 0) {
-            const allowedIds = new Set(filters.customerFilter);
-            allMatchingOrders = allMatchingOrders.filter(o => o.customerId && allowedIds.has(o.customerId));
-        }
-        
-        // Hide completed-by-status orders only when not in collection center (there we show all unpaid for customer)
-        const beforeShowCompleted = allMatchingOrders.length;
-        if (!filters.showCompletedOrders && !isCollectionMode && !isCollectionCenterView) {
-            allMatchingOrders = allMatchingOrders.filter(order => {
-                const config = statusConfigs.find(c => c.label === order.orderStatus);
-                return !config?.isCompleted;
-            });
-        }
-
-        // Filter by parent order search term (if applicable)
-        if (filters.searchTerm && filters.searchTerm.trim()) {
-            const lowercasedTerm = filters.searchTerm.toLowerCase();
-            // We need to check parent orders - for simplicity, we'll load parent orders here
-            const parentOrderNumbers = new Set<string>();
-            allMatchingOrders.forEach(order => {
-                if (order.parentOrderId) {
-                    // Find parent order
-                    const parentDoc = allMatchingDocs.find((d: any) => d.id === order.parentOrderId);
-                    if (parentDoc && parentDoc.orderNumber?.toLowerCase().includes(lowercasedTerm)) {
-                        parentOrderNumbers.add(order.id);
-                    }
+        // Calculate summary totals: when we hit the load limit, stream ALL matching orders so totals match "תשלום לספקים"
+        let summaryTotals: { totalAmount: number; totalProfit: number; totalBalance: number; totalCost: number; totalAmountInclVat: number; totalBalanceInclVat: number };
+        if (allMatchingDocs.length >= ORDERS_PAGINATED_LOAD_LIMIT && !filters.searchTerm) {
+            const { query } = buildOrdersQuery(filters, customers);
+            summaryTotals = await streamOrdersSummaryTotals(collection, query, dateFieldForSort, dateFilterType, filters, statusConfigs, vatRate);
+        } else {
+            summaryTotals = allMatchingOrders.reduce((acc, order) => {
+                const { totalAmount, profit, totalCost, totalPaid } = calculateOrderTotals(order);
+                const currentOrderVat = order.vatRate ?? vatRate;
+                acc.totalAmount += totalAmount;
+                acc.totalProfit += profit;
+                acc.totalCost += totalCost;
+                acc.totalAmountInclVat += totalAmount * (1 + currentOrderVat / 100);
+                const statusConfig = statusConfigs.find(c => c.label === order.orderStatus);
+                const isActiveDeal = statusConfig ? statusConfig.isActiveDeal : true;
+                if (isActiveDeal) {
+                    const dueWithVat = totalAmount * (1 + currentOrderVat / 100);
+                    acc.totalBalance += Math.max(0, totalAmount - totalPaid);
+                    acc.totalBalanceInclVat += Math.max(0, dueWithVat - totalPaid);
                 }
-            });
-            
-            allMatchingOrders = allMatchingOrders.filter(order => {
-                if (parentOrderNumbers.has(order.id)) return true;
-                // Other search conditions already handled in MongoDB query
-                return true;
-            });
+                return acc;
+            }, { totalAmount: 0, totalProfit: 0, totalBalance: 0, totalCost: 0, totalAmountInclVat: 0, totalBalanceInclVat: 0 });
         }
-        
-        // Deduplicate by orderNumber (keep one per order number — latest by date). Normalize key (trim + uppercase) so "ORD-1005" and "ord-1005" merge.
-        const dateKeyForDedup = dateFilterType === 'DEAL_DATE' ? 'dealStartDate' : 'date';
-        const seenByOrderNumber = new Map<string, Order>();
-        for (const order of allMatchingOrders) {
-            const raw = (order.orderNumber != null && order.orderNumber !== '') ? String(order.orderNumber).trim() : '';
-            const key = raw !== '' ? raw.toUpperCase() : (order.id || '');
-            if (!key) continue;
-            const existing = seenByOrderNumber.get(key);
-            if (!existing) {
-                seenByOrderNumber.set(key, order);
-            } else {
-                const dNew = order[dateKeyForDedup] ? new Date(order[dateKeyForDedup]!).getTime() : 0;
-                const dOld = existing[dateKeyForDedup] ? new Date(existing[dateKeyForDedup]!).getTime() : 0;
-                if (dNew >= dOld) seenByOrderNumber.set(key, order);
-            }
-        }
-        allMatchingOrders = Array.from(seenByOrderNumber.values());
-        
-        // Calculate summary totals on ALL filtered orders (not just current page)
-        // Balance = same formula as client row: max(0, totalDueWithVat - totalPaid) for active deals
-        const summaryTotals = allMatchingOrders.reduce((acc, order) => {
-            const { totalAmount, profit, totalCost, totalPaid } = calculateOrderTotals(order);
-            const currentOrderVat = order.vatRate ?? vatRate;
-            acc.totalAmount += totalAmount;
-            acc.totalProfit += profit;
-            acc.totalCost += totalCost;
-            acc.totalAmountInclVat += totalAmount * (1 + currentOrderVat / 100);
-            
-            const statusConfig = statusConfigs.find(c => c.label === order.orderStatus);
-            const isActiveDeal = statusConfig ? statusConfig.isActiveDeal : true;
-            if (isActiveDeal) {
-                const dueWithVat = totalAmount * (1 + currentOrderVat / 100);
-                const balanceWithoutVat = Math.max(0, totalAmount - totalPaid);
-                const balanceWithVat = Math.max(0, dueWithVat - totalPaid);
-                acc.totalBalance += balanceWithoutVat;
-                acc.totalBalanceInclVat += balanceWithVat;
-            }
-            return acc;
-        }, { 
-            totalAmount: 0, 
-            totalProfit: 0, 
-            totalBalance: 0, 
-            totalCost: 0, 
-            totalAmountInclVat: 0, 
-            totalBalanceInclVat: 0 
-        });
-        
+
         // Sort orders: single pass by sortBy
         if (sortBy === 'dueDate') {
             allMatchingOrders.sort((a, b) => {
@@ -770,7 +810,8 @@ interface PayableItem {
     itemIndex: number;
 }
 
-// Get payable items for supplier payments report with filtering, pagination, and summary stats
+// Get payable items for supplier payments report with filtering, pagination, and summary stats.
+// Uses same order set as Orders page (getFilteredOrderSet) so "סה"כ חוב פתוח" matches "הוזמן מספקים".
 export async function getPayableItems(
         filters: {
         supplierFilterId?: string;
@@ -778,74 +819,70 @@ export async function getPayableItems(
         dateEnd?: string;
         showPaid?: boolean;
         viewMode?: 'forecast' | 'purchase_history' | 'payment_log';
+        // Optional order-level filters to align with Orders page (when provided, same set as הזמנות)
+        orderStatusFilter?: string[];
+        dateFilterType?: string;
+        startDateFilter?: string;
+        endDateFilter?: string;
+        monthFilter?: string;
+        yearFilter?: string;
     } = {},
     page: number = 1,
-    limit: number = 1000 // Default high limit for reports, can be paginated if needed
+    limit: number = 1000
 ): Promise<{
     items: PayableItem[];
     totalCount: number;
     page: number;
     limit: number;
     totalPages: number;
-    summaryStats: {
-        totalDebt: number;
-        overdueDebt: number;
-        thisMonthDue: number;
-        unassignedCount: number;
-    };
+    summaryStats: { totalDebt: number; overdueDebt: number; thisMonthDue: number; unassignedCount: number };
 }> {
     try {
         const database = await getDb();
         const collection = database.collection<Order>('orders');
-        
-        // Load all required data
-        const [orders, suppliers, statusConfigs, settings] = await Promise.all([
-            collection.find({}).toArray(),
+
+        const [suppliers, statusConfigs, settings, customers] = await Promise.all([
             getSuppliers(),
             getStatusConfigs(),
-            getSettings()
+            getSettings(),
+            getCustomers()
         ]);
-        
-        const allOrders = orders.map(deserializeDates) as Order[];
+
         const supplierMap = new Map<string, Supplier>(suppliers.map(s => [s.id, s]));
         const vatRate = settings.vatRate;
         const today = new Date();
         today.setHours(0, 0, 0, 0);
-        
-        // Helper to ensure date is a Date object
+
         const ensureDate = (date: Date | string): Date => {
             if (date instanceof Date) return date;
             if (typeof date === 'string') return new Date(date);
             return new Date();
         };
-        
-        // Filter out non-deal orders based on dynamic status configuration
-        const activeOrdersFiltered = allOrders.filter(order => {
-            const statusConfig = statusConfigs.find(c => c.label === order.orderStatus);
-            return statusConfig ? statusConfig.isActiveDeal : true;
-        });
 
-        // Deduplicate by orderNumber (one document per order number — keep latest by date). Aligns with Orders page and PnL so totals match.
-        const seenByOrderNumber = new Map<string, Order>();
-        for (const order of activeOrdersFiltered) {
-            const raw = (order.orderNumber != null && order.orderNumber !== '') ? String(order.orderNumber).trim() : '';
-            const key = raw !== '' ? raw.toUpperCase() : (order.id || '');
-            if (!key) continue;
-            const existing = seenByOrderNumber.get(key);
-            if (!existing) {
-                seenByOrderNumber.set(key, order);
-            } else {
-                const dNew = new Date(order.dealStartDate || order.date).getTime();
-                const dOld = new Date(existing.dealStartDate || existing.date).getTime();
-                if (dNew >= dOld) seenByOrderNumber.set(key, order);
-            }
+        // Same order set as Orders page: use order filters if provided, else default to "all active deal statuses" (no date filter)
+        const activeDealLabels = statusConfigs.filter(c => c.isActiveDeal).map(c => c.label);
+        const orderFiltersForReport: any = {
+            orderStatusFilter: filters.orderStatusFilter && filters.orderStatusFilter.length > 0
+                ? filters.orderStatusFilter
+                : activeDealLabels,
+            showCompletedOrders: true,
+            dateFilterType: filters.dateFilterType || 'ORDER_DATE',
+            startDateFilter: filters.startDateFilter,
+            endDateFilter: filters.endDateFilter,
+            monthFilter: filters.monthFilter,
+            yearFilter: filters.yearFilter
+        };
+        // When using default (no client orderStatusFilter), use isCollectionMode so post-filter keeps only active deals if query had no status
+        if (!filters.orderStatusFilter || filters.orderStatusFilter.length === 0) {
+            orderFiltersForReport.isCollectionMode = activeDealLabels.length > 0 ? false : true;
         }
-        const activeOrders = Array.from(seenByOrderNumber.values());
-        
+
+        const { orders: activeOrdersCapped } = await getFilteredOrderSet(collection, orderFiltersForReport, statusConfigs, customers);
+
         // Build items with merge of duplicate logical lines (same order + description + cost + supplier)
         const mergeKeyToItem = new Map<string, PayableItem>();
-        
-        activeOrders.forEach(order => {
+
+        activeOrdersCapped.forEach(order => {
             const currentOrderVat = order.vatRate ?? vatRate;
             const vatMultiplier = 1 + (currentOrderVat / 100);
             
@@ -3014,6 +3051,166 @@ export async function deleteManualEvent(eventId: string): Promise<void> {
         await collection.deleteOne({ id: eventId });
     } catch (error) {
         console.error('Error deleting manual event:', error);
+        throw error;
+    }
+}
+
+// ==================== WALL POSTS ====================
+export async function getWallPosts(): Promise<WallPost[]> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<WallPost>('wallPosts');
+        const docs = await collection.find({}).sort({ createdAt: -1 }).limit(50).toArray();
+        return docs.map(deserializeDates) as WallPost[];
+    } catch (error) {
+        console.error('Error fetching wall posts:', error);
+        throw error;
+    }
+}
+
+export async function createWallPost(post: WallPost): Promise<WallPost> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<WallPost>('wallPosts');
+        const serialized = serializeDates(post);
+        await collection.insertOne(serialized);
+        return deserializeDates(serialized) as WallPost;
+    } catch (error) {
+        console.error('Error creating wall post:', error);
+        throw error;
+    }
+}
+
+// ==================== IMPROVEMENT SUGGESTIONS ====================
+const IMPROVEMENT_SUGGESTIONS_COLLECTION = 'improvementSuggestions';
+
+export async function getImprovementSuggestions(filters?: { type?: ImprovementSuggestionType; status?: ImprovementSuggestionStatus }): Promise<ImprovementSuggestion[]> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<ImprovementSuggestion>(IMPROVEMENT_SUGGESTIONS_COLLECTION);
+        const query: Record<string, unknown> = {};
+        if (filters?.type) query.type = filters.type;
+        if (filters?.status) query.status = filters.status;
+        const docs = await collection.find(query).sort({ createdAt: -1 }).toArray();
+        return docs.map(deserializeDates) as ImprovementSuggestion[];
+    } catch (error) {
+        console.error('Error fetching improvement suggestions:', error);
+        throw error;
+    }
+}
+
+export async function createImprovementSuggestion(suggestion: ImprovementSuggestion): Promise<ImprovementSuggestion> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<ImprovementSuggestion>(IMPROVEMENT_SUGGESTIONS_COLLECTION);
+        const serialized = serializeDates(suggestion);
+        await collection.insertOne(serialized);
+        return deserializeDates(serialized) as ImprovementSuggestion;
+    } catch (error) {
+        console.error('Error creating improvement suggestion:', error);
+        throw error;
+    }
+}
+
+export async function updateImprovementSuggestion(id: string, updates: { status?: ImprovementSuggestionStatus; adminComment?: string }): Promise<ImprovementSuggestion | null> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<ImprovementSuggestion>(IMPROVEMENT_SUGGESTIONS_COLLECTION);
+        const result = await collection.findOneAndUpdate(
+            { id },
+            { $set: { ...updates, updatedAt: new Date() } },
+            { returnDocument: 'after' }
+        );
+        if (!result) return null;
+        return deserializeDates(result) as ImprovementSuggestion;
+    } catch (error) {
+        console.error('Error updating improvement suggestion:', error);
+        throw error;
+    }
+}
+
+export async function voteImprovementSuggestion(id: string, userId: string): Promise<ImprovementSuggestion | null> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<ImprovementSuggestion>(IMPROVEMENT_SUGGESTIONS_COLLECTION);
+        const doc = await collection.findOne({ id });
+        if (!doc) return null;
+        const votedBy: string[] = Array.isArray(doc.votedBy) ? [...doc.votedBy] : [];
+        if (votedBy.includes(userId)) return deserializeDates(doc) as ImprovementSuggestion; // already voted
+        votedBy.push(userId);
+        const result = await collection.findOneAndUpdate(
+            { id },
+            { $set: { votedBy, voteCount: (doc.voteCount || 0) + 1, updatedAt: new Date() } },
+            { returnDocument: 'after' }
+        );
+        if (!result) return null;
+        return deserializeDates(result) as ImprovementSuggestion;
+    } catch (error) {
+        console.error('Error voting improvement suggestion:', error);
+        throw error;
+    }
+}
+
+// ==================== ORDER LOCKS (soft lock for edit) ====================
+const ORDER_LOCKS_COLLECTION = 'orderLocks';
+const LOCK_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+
+export interface OrderLock {
+    orderId: string;
+    userId: string;
+    userName: string;
+    lockedAt: Date;
+}
+
+export async function getOrderLock(orderId: string): Promise<OrderLock | null> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<OrderLock>(ORDER_LOCKS_COLLECTION);
+        const doc = await collection.findOne({ orderId });
+        if (!doc) return null;
+        const lockedAt = doc.lockedAt instanceof Date ? doc.lockedAt : new Date(doc.lockedAt);
+        if (Date.now() - lockedAt.getTime() > LOCK_TIMEOUT_MS) {
+            await collection.deleteOne({ orderId });
+            return null;
+        }
+        return { orderId: doc.orderId, userId: doc.userId, userName: doc.userName, lockedAt };
+    } catch (error) {
+        console.error('Error getting order lock:', error);
+        throw error;
+    }
+}
+
+export async function acquireOrderLock(orderId: string, userId: string, userName: string): Promise<{ success: true } | { success: false; lockedBy: { userId: string; userName: string } }> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<OrderLock>(ORDER_LOCKS_COLLECTION);
+        const existing = await collection.findOne({ orderId });
+        if (existing) {
+            const lockedAt = existing.lockedAt instanceof Date ? existing.lockedAt : new Date(existing.lockedAt);
+            if (Date.now() - lockedAt.getTime() > LOCK_TIMEOUT_MS) {
+                await collection.deleteOne({ orderId });
+            } else if (existing.userId === userId) {
+                await collection.updateOne({ orderId }, { $set: { lockedAt: new Date() } });
+                return { success: true };
+            } else {
+                return { success: false, lockedBy: { userId: existing.userId, userName: existing.userName || 'משתמש' } };
+            }
+        }
+        await collection.insertOne({ orderId, userId, userName, lockedAt: new Date() });
+        return { success: true };
+    } catch (error) {
+        console.error('Error acquiring order lock:', error);
+        throw error;
+    }
+}
+
+export async function releaseOrderLock(orderId: string, userId: string): Promise<void> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<OrderLock>(ORDER_LOCKS_COLLECTION);
+        await collection.deleteOne({ orderId, userId });
+    } catch (error) {
+        console.error('Error releasing order lock:', error);
         throw error;
     }
 }

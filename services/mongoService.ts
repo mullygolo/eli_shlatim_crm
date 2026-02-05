@@ -1,7 +1,7 @@
 import {
     Customer, Order, Supplier, Employee, Activity, ActivityFilters, ActivitiesResult, OrderStatusConfiguration,
     FixedExpense, VariableExpense, Loan, Debt, Receivable, EquityInvestment,
-    AttendanceRecord, ManualEvent, CallLog
+    AttendanceRecord, ManualEvent, WallPost, CallLog, ImprovementSuggestion, ImprovementSuggestionStatus, ImprovementSuggestionType
 } from '../types';
 
 // API Base URL - use relative path in production
@@ -111,6 +111,30 @@ export async function getOrdersPaginated(filters: any, page: number = 1, limit: 
 
 export async function getOrderById(orderId: string): Promise<Order> {
     return apiRequest<Order>(`/orders/${orderId}`);
+}
+
+// Order lock (smart locking): get / acquire / release
+export interface OrderLockStatus {
+    lockedBy: { userId: string; userName: string; lockedAt?: string } | null;
+}
+export interface AcquireOrderLockResult {
+    success: boolean;
+    lockedBy?: { userId: string; userName: string };
+}
+
+export async function getOrderLock(orderId: string): Promise<OrderLockStatus> {
+    return apiRequest<OrderLockStatus>(`/orders/${orderId}/lock`);
+}
+
+export async function acquireOrderLock(orderId: string, userName?: string): Promise<AcquireOrderLockResult> {
+    return apiRequest<AcquireOrderLockResult>(`/orders/${orderId}/lock`, {
+        method: 'POST',
+        body: JSON.stringify(userName != null ? { userName } : {}),
+    });
+}
+
+export async function releaseOrderLock(orderId: string): Promise<void> {
+    return apiRequest<void>(`/orders/${orderId}/lock`, { method: 'DELETE' });
 }
 
 export async function getPreparationStatusSuggestions(): Promise<string[]> {
@@ -735,6 +759,48 @@ export async function createManualEvent(event: ManualEvent): Promise<ManualEvent
 export async function deleteManualEvent(eventId: string): Promise<void> {
     return apiRequest<void>(`/manual-events/${eventId}`, {
         method: 'DELETE',
+    });
+}
+
+// ==================== WALL POSTS ====================
+export async function getWallPosts(): Promise<WallPost[]> {
+    return apiRequest<WallPost[]>('/wall-posts');
+}
+
+export async function createWallPost(post: WallPost): Promise<WallPost> {
+    return apiRequest<WallPost>('/wall-posts', {
+        method: 'POST',
+        body: JSON.stringify(post),
+    });
+}
+
+// ==================== IMPROVEMENT SUGGESTIONS ====================
+export async function getImprovementSuggestions(filters?: { type?: ImprovementSuggestionType; status?: ImprovementSuggestionStatus }): Promise<ImprovementSuggestion[]> {
+    const params = new URLSearchParams();
+    if (filters?.type) params.set('type', filters.type);
+    if (filters?.status) params.set('status', filters.status);
+    const q = params.toString();
+    return apiRequest<ImprovementSuggestion[]>(`/improvement-suggestions${q ? `?${q}` : ''}`);
+}
+
+export async function createImprovementSuggestion(suggestion: ImprovementSuggestion): Promise<ImprovementSuggestion> {
+    return apiRequest<ImprovementSuggestion>('/improvement-suggestions', {
+        method: 'POST',
+        body: JSON.stringify(suggestion),
+    });
+}
+
+export async function updateImprovementSuggestion(id: string, updates: { status?: ImprovementSuggestionStatus; adminComment?: string }): Promise<ImprovementSuggestion | null> {
+    return apiRequest<ImprovementSuggestion | null>(`/improvement-suggestions/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(updates),
+    });
+}
+
+export async function voteImprovementSuggestion(id: string, userId: string): Promise<ImprovementSuggestion | null> {
+    return apiRequest<ImprovementSuggestion | null>(`/improvement-suggestions/${id}/vote`, {
+        method: 'POST',
+        body: JSON.stringify({ userId }),
     });
 }
 

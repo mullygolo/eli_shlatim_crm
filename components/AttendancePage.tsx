@@ -348,6 +348,7 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
     const [recordForCorrection, setRecordForCorrection] = useState<AttendanceRecord | undefined>(undefined);
     const [currentTime, setCurrentTime] = useState(new Date());
     const [isWFH, setIsWFH] = useState(false);
+    const [showClockInLocationModal, setShowClockInLocationModal] = useState(false);
     const [viewingCertificate, setViewingCertificate] = useState<Attachment | null>(null);
     const [isClocking, setIsClocking] = useState(false);
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -635,12 +636,13 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
         }
     }, [setRecords, currentEmployeeId]);
 
-    const handleClockAction = async (action: 'IN' | 'OUT') => {
+    const handleClockAction = async (action: 'IN' | 'OUT', isWFHOverride?: boolean) => {
         if (isClocking) return;
 
         setErrorMessage(null);
 
         if (action === 'IN') {
+            const wfh = isWFHOverride ?? isWFH;
             if (clockInRequestInProgressRef.current) return;
             clockInRequestInProgressRef.current = true;
             if (todaysRecords.some(r => !r.clockOut)) {
@@ -659,14 +661,14 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
                 date: now,
                 clockIn: now,
                 totalHours: 0,
-                status: isWFH ? 'WFH' : 'PRESENT',
+                status: wfh ? 'WFH' : 'PRESENT',
             };
             onAttendanceMutationBusy?.(true);
             setRecords(prev => [...prev, optimisticRecord]);
 
             try {
                 const savedRecord = await retryWithBackoff(() =>
-                    mongoService.clockIn(currentEmployeeId, isWFH)
+                    mongoService.clockIn(currentEmployeeId, wfh)
                 );
                 setRecords(prev =>
                     prev.map(r => r.id === optimisticId ? savedRecord : r).filter(r => !String(r.id).startsWith('att_opt_'))
@@ -689,7 +691,7 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
                     (error.message && error.message.includes('network'));
 
                 if (isNetworkError) {
-                    saveToOfflineQueue('IN', { employeeId: currentEmployeeId, isWFH });
+                    saveToOfflineQueue('IN', { employeeId: currentEmployeeId, isWFH: wfh });
                     setErrorMessage('אין חיבור לאינטרנט. הפעולה נשמרה ותתבצע אוטומטית כשהחיבור יחזור.');
                 } else {
                     const msg = error.message && error.message.includes('already has an active clock-in')
@@ -1289,7 +1291,7 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
                             <div className="p-3 border-2 border-primary/10 rounded-full shadow-inner bg-slate-50/50">
                                 {!isClockedIn ? (
                                     <button 
-                                        onClick={() => handleClockAction('IN')} 
+                                        onClick={() => setShowClockInLocationModal(true)} 
                                         disabled={isClocking}
                                         className={`w-36 h-36 rounded-full flex flex-col items-center justify-center shadow-2xl transition-all hover:scale-105 active:scale-95 bg-gradient-to-br from-secondary to-green-600 text-white border-4 border-green-100 group relative overflow-hidden ${isClocking ? 'opacity-50 cursor-not-allowed' : ''}`}
                                     >
@@ -1316,10 +1318,11 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
                                 )}
                             </div>
                             <div className="flex flex-col items-center gap-2">
-                                <div className="flex items-center gap-2">
-                                    <input type="checkbox" id="wfhToggle" checked={isWFH} onChange={e => setIsWFH(e.target.checked)} disabled={isClockedIn || isClocking} className="w-5 h-5 text-primary border-slate-300 rounded focus:ring-primary transition-colors cursor-pointer" />
-                                    <label htmlFor="wfhToggle" className="text-sm font-black text-slate-600 cursor-pointer select-none flex items-center gap-1">🏠 עבודה מהבית היום</label>
-                                </div>
+                                {isClockedIn && activeRecord && (
+                                    <div className="text-sm font-black text-slate-600 bg-slate-100 px-3 py-1 rounded-lg border border-slate-200 flex items-center gap-2">
+                                        {activeRecord.status === 'WFH' ? '🏠 מהבית' : '🏢 במשרד'}
+                                    </div>
+                                )}
                                 {isClockedIn && (
                                     <div className="text-sm font-black text-green-600 bg-green-50 px-3 py-1 rounded-lg border border-green-100 flex items-center gap-2 mt-1 shadow-sm">
                                         <span className="w-2 h-2 rounded-full bg-green-500 animate-ping"></span>זמן נוכחי: {liveDuration}
@@ -1446,6 +1449,29 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
     return (
         <div>
             {viewingCertificate && <CertificateViewer file={viewingCertificate} onClose={() => setViewingCertificate(null)} />}
+            {showClockInLocationModal && (
+                <Modal title="איפה אתה עובד היום?" onClose={() => setShowClockInLocationModal(false)} size="lg">
+                    <div className="p-4 flex flex-col gap-4">
+                        <p className="text-slate-600 font-medium text-center">בחר את מיקום העבודה לפני החתמת הכניסה</p>
+                        <div className="flex gap-3 justify-center">
+                            <button
+                                type="button"
+                                onClick={() => { setShowClockInLocationModal(false); handleClockAction('IN', true); }}
+                                className="flex-1 flex items-center justify-center gap-2 px-6 py-3 rounded-xl bg-indigo-100 hover:bg-indigo-200 text-indigo-800 font-bold transition-colors border-2 border-indigo-200"
+                            >
+                                🏠 מהבית
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => { setShowClockInLocationModal(false); handleClockAction('IN', false); }}
+                                className="flex-1 flex items-center justify-center gap-2 px-6 py-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold transition-colors border-2 border-slate-200"
+                            >
+                                🏢 מהמשרד
+                            </button>
+                        </div>
+                    </div>
+                </Modal>
+            )}
             <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-8 gap-4">
                 <div className="flex space-x-1 space-x-reverse w-full sm:auto bg-slate-100 p-1 rounded-xl shadow-inner border border-slate-200">
                     <button onClick={() => setActiveTab('MY_PORTAL')} className={`flex-1 sm:flex-none px-8 py-2.5 rounded-lg font-black transition-all text-sm ${activeTab === 'MY_PORTAL' ? 'bg-white text-primary shadow-md' : 'text-slate-500 hover:text-slate-700'}`}>הנוכחות שלי</button>

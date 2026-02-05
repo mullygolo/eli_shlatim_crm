@@ -1,7 +1,7 @@
 
 import React from 'react';
 import { Page } from '../types';
-import { DashboardIcon, OrdersIcon, CustomersIcon, SuppliersIcon, ReportsIcon, SettingsIcon, FinanceIcon, ClockIcon, PriceListIcon, PhoneIcon } from './icons';
+import { DashboardIcon, OrdersIcon, CustomersIcon, SuppliersIcon, ReportsIcon, SettingsIcon, FinanceIcon, ClockIcon, PriceListIcon, PhoneIcon, LightbulbIcon } from './icons';
 import { PAGE_TITLES } from '../App';
 import { useAuth } from '../contexts/AuthContext';
 
@@ -21,9 +21,10 @@ const Sidebar: React.FC<SidebarProps> = ({ currentPage, setCurrentPage }) => {
         { page: 'Suppliers', icon: <SuppliersIcon className="h-6 w-6" /> },
         { page: 'PriceList', icon: <PriceListIcon className="h-6 w-6" /> },
         { page: 'Reports', icon: <ReportsIcon className="h-6 w-6" />, label: 'תשלום לספקים' },
-        ...(isEmployee ? [] : [{ page: 'Finance', icon: <FinanceIcon className="h-6 w-6" />, label: 'דוחות כספיים' }]),
+        ...(isEmployee ? [] : [{ page: 'Finance' as Page, icon: <FinanceIcon className="h-6 w-6" />, label: 'דוחות כספיים' }]),
         { page: 'Attendance', icon: <ClockIcon className="h-6 w-6" />, label: 'נוכחות ושכר' },
         { page: 'CallCenter', icon: <PhoneIcon className="h-6 w-6" />, label: 'מרכזייה' },
+        { page: 'ImprovementSuggestions' as Page, icon: <LightbulbIcon className="h-6 w-6" />, label: 'הצעות ייעול' },
     ];
 
     return (
@@ -31,7 +32,7 @@ const Sidebar: React.FC<SidebarProps> = ({ currentPage, setCurrentPage }) => {
             <div className="flex items-center justify-center md:justify-start md:px-6 h-20 border-b border-dark-border flex-shrink-0">
                 <div className="text-2xl font-bold text-white">
                     <span className="md:hidden">המ</span>
-                    <span className="hidden md:inline">המערכת</span>
+                    <span className="hidden md:inline">אלי שלטים</span>
                 </div>
             </div>
             

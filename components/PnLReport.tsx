@@ -96,7 +96,7 @@ const PnLReport: React.FC<PnLReportProps> = ({
         return years;
     }, []);
 
-    // One document per orderNumber: keep the one with earliest dealStartDate/date (same as PnL table and Orders page)
+    // One document per orderNumber: keep the one with latest dealStartDate/date (aligned with Orders page and getPayableItems)
     const canonicalOrders = useMemo(() => {
         const ordersByNumber = new Map<string, Order>();
         orders.forEach(order => {
@@ -108,7 +108,7 @@ const PnLReport: React.FC<PnLReportProps> = ({
                 return;
             }
             const existingDate = new Date(existing.dealStartDate || existing.date).getTime();
-            if (orderDate < existingDate) ordersByNumber.set(key, order);
+            if (orderDate > existingDate) ordersByNumber.set(key, order);
         });
         return Array.from(ordersByNumber.values());
     }, [orders]);
@@ -162,6 +162,16 @@ const PnLReport: React.FC<PnLReportProps> = ({
                     supplierDebtExcl += (remainingInclSup / vatMult);
                 }
             });
+            (order.lineItems || []).filter(li => li.serviceType === 'DELIVERY' || li.serviceType === 'INSTALLATION').forEach(li => {
+                const costGross = (li.cost ?? 0) * (li.quantity ?? 1) * vatMult;
+                const paidToSupplier = (li.supplierPayments || []).reduce((s, p) => 
+                    (p.status && invalidStatuses.includes(p.status)) ? s : s + p.amount, 0);
+                const remainingInclSup = Math.max(0, costGross - paidToSupplier);
+                if (remainingInclSup > 0.1) {
+                    supplierDebtIncl += remainingInclSup;
+                    supplierDebtExcl += (remainingInclSup / vatMult);
+                }
+            });
         });
 
         return { customerDebtIncl, customerDebtExcl, supplierDebtIncl, supplierDebtExcl };
@@ -204,7 +214,7 @@ const PnLReport: React.FC<PnLReportProps> = ({
             tempDate.setMonth(tempDate.getMonth() + 1);
         }
 
-        // 1. Process Orders (Income & COGS & VAT) — uses canonicalOrders (one per orderNumber, earliest date)
+        // 1. Process Orders (Income & COGS & VAT) — uses canonicalOrders (one per orderNumber, latest date)
         const getStatusConfig = (statusLabel: string) => statusConfigs.find(c => (c.label || '').trim() === (statusLabel || '').trim());
         canonicalOrders.forEach((order) => {
             const config = getStatusConfig(order.orderStatus);
@@ -247,6 +257,7 @@ const PnLReport: React.FC<PnLReportProps> = ({
         });
         
         // 1a. Process Customer Payments (VAT Output - Cash Flow Basis)
+        // מקור: תשלומי לקוח (order.payments) – אותם נתונים כמו בעמוד הזמנות
         canonicalOrders.forEach((order) => {
             const config = getStatusConfig(order.orderStatus);
             if (!config || config.isLost || !config.isActiveDeal) return;
@@ -351,6 +362,36 @@ const PnLReport: React.FC<PnLReportProps> = ({
                         orderNumber: order.orderNumber
                     });
                     
+                    if (vatAmount > 0.01) {
+                        pnlMap[key].vatInput += vatAmount;
+                        pnlMap[key].vatInputItems.push({
+                            name: `מע"מ תשומות (תשלום לספק): ${order.orderNumber}`,
+                            amount: vatAmount,
+                            date: payment.date,
+                            subtext: `חולץ מתשלום ₪${payment.amount.toLocaleString()}`,
+                            orderId: order.id,
+                            orderNumber: order.orderNumber
+                        });
+                    }
+                });
+            });
+            (order.lineItems || []).filter(li => li.serviceType === 'DELIVERY' || li.serviceType === 'INSTALLATION').forEach(li => {
+                li.supplierPayments?.forEach(payment => {
+                    if (payment.status && invalidStatuses.includes(payment.status)) return;
+                    const date = payment.date instanceof Date ? payment.date : new Date(payment.date);
+                    const key = getMonthKey(date);
+                    if (!pnlMap[key]) return;
+                    const netAmount = payment.amount / (1 + currentVat / 100);
+                    const vatAmount = payment.amount - netAmount;
+                    pnlMap[key].debtPayments += netAmount;
+                    pnlMap[key].debtPaymentItems.push({
+                        name: `תשלום לספק: ${order.orderNumber}`,
+                        amount: netAmount,
+                        date: payment.date,
+                        subtext: `שירות: ${li.description}`,
+                        orderId: order.id,
+                        orderNumber: order.orderNumber
+                    });
                     if (vatAmount > 0.01) {
                         pnlMap[key].vatInput += vatAmount;
                         pnlMap[key].vatInputItems.push({
@@ -725,15 +766,8 @@ const PnLReport: React.FC<PnLReportProps> = ({
                     <div className="text-[10px] bg-slate-200 text-slate-500 px-1.5 rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">פירוט</div>
                 )}
             </td>
-            {/* Render Total Column First (RTL logic) */}
-            <td 
-                onClick={() => itemsField && (periodTotals[itemsField] as DrillDownItem[]).length > 0 && setDrillDown({ title: `${label} - סה"כ תקופה`, items: periodTotals[itemsField] as DrillDownItem[] })}
-                className={`px-4 py-3 text-center border-l border-slate-200 font-black bg-indigo-50/20 ${itemsField && (periodTotals[itemsField] as DrillDownItem[]).length > 0 ? 'cursor-pointer hover:bg-indigo-100/50' : ''} ${customColor ? customColor : (isNegative ? 'text-rose-600' : 'text-slate-800')}`}
-            >
-                {isNegative && (periodTotals[field] as number) > 0 ? '(' : ''}{formatCurrency(periodTotals[field] as number)}{isNegative && (periodTotals[field] as number) > 0 ? ')' : ''}
-            </td>
-            {/* Render Monthly Columns */}
-            {monthlyData.map(m => {
+            {/* Monthly columns: Dec → Jan (so visually Jan is right, Dec left); then annual summary rightmost */}
+            {[...monthlyData].reverse().map(m => {
                 const val = m[field] as number;
                 const items = itemsField ? m[itemsField] as DrillDownItem[] : [];
                 return (
@@ -746,6 +780,13 @@ const PnLReport: React.FC<PnLReportProps> = ({
                     </td>
                 );
             })}
+            {/* Annual summary column (rightmost) */}
+            <td 
+                onClick={() => itemsField && (periodTotals[itemsField] as DrillDownItem[]).length > 0 && setDrillDown({ title: `${label} - סה"כ תקופה`, items: periodTotals[itemsField] as DrillDownItem[] })}
+                className={`px-4 py-3 text-center border-l border-slate-200 font-black bg-indigo-50/20 ${itemsField && (periodTotals[itemsField] as DrillDownItem[]).length > 0 ? 'cursor-pointer hover:bg-indigo-100/50' : ''} ${customColor ? customColor : (isNegative ? 'text-rose-600' : 'text-slate-800')}`}
+            >
+                {isNegative && (periodTotals[field] as number) > 0 ? '(' : ''}{formatCurrency(periodTotals[field] as number)}{isNegative && (periodTotals[field] as number) > 0 ? ')' : ''}
+            </td>
         </tr>
     );
 
@@ -763,7 +804,14 @@ const PnLReport: React.FC<PnLReportProps> = ({
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-100">
-                                {drillDown.items.sort((a,b) => (b.date?.getTime() || 0) - (a.date?.getTime() || 0)).map((item, idx) => (
+                                {drillDown.items
+                                    .slice()
+                                    .sort((a, b) => {
+                                        const ts = (d: Date | string | undefined) =>
+                                            d instanceof Date ? d.getTime() : (d ? new Date(d).getTime() : 0);
+                                        return ts(b.date) - ts(a.date);
+                                    })
+                                    .map((item, idx) => (
                                     <tr key={idx} className="hover:bg-slate-50">
                                         <td className="px-4 py-3">
                                             <div className="font-bold text-slate-800 flex items-center gap-2 flex-wrap">
@@ -915,12 +963,12 @@ const PnLReport: React.FC<PnLReportProps> = ({
                         <thead>
                             <tr className="bg-slate-800 text-white">
                                 <th className="px-4 py-4 text-right font-black border-l border-slate-700 min-w-[200px] sticky right-0 z-30 bg-slate-800 shadow-xl">סעיף חשבונאי</th>
-                                <th className="px-4 py-4 text-center font-black min-w-[150px] bg-slate-700 border-l border-slate-600">סה"כ תקופה</th>
-                                {monthlyData.map(m => (
+                                {[...monthlyData].reverse().map(m => (
                                     <th key={m.monthKey} className="px-4 py-4 text-center font-black min-w-[140px] whitespace-nowrap">
                                         {m.label}
                                     </th>
                                 ))}
+                                <th className="px-4 py-4 text-center font-black min-w-[150px] bg-slate-700 border-l border-slate-600">סה"כ תקופה</th>
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100">
@@ -940,8 +988,8 @@ const PnLReport: React.FC<PnLReportProps> = ({
                             <PnLRow label="הוצאות מימון (ריבית)" field="financingExpenses" itemsField="financingItems" isNegative={true} />
                             <tr className="bg-indigo-600 text-white font-black">
                                 <td className="px-4 py-3 text-right sticky right-0 z-20 bg-indigo-600">רווח נקי (חשבונאי)</td>
+                                {[...monthlyData].reverse().map(m => <td key={m.monthKey} className="px-4 py-3 text-center">{formatCurrency(m.netProfit)}</td>)}
                                 <td className="px-4 py-3 text-center border-l border-indigo-500 bg-indigo-700 font-black">{formatCurrency(periodTotals.netProfit)}</td>
-                                {monthlyData.map(m => <td key={m.monthKey} className="px-4 py-3 text-center">{formatCurrency(m.netProfit)}</td>)}
                             </tr>
 
                             {/* CASH FLOW ADJUSTMENTS SECTION */}
@@ -958,31 +1006,31 @@ const PnLReport: React.FC<PnLReportProps> = ({
                                     יתרה חופשית למשיכה/צבירה
                                     <div className="w-2 h-2 rounded-full bg-amber-500 animate-pulse"></div>
                                 </td>
-                                <td className={`px-4 py-4 text-center border-l border-amber-200 bg-amber-200 font-black text-lg ${periodTotals.netCashFlow < 0 ? 'text-red-700' : 'text-indigo-800'}`}>
-                                    {formatCurrency(periodTotals.netCashFlow)}
-                                </td>
-                                {monthlyData.map(m => (
+                                {[...monthlyData].reverse().map(m => (
                                     <td key={m.monthKey} className={`px-4 py-4 text-center text-lg ${m.netCashFlow < 0 ? 'text-red-700' : 'text-indigo-800'}`}>
                                         {formatCurrency(m.netCashFlow)}
                                     </td>
                                 ))}
+                                <td className={`px-4 py-4 text-center border-l border-amber-200 bg-amber-200 font-black text-lg ${periodTotals.netCashFlow < 0 ? 'text-red-700' : 'text-indigo-800'}`}>
+                                    {formatCurrency(periodTotals.netCashFlow)}
+                                </td>
                             </tr>
 
                             {/* VAT SECTION */}
                             <tr><td colSpan={monthlyData.length + 2} className="h-8"></td></tr>
                             <tr className="text-slate-400 text-[10px] font-black uppercase tracking-widest bg-slate-50/50"><td className="px-4 py-1 sticky right-0 z-20 bg-slate-50/50" colSpan={monthlyData.length + 2}>סיכום מע"מ תקופתי</td></tr>
-                            <PnLRow label='מע"מ עסקאות (חובה)' field="vatOutput" itemsField="vatOutputItems" isNegative={true} />
-                            <PnLRow label='מע"מ תשומות (זכות)' field="vatInput" itemsField="vatInputItems" customColor="text-emerald-600" />
+                            <PnLRow label='מע"מ מתשלומים שהתקבלו מלקוחות על עסקאות' field="vatOutput" itemsField="vatOutputItems" isNegative={true} />
+                            <PnLRow label={"מע\"מ על קניות/הוצאות (תשלומים לספקים, הוצאות קבועות/משתנות, חובות וכו')"} field="vatInput" itemsField="vatInputItems" customColor="text-emerald-600" />
                             <tr className="bg-slate-50">
                                 <td className="px-4 py-3 font-bold text-slate-700 sticky right-0 z-20 bg-slate-50">לתשלום / החזר מע"מ</td>
-                                <td className={`px-4 py-3 text-center border-l border-slate-200 font-black bg-slate-200/50 ${periodTotals.vatBalance > 0 ? 'text-red-600' : 'text-emerald-600'}`}>
-                                    {periodTotals.vatBalance > 0 ? `לתשלום: ${formatCurrency(periodTotals.vatBalance)}` : `החזר: ${formatCurrency(Math.abs(periodTotals.vatBalance))}`}
-                                </td>
-                                {monthlyData.map(m => (
+                                {[...monthlyData].reverse().map(m => (
                                     <td key={m.monthKey} className={`px-4 py-3 text-center font-black ${m.vatBalance > 0 ? 'text-red-600' : 'text-emerald-600'}`}>
                                         {m.vatBalance > 0 ? `לתשלום: ${formatCurrency(m.vatBalance)}` : `החזר: ${formatCurrency(Math.abs(m.vatBalance))}`}
                                     </td>
                                 ))}
+                                <td className={`px-4 py-3 text-center border-l border-slate-200 font-black bg-slate-200/50 ${periodTotals.vatBalance > 0 ? 'text-red-600' : 'text-emerald-600'}`}>
+                                    {periodTotals.vatBalance > 0 ? `לתשלום: ${formatCurrency(periodTotals.vatBalance)}` : `החזר: ${formatCurrency(Math.abs(periodTotals.vatBalance))}`}
+                                </td>
                             </tr>
                         </tbody>
                     </table>

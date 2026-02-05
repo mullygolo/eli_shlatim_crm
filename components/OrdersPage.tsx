@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { Order, Customer, Supplier, Employee, PaymentStatus, LineItem, LineItemUnit, Attachment, Contact, PaymentMethod, AdditionalService, TimelineEvent, AttachmentCategory, OrderType, OrderStatusConfiguration, CustomerPayment, FieldChange, SalesHistoryEntry, AdHocProduct, PriceListProduct } from '../types';
+import { Order, Customer, Supplier, Employee, PaymentStatus, LineItem, LineItemUnit, Attachment, Contact, PaymentMethod, AdditionalService, TimelineEvent, AttachmentCategory, OrderType, OrderStatusConfiguration, CustomerPayment, FieldChange, SalesHistoryEntry, AdHocProduct, PriceListProduct, WallPost } from '../types';
 import { PAYMENT_STATUSES_ORDERED, PAYMENT_TERMS_OPTIONS, CUSTOMER_CATEGORIES } from '../constants';
-import { PlusIcon, EditIcon, DeleteIcon, WhatsAppIcon, EmailIcon, PhoneIcon, NoteIcon, TaskIcon, LogIcon, SettingsIcon, LockIcon, CashIcon, DownloadIcon } from './icons';
+import { PlusIcon, EditIcon, DeleteIcon, WhatsAppIcon, EmailIcon, PhoneIcon, NoteIcon, TaskIcon, LogIcon, SettingsIcon, LockIcon, CashIcon, DownloadIcon, TruckIcon, InstallationIcon } from './icons';
 import Modal from './Modal';
 import ProductSelectorModal from './ProductSelectorModal';
 import SendItemToSuppliersModal from './SendItemToSuppliersModal';
@@ -9,6 +9,8 @@ import SendOrderToSuppliersModal from './SendOrderToSuppliersModal';
 import CreateDocumentModal from './CreateDocumentModal';
 import DocumentViewer from './DocumentViewer';
 import OrdersImportModal from './OrdersImportModal';
+import SearchableSelect from './SearchableSelect';
+import AutoResizeTextarea from './AutoResizeTextarea';
 import { calculateOrderTotals, calculateDueDate } from '../utils/calculations';
 import MultiSelectFilter from './MultiSelectFilter';
 import * as mongoService from '../services/mongoService';
@@ -135,6 +137,75 @@ const PaymentDocumentsViewer: React.FC<{
                         </a>
                     </div>
                 </div>
+            </div>
+        </Modal>
+    );
+};
+
+type ServiceDetailsPayload = {
+    scheduledDate?: Date;
+    address?: string;
+    siteContactName?: string;
+    siteContactDetails?: string;
+    notes?: string;
+};
+
+const ServiceDetailsModal: React.FC<{
+    scheduledDate?: Date;
+    address: string;
+    siteContactName: string;
+    siteContactDetails: string;
+    notes: string;
+    onClose: () => void;
+    onSave: (payload: ServiceDetailsPayload) => void;
+}> = ({ scheduledDate, address, siteContactName, siteContactDetails, notes, onClose, onSave }) => {
+    const [scheduledDateVal, setScheduledDateVal] = useState(scheduledDate ? (() => {
+        const d = new Date(scheduledDate);
+        const pad = (n: number) => n < 10 ? '0' + n : n;
+        return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    })() : '');
+    const [addressVal, setAddressVal] = useState(address);
+    const [siteContactNameVal, setSiteContactNameVal] = useState(siteContactName);
+    const [siteContactDetailsVal, setSiteContactDetailsVal] = useState(siteContactDetails);
+    const [notesVal, setNotesVal] = useState(notes);
+
+    const handleSave = () => {
+        onSave({
+            scheduledDate: scheduledDateVal ? new Date(scheduledDateVal) : undefined,
+            address: addressVal || undefined,
+            siteContactName: siteContactNameVal || undefined,
+            siteContactDetails: siteContactDetailsVal || undefined,
+            notes: notesVal || undefined,
+        });
+    };
+
+    return (
+        <Modal title="פרטי משלוח/התקנה" onClose={onClose} size="lg">
+            <div className="p-4 space-y-4">
+                <div>
+                    <label className="block text-xs font-medium text-slate-600">תאריך ושעה</label>
+                    <input type="datetime-local" value={scheduledDateVal} onChange={e => setScheduledDateVal(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" />
+                </div>
+                <div>
+                    <label className="block text-xs font-medium text-slate-600">כתובת למשלוח/התקנה</label>
+                    <input type="text" value={addressVal} onChange={e => setAddressVal(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" />
+                </div>
+                <div>
+                    <label className="block text-xs font-medium text-slate-600">איש קשר בשטח</label>
+                    <input type="text" value={siteContactNameVal} onChange={e => setSiteContactNameVal(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" />
+                </div>
+                <div>
+                    <label className="block text-xs font-medium text-slate-600">פרטי התקשרות</label>
+                    <input type="text" value={siteContactDetailsVal} onChange={e => setSiteContactDetailsVal(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" />
+                </div>
+                <div>
+                    <label className="block text-xs font-medium text-slate-600">הערות</label>
+                    <AutoResizeTextarea value={notesVal} onChange={e => setNotesVal(e.target.value)} minHeight={44} maxHeight={220} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" />
+                </div>
+            </div>
+            <div className="flex justify-end gap-2 p-4 border-t border-slate-200">
+                <button type="button" onClick={onClose} className="px-4 py-2 bg-slate-200 text-slate-800 rounded-md hover:bg-slate-300">ביטול</button>
+                <button type="button" onClick={handleSave} className="px-4 py-2 bg-primary text-white rounded-md hover:bg-indigo-700">שמור</button>
             </div>
         </Modal>
     );
@@ -622,7 +693,9 @@ const OrderForm: React.FC<{
     getNextOrderNumber: () => string;
     vatRate: number;
     setHeaderContent?: (node: React.ReactNode) => void;
-}> = ({ order, customers, setCustomers, suppliers, setSuppliers, employees, onSave, onDraftCreate, onCancel, addActivity, onSwitchOrder, statusConfigs, getNextOrderNumber, vatRate, setHeaderContent }) => {
+    readOnly?: boolean;
+    lockedByUserName?: string;
+}> = ({ order, customers, setCustomers, suppliers, setSuppliers, employees, onSave, onDraftCreate, onCancel, addActivity, onSwitchOrder, statusConfigs, getNextOrderNumber, vatRate, setHeaderContent, readOnly, lockedByUserName }) => {
     
     // Find Dynamic Initial Status
     const initialStatus = useMemo(() => statusConfigs.find(c => c.isLead)?.label || 'ליד חדש', [statusConfigs]);
@@ -655,7 +728,7 @@ const OrderForm: React.FC<{
             dealStartDate: undefined,
             customerId: order ? order['customerId'] : '', 
             contactId: '',
-            employeeId: employees.length > 0 ? employees[0].id : '',
+            employeeId: (user?.id && employees.some(e => e.id === user.id)) ? user.id : (employees.length > 0 ? employees[0].id : ''),
             orderStatus: initialStatus,
             paymentStatus: PaymentStatus.UNPAID,
             payments: [], 
@@ -668,6 +741,7 @@ const OrderForm: React.FC<{
             timeline: [],
             statusHistory: [],
             vatRate: vatRate, // Initialize with system default
+            hiddenFromSalesGoal: false,
         }
     );
      const [dateString, setDateString] = useState(() => {
@@ -700,6 +774,7 @@ const OrderForm: React.FC<{
     const [productSelectorFor, setProductSelectorFor] = useState<{ type: 'lineItem' | 'additionalService'; index: number } | null>(null);
     const [sendItemModalOpen, setSendItemModalOpen] = useState(false);
     const [sendItemForIndex, setSendItemForIndex] = useState<number | null>(null);
+    const [serviceDetailsModalForIndex, setServiceDetailsModalForIndex] = useState<number | null>(null);
     const [sendOrderModalOpen, setSendOrderModalOpen] = useState(false);
      const [timelineFilter, setTimelineFilter] = useState<'ALL' | 'HUMAN' | 'SYSTEM'>('HUMAN');
      const [newTimelineEntry, setNewTimelineEntry] = useState({
@@ -988,7 +1063,38 @@ const OrderForm: React.FC<{
 
     useEffect(() => {
         if (order) {
-            setFormData({ ...order, type: order.type || OrderType.REGULAR, payments: order.payments || [], vatRate: order.vatRate ?? vatRate });
+            let lineItems = order.lineItems ?? [];
+            let additionalServices = order.additionalServices ?? [];
+            if (additionalServices.length > 0) {
+                const migrated: LineItem[] = additionalServices.map(s => ({
+                    id: s.id,
+                    description: s.description,
+                    quantity: 1,
+                    unitPrice: s.price,
+                    cost: s.cost,
+                    unitType: LineItemUnit.UNIT,
+                    supplierId: s.supplierId,
+                    supplierPayments: s.supplierPayments ?? [],
+                    serviceType: 'DELIVERY' as const,
+                    serviceDetails: {
+                        scheduledDate: s.scheduledDate,
+                        address: s.address,
+                        siteContactName: s.siteContactName,
+                        siteContactDetails: s.siteContactDetails,
+                        notes: s.notes,
+                    },
+                }));
+                lineItems = [...lineItems, ...migrated];
+                additionalServices = [];
+            }
+            setFormData({
+                ...order,
+                type: order.type || OrderType.REGULAR,
+                payments: order.payments || [],
+                vatRate: order.vatRate ?? vatRate,
+                lineItems,
+                additionalServices,
+            });
             try {
                 setDateString(new Date(order.date).toISOString().split('T')[0]);
                 const dsd = order.dealStartDate ? new Date(order.dealStartDate) : null;
@@ -1278,7 +1384,11 @@ const OrderForm: React.FC<{
         const newLineItems = [...formData.lineItems];
         const item = { ...newLineItems[index] };
 
-        (item as any)[name] = (name === 'description' || name === 'unitType' || name === 'supplierId' || name === 'notes' || name === 'preparationStatus') ? value : parseFloat(value) || 0;
+        if (name === 'serviceType') {
+            (item as any).serviceType = value === '' || value === 'ITEM' ? undefined : (value as 'DELIVERY' | 'INSTALLATION');
+        } else {
+            (item as any)[name] = (name === 'description' || name === 'unitType' || name === 'supplierId' || name === 'notes' || name === 'preparationStatus') ? value : parseFloat(value) || 0;
+        }
 
         // Note: Quantity is now independent of width/height for M2 units
         // Users can specify both dimensions (e.g., 200x200) and quantity (e.g., 5 units)
@@ -1346,6 +1456,13 @@ const OrderForm: React.FC<{
         setFormData(prev => ({ ...prev, lineItems: [...prev.lineItems, { id: `li_${Date.now()}`, description: '', quantity: 1, unitPrice: 0, cost: 0, unitType: LineItemUnit.UNIT }]}));
     };
 
+    const addLineItemService = (serviceType: 'DELIVERY' | 'INSTALLATION') => {
+        setFormData(prev => ({
+            ...prev,
+            lineItems: [...prev.lineItems, { id: `li_${Date.now()}`, description: serviceType === 'DELIVERY' ? 'משלוח' : 'התקנה', quantity: 1, unitPrice: 0, cost: 0, unitType: LineItemUnit.UNIT, serviceType }]
+        }));
+    };
+
     const removeLineItem = (index: number) => {
         const item = formData.lineItems[index];
         const itemDescription = item?.description || 'פריט';
@@ -1353,6 +1470,14 @@ const OrderForm: React.FC<{
             return;
         }
         setFormData(prev => ({ ...prev, lineItems: prev.lineItems.filter((_, i) => i !== index)}));
+    };
+
+    const updateLineItemServiceDetails = (lineIndex: number, details: LineItem['serviceDetails']) => {
+        const newLineItems = [...formData.lineItems];
+        const item = { ...newLineItems[lineIndex], serviceDetails: details ?? undefined };
+        newLineItems[lineIndex] = item;
+        setFormData(prev => ({ ...prev, lineItems: newLineItems }));
+        setServiceDetailsModalForIndex(null);
     };
 
     // Track if this is the first product being added (to replace empty item) or subsequent ones (to add new items)
@@ -1560,6 +1685,20 @@ const OrderForm: React.FC<{
             ...prev,
             timeline: [newEvent, ...prev.timeline],
         }));
+
+        if (newTimelineEntry.type === 'NOTE' && newTimelineEntry.content.trim()) {
+            const wallPost: WallPost = {
+                id: `wall_${Date.now()}`,
+                authorId: user?.id ?? '',
+                authorName: user?.name ?? currentUser,
+                content: newTimelineEntry.content.trim(),
+                createdAt: new Date(),
+                orderId: order?.id,
+                orderNumber: order?.orderNumber ?? formData.description ?? 'טיוטה',
+                timelineEventId: newEvent.id,
+            };
+            mongoService.createWallPost(wallPost).catch(err => console.error('Failed to add note to wall:', err));
+        }
 
         setNewTimelineEntry({ 
             type: 'NOTE', 
@@ -1934,6 +2073,7 @@ const OrderForm: React.FC<{
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
+        if (readOnly) return;
 
         let currentCustomerId = formData.customerId;
         let currentContactId = formData.contactId;
@@ -2185,6 +2325,21 @@ const OrderForm: React.FC<{
         if (!setHeaderContent) return;
         setHeaderContent(
             <div className="flex items-center gap-3 px-3 py-1.5 rounded-lg bg-slate-50 border border-slate-100 text-xs text-slate-600">
+                {isAdmin && (
+                    <>
+                        <label className="flex items-center gap-1.5 cursor-pointer select-none" title="הזמנה זו לא תיספר ביעד הכנסות חודשי בלוח הבקרה">
+                            <input
+                                type="checkbox"
+                                name="hiddenFromSalesGoal"
+                                checked={!!formData.hiddenFromSalesGoal}
+                                onChange={handleMasterChange}
+                                className="h-4 w-4 rounded border-slate-300 text-primary focus:ring-primary cursor-pointer"
+                            />
+                            <span className="font-medium text-slate-600">הכנסה נסתרת מיעדי מכירות</span>
+                        </label>
+                        <span className="w-px h-4 bg-slate-200 flex-shrink-0" aria-hidden />
+                    </>
+                )}
                 <span className="flex items-center gap-1.5" title="תאריך יצירה">
                     <span className="text-slate-400 font-medium">נוצר:</span>
                     {isAdmin ? (
@@ -2214,11 +2369,17 @@ const OrderForm: React.FC<{
             </div>
         );
         return () => { setHeaderContent(null); };
-    }, [setHeaderContent, createdDateDisplay, createdAtString, dealStartDateString, hasDealDate, iDealActiveAndDated, isAdmin, minDealDate]);
+    }, [setHeaderContent, createdDateDisplay, createdAtString, dealStartDateString, hasDealDate, iDealActiveAndDated, isAdmin, minDealDate, formData.hiddenFromSalesGoal]);
 
     return (
         <>
         <form onSubmit={handleSubmit} className="space-y-8 text-start">
+             {readOnly && lockedByUserName && (
+                <div className="flex items-center gap-2 p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-800">
+                    <LockIcon className="w-5 h-5 flex-shrink-0" />
+                    <span>ההזמנה פתוחה לעריכה אצל <strong>{lockedByUserName}</strong>. צפייה בלבד.</span>
+                </div>
+             )}
              {isNewSupplierModalOpen && (
                 <Modal title="הוספת ספק חדש (שליח/מתקין)" onClose={() => setIsNewSupplierModalOpen(false)}>
                     <NewSupplierForm onSave={handleSaveNewSupplier} onCancel={() => setIsNewSupplierModalOpen(false)} />
@@ -2357,7 +2518,7 @@ const OrderForm: React.FC<{
                                 </div>
                                 <div className="col-span-2">
                                     <label className="block text-xs font-medium text-slate-600">אימייל</label>
-                                    <input type="email" name="email" value={newCustomerData.email} onChange={handleNewCustomerChange} className="mt-1 block w-full rounded-md border-indigo-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-xs" required />
+                                    <input type="email" name="email" value={newCustomerData.email} onChange={handleNewCustomerChange} className="mt-1 block w-full rounded-md border-indigo-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-xs" />
                                 </div>
                                     <div className="col-span-2">
                                     <label className="block text-xs font-medium text-slate-600">כתובת</label>
@@ -2504,9 +2665,10 @@ const OrderForm: React.FC<{
                     <datalist id="preparation-status-list">
                         {preparationStatusSuggestions.map(s => <option key={s} value={s} />)}
                     </datalist>
-                    <div className="overflow-x-auto rounded-lg border-2 border-slate-300 bg-slate-100/80" style={{ minWidth: 'min(100%, 1520px)' }}>
-                        <div className="hidden md:grid text-xs font-semibold min-w-[1520px]" style={{ gridTemplateColumns: 'minmax(340px, 3fr) minmax(72px, 0.6fr) minmax(72px, 0.6fr) minmax(72px, 0.6fr) minmax(80px, 0.7fr) minmax(100px, 1fr) minmax(100px, 1fr) minmax(80px, 0.8fr) minmax(120px, 1.1fr) minmax(150px, 1fr) minmax(150px, 1fr) minmax(220px, 2fr)' }}>
+                    <div className="overflow-x-auto rounded-lg border-2 border-slate-300 bg-slate-100/80" style={{ minWidth: 'min(100%, 1610px)' }}>
+                        <div className="hidden md:grid text-xs font-semibold min-w-[1610px]" style={{ gridTemplateColumns: 'minmax(340px, 3fr) minmax(90px, 0.8fr) minmax(72px, 0.6fr) minmax(72px, 0.6fr) minmax(72px, 0.6fr) minmax(80px, 0.7fr) minmax(100px, 1fr) minmax(100px, 1fr) minmax(80px, 0.8fr) minmax(120px, 1.1fr) minmax(150px, 1fr) minmax(150px, 1fr) minmax(220px, 2fr)' }}>
                             <div className="col-span-1 py-2.5 px-2 border-b-2 border-r border-slate-400 bg-slate-200 text-slate-800">תיאור</div>
+                            <div className="col-span-1 py-2.5 px-2 border-b-2 border-r border-slate-400 bg-slate-200 text-slate-800">סוג</div>
                             <div className="col-span-1 py-2.5 px-2 border-b-2 border-r border-slate-400 bg-slate-200 text-slate-800">סוג יח'</div>
                             <div className="col-span-1 py-2.5 px-2 border-b-2 border-r border-slate-400 bg-slate-200 text-slate-800">רוחב</div>
                             <div className="col-span-1 py-2.5 px-2 border-b-2 border-r border-slate-400 bg-slate-200 text-slate-800">גובה</div>
@@ -2525,20 +2687,45 @@ const OrderForm: React.FC<{
                             const rowBg = index % 2 === 0 ? 'bg-white' : 'bg-slate-50';
                             const cellBorder = 'border-r border-slate-300';
                             return (
-                                <div key={item.id} className={`p-3 border border-slate-200 rounded-lg bg-slate-50 md:rounded-none md:border-0 md:border-b md:border-slate-300 md:py-2 md:px-0 md:grid md:gap-0 md:items-stretch md:min-w-[1520px] ${rowBg} relative hover:bg-slate-50/80 transition-colors`} style={{ gridTemplateColumns: 'minmax(340px, 3fr) minmax(72px, 0.6fr) minmax(72px, 0.6fr) minmax(72px, 0.6fr) minmax(80px, 0.7fr) minmax(100px, 1fr) minmax(100px, 1fr) minmax(80px, 0.8fr) minmax(120px, 1.1fr) minmax(150px, 1fr) minmax(150px, 1fr) minmax(220px, 2fr)' }}>
+                                <div key={item.id} className={`p-3 border border-slate-200 rounded-lg bg-slate-50 md:rounded-none md:border-0 md:border-b md:border-slate-300 md:py-2 md:px-0 md:grid md:gap-0 md:items-stretch md:min-w-[1610px] ${rowBg} relative hover:bg-slate-50/80 transition-colors ${item.serviceType === 'DELIVERY' ? 'md:bg-blue-50/60' : item.serviceType === 'INSTALLATION' ? 'md:bg-emerald-50/60' : ''}`} style={{ gridTemplateColumns: 'minmax(340px, 3fr) minmax(90px, 0.8fr) minmax(72px, 0.6fr) minmax(72px, 0.6fr) minmax(72px, 0.6fr) minmax(80px, 0.7fr) minmax(100px, 1fr) minmax(100px, 1fr) minmax(80px, 0.8fr) minmax(120px, 1.1fr) minmax(150px, 1fr) minmax(150px, 1fr) minmax(220px, 2fr)' }}>
                                     <button type="button" onClick={() => removeLineItem(index)} className="absolute top-2 left-2 text-red-500 hover:text-red-700 p-1 md:hidden z-10"><DeleteIcon className="h-5 w-5"/></button>
                                     <div className={`md:col-span-1 md:py-1.5 md:px-2 md:border-r md:border-slate-300 md:bg-inherit min-w-0 ${cellBorder}`}>
                                         <label className="text-xs font-medium text-slate-500 md:hidden">תיאור</label>
-                                        <input
-                                            type="text"
+                                        <AutoResizeTextarea
                                             placeholder="תיאור"
                                             name="description"
-                                            value={item.description}
+                                            value={item.description ?? ''}
                                             onChange={e => handleLineItemChange(index, e)}
                                             title={item.description || 'תיאור'}
                                             className="mt-1 md:mt-0 block w-full min-w-0 rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary box-border"
-                                            style={{ maxWidth: '100%' }}
+                                            minHeight={40}
+                                            maxHeight={200}
                                         />
+                                    </div>
+                                    <div className={`md:col-span-1 md:py-1.5 md:px-2 min-w-0 ${cellBorder}`}>
+                                        <label className="text-xs font-medium text-slate-500 md:hidden">סוג</label>
+                                        <div className="flex flex-col gap-1 mt-1 md:mt-0">
+                                            <select name="serviceType" value={item.serviceType ?? ''} onChange={e => handleLineItemChange(index, e)} className="block w-full min-w-0 rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary">
+                                                <option value="">פריט</option>
+                                                <option value="DELIVERY">משלוח</option>
+                                                <option value="INSTALLATION">התקנה</option>
+                                            </select>
+                                            {item.serviceType === 'DELIVERY' && (
+                                                <span className="inline-flex items-center gap-0.5 text-xs font-medium text-blue-700 bg-blue-100 rounded px-1.5 py-0.5 w-fit">
+                                                    <TruckIcon className="h-3.5 w-3.5" /> משלוח
+                                                </span>
+                                            )}
+                                            {item.serviceType === 'INSTALLATION' && (
+                                                <span className="inline-flex items-center gap-0.5 text-xs font-medium text-emerald-700 bg-emerald-100 rounded px-1.5 py-0.5 w-fit">
+                                                    <InstallationIcon className="h-3.5 w-3.5" /> התקנה
+                                                </span>
+                                            )}
+                                            {(item.serviceType === 'DELIVERY' || item.serviceType === 'INSTALLATION') && (
+                                                <button type="button" onClick={() => setServiceDetailsModalForIndex(index)} className="text-xs text-primary hover:text-indigo-800 font-medium w-fit">
+                                                    פרטים
+                                                </button>
+                                            )}
+                                        </div>
                                     </div>
                                     <div className={`md:col-span-1 md:py-1.5 md:px-2 min-w-0 ${cellBorder}`}>
                                         <label className="text-xs font-medium text-slate-500 md:hidden mt-2">סוג יחידה</label>
@@ -2598,16 +2785,16 @@ const OrderForm: React.FC<{
                                         <div className={`col-span-2 md:col-span-2 md:py-1.5 md:px-2 md:min-w-0`}>
                                             <label className="text-xs font-medium text-slate-500 md:hidden">ספק</label>
                                             <div className="flex items-center gap-1 mt-1 md:mt-0">
-                                                <select
-                                                    name="supplierId"
-                                                    value={item.supplierId || ''}
-                                                    onChange={e => handleLineItemChange(index, e)}
-                                                    title={item.supplierId ? (suppliers.find(s => s.id === item.supplierId)?.name || '') : 'בחר ספק'}
-                                                    className="flex-grow min-w-0 max-w-full block w-full rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary sm:text-sm"
-                                                >
-                                                    <option value="">בחר ספק</option>
-                                                    {suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-                                                </select>
+                                                <div className="flex-grow min-w-0">
+                                                    <SearchableSelect
+                                                        options={suppliers.map(s => ({ value: s.id, label: s.name }))}
+                                                        value={item.supplierId || ''}
+                                                        onChange={value => handleLineItemChange(index, { target: { name: 'supplierId', value } } as React.ChangeEvent<HTMLSelectElement>)}
+                                                        placeholder="בחר ספק"
+                                                        title={item.supplierId ? (suppliers.find(s => s.id === item.supplierId)?.name || '') : 'בחר ספק'}
+                                                        className="w-full"
+                                                    />
+                                                </div>
                                                 {item.priceListProductId && (
                                                     <button
                                                         type="button"
@@ -2626,27 +2813,27 @@ const OrderForm: React.FC<{
                                         </div>
                                         <div className="md:py-1.5 md:px-2 md:min-w-0">
                                             <label className="text-xs font-medium text-slate-500 md:hidden mt-2">סטטוס הכנה</label>
-                                            <input
-                                                type="text"
+                                            <AutoResizeTextarea
                                                 placeholder="סטטוס הכנה"
                                                 name="preparationStatus"
                                                 value={item.preparationStatus ?? ''}
                                                 onChange={e => handleLineItemChange(index, e)}
-                                                list="preparation-status-list"
                                                 title={item.preparationStatus ?? 'סטטוס הכנה'}
                                                 className="mt-1 md:mt-0 block w-full min-w-[12rem] rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary"
-                                                style={{ maxWidth: '100%' }}
+                                                minHeight={40}
+                                                maxHeight={200}
                                             />
                                         </div>
                                         <div className="col-span-12 mt-2 md:mt-2 md:py-1.5 md:px-2 md:border-t md:border-slate-200" style={{ gridColumn: '1 / -1' }}>
                                             <label className="text-xs font-medium text-slate-500 md:hidden">הערה</label>
-                                            <textarea
+                                            <AutoResizeTextarea
                                                 name="notes"
                                                 value={item.notes || ''}
                                                 onChange={e => handleLineItemChange(index, e)}
                                                 className="mt-1 md:mt-0 block w-full min-w-[16rem] rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary"
                                                 placeholder="הערות לפריט זה"
-                                                rows={2}
+                                                minHeight={40}
+                                                maxHeight={200}
                                             />
                                         </div>
                                     </div>
@@ -2655,86 +2842,11 @@ const OrderForm: React.FC<{
                         })}
                         </div>
                     </div>
-                    <button type="button" onClick={addLineItem} className="mt-4 py-2 px-4 text-sm font-medium text-primary border border-primary/30 rounded-lg hover:bg-primary/5 hover:border-primary/50 transition-colors">+ הוסף פריט</button>
-                </div>
-                <div>
-                    <h4 className="text-lg font-medium text-slate-800 mb-2">שירותים נוספים (שליח / מתקין)</h4>
-                    <div className="space-y-4">
-                        {formData.additionalServices.map((service, index) => (
-                            <div key={service.id} className="p-4 border border-slate-200 rounded-lg relative bg-slate-50">
-                                <button type="button" onClick={() => removeAdditionalService(index)} className="absolute top-2 left-2 text-red-500 hover:text-red-700 p-1 bg-white rounded-full">
-                                    <DeleteIcon className="h-4 w-4"/>
-                                </button>
-                                <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-                                    <div className="md:col-span-2">
-                                        <label className="block text-xs font-medium text-slate-600">תיאור שירות</label>
-                                        <div className="flex gap-2">
-                                            <input type="text" name="description" value={service.description} onChange={e => handleAdditionalServiceChange(index, e)} className="mt-1 block flex-1 rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
-                                            <button
-                                                type="button"
-                                                onClick={() => {
-                                                    setProductSelectorFor({ type: 'additionalService', index });
-                                                    setIsProductSelectorOpen(true);
-                                                }}
-                                                className="mt-1 px-3 py-2 text-xs bg-primary text-white rounded-md hover:bg-primary-dark whitespace-nowrap"
-                                            >
-                                                בחר מהמחירון
-                                            </button>
-                                        </div>
-                                    </div>
-                                    <div>
-                                        <label className="block text-xs font-medium text-slate-600">עלות (עבורנו)</label>
-                                        <input type="number" name="cost" value={service.cost} onChange={e => handleAdditionalServiceChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" />
-                                    </div>
-                                    <div>
-                                        <label className="block text-xs font-medium text-slate-600">מחיר (ללקוח)</label>
-                                        <input type="number" name="price" value={service.price} onChange={e => handleAdditionalServiceChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" />
-                                    </div>
-                                    <div className="md:col-span-2">
-                                        <label className="block text-xs font-medium text-slate-600">ספק שירות</label>
-                                        <div className="flex items-center gap-2">
-                                            <select name="supplierId" value={service.supplierId || ''} onChange={e => handleAdditionalServiceChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm">
-                                                <option value="">בחר ספק שירות</option>
-                                                {suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-                                            </select>
-                                            <button type="button" onClick={() => { setNewServiceSupplierFor(index); setIsNewSupplierModalOpen(true); }} className="mt-1 p-2 bg-primary text-white rounded-md hover:bg-indigo-700"><PlusIcon className="h-5 w-5"/></button>
-                                        </div>
-                                    </div>
-                                    <div className="md:col-span-2">
-                                        <label className="block text-xs font-medium text-slate-600">מועד ביצוע (תאריך ושעה)</label>
-                                        <input 
-                                            type="datetime-local" 
-                                            name="scheduledDate" 
-                                            value={service.scheduledDate ? (() => {
-                                                const d = new Date(service.scheduledDate);
-                                                const pad = (n: number) => n < 10 ? '0' + n : n;
-                                                return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-                                            })() : ''} 
-                                            onChange={e => handleAdditionalServiceChange(index, e)} 
-                                            className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" 
-                                        />
-                                    </div>
-                                    <div className="md:col-span-2">
-                                        <label className="block text-xs font-medium text-slate-600">כתובת למשלוח/התקנה</label>
-                                        <input type="text" name="address" value={service.address || ''} onChange={e => handleAdditionalServiceChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" />
-                                    </div>
-                                    <div>
-                                        <label className="block text-xs font-medium text-slate-600">איש קשר בשטח</label>
-                                        <input type="text" name="siteContactName" value={service.siteContactName || ''} onChange={e => handleAdditionalServiceChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" />
-                                    </div>
-                                    <div>
-                                        <label className="block text-xs font-medium text-slate-600">פרטי התקשרות</label>
-                                        <input type="text" name="siteContactDetails" value={service.siteContactDetails || ''} onChange={e => handleAdditionalServiceChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" />
-                                    </div>
-                                    <div className="md:col-span-4">
-                                        <label className="block text-xs font-medium text-slate-600">הערות לשירות</label>
-                                        <textarea name="notes" value={service.notes || ''} onChange={e => handleAdditionalServiceChange(index, e)} rows={2} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" />
-                                    </div>
-                                </div>
-                            </div>
-                        ))}
+                    <div className="mt-4 flex flex-wrap gap-2">
+                        <button type="button" onClick={addLineItem} className="py-2 px-4 text-sm font-medium text-primary border border-primary/30 rounded-lg hover:bg-primary/5 hover:border-primary/50 transition-colors">+ הוסף פריט</button>
+                        <button type="button" onClick={() => addLineItemService('DELIVERY')} className="py-2 px-4 text-sm font-medium text-blue-700 border border-blue-300 rounded-lg hover:bg-blue-50 transition-colors inline-flex items-center gap-1"><TruckIcon className="h-4 w-4" /> הוסף משלוח</button>
+                        <button type="button" onClick={() => addLineItemService('INSTALLATION')} className="py-2 px-4 text-sm font-medium text-emerald-700 border border-emerald-300 rounded-lg hover:bg-emerald-50 transition-colors inline-flex items-center gap-1"><InstallationIcon className="h-4 w-4" /> הוסף התקנה</button>
                     </div>
-                    <button type="button" onClick={addAdditionalService} className="mt-2 text-sm text-primary hover:text-indigo-800">+ הוסף שירות</button>
                 </div>
                 <div className={`p-4 rounded-md border-2 transition-colors ${derivedPaymentStatus === PaymentStatus.PAID ? 'bg-green-50 border-green-200' : 'bg-slate-50 border-slate-200'}`}>
                     <div className="flex justify-between items-center mb-4 border-b pb-2 border-slate-200/50">
@@ -3108,7 +3220,7 @@ const OrderForm: React.FC<{
                         <button type="button" onClick={() => setNewTimelineEntry(prev => ({ ...prev, type: 'NOTE' }))} className={`px-4 py-2 text-sm font-medium ${newTimelineEntry.type === 'NOTE' ? 'border-b-2 border-primary text-primary' : 'text-slate-500'}`}>הוסף הערה</button>
                          <button type="button" onClick={() => setNewTimelineEntry(prev => ({ ...prev, type: 'TASK' }))} className={`px-4 py-2 text-sm font-medium ${newTimelineEntry.type === 'TASK' ? 'border-b-2 border-primary text-primary' : 'text-slate-500'}`}>הוסף משימה</button>
                     </div>
-                    <textarea value={newTimelineEntry.content} onChange={e => setNewTimelineEntry(prev => ({ ...prev, content: e.target.value }))} rows={3} placeholder={newTimelineEntry.type === 'NOTE' ? 'רשום עדכון...' : 'תיאור המשימה...'} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" />
+                    <AutoResizeTextarea value={newTimelineEntry.content} onChange={e => setNewTimelineEntry(prev => ({ ...prev, content: e.target.value }))} placeholder={newTimelineEntry.type === 'NOTE' ? 'רשום עדכון...' : 'תיאור המשימה...'} minHeight={56} maxHeight={280} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" />
                     {newTimelineEntry.type === 'TASK' && (
                         <div className="grid grid-cols-2 gap-4 mt-3">
                             <div>
@@ -3244,7 +3356,7 @@ const OrderForm: React.FC<{
                 )}
                 <div className="flex space-x-2 space-x-reverse">
                     <button type="button" onClick={onCancel} className="px-4 py-2 bg-slate-200 text-slate-800 rounded-md hover:bg-slate-300">ביטול</button>
-                    <button type="submit" className="px-4 py-2 bg-primary text-white rounded-md hover:bg-indigo-700">שמור הזמנה</button>
+                    {!readOnly && <button type="submit" className="px-4 py-2 bg-primary text-white rounded-md hover:bg-indigo-700">שמור הזמנה</button>}
                 </div>
             </div>
         </form>
@@ -3263,6 +3375,21 @@ const OrderForm: React.FC<{
                 orderStatus={order?.orderStatus}
             />
         )}
+        {serviceDetailsModalForIndex !== null && formData.lineItems[serviceDetailsModalForIndex] && (() => {
+            const lineItem = formData.lineItems[serviceDetailsModalForIndex];
+            const details = lineItem.serviceDetails ?? {};
+            return (
+                <ServiceDetailsModal
+                    scheduledDate={details.scheduledDate}
+                    address={details.address ?? ''}
+                    siteContactName={details.siteContactName ?? ''}
+                    siteContactDetails={details.siteContactDetails ?? ''}
+                    notes={details.notes ?? ''}
+                    onClose={() => setServiceDetailsModalForIndex(null)}
+                    onSave={(payload) => updateLineItemServiceDetails(serviceDetailsModalForIndex, payload)}
+                />
+            );
+        })()}
         {sendItemModalOpen && sendItemForIndex !== null && formData.lineItems[sendItemForIndex] && (
             <SendItemToSuppliersModal
                 isOpen={sendItemModalOpen}
@@ -3377,26 +3504,54 @@ const OrderForm: React.FC<{
     );
 };
 
+const ORDERS_VIEW_STORAGE_KEY = 'eli_orders_view';
+
+function getOrdersViewFromStorage(): Partial<{
+    searchTerm: string;
+    customerFilter: string[];
+    customerIsImportPlaceholderOnly: boolean;
+    supplierFilter: string[];
+    employeeFilter: string[];
+    orderStatusFilter: string[];
+    paymentStatusFilter: string[];
+    monthFilter: string;
+    yearFilter: string;
+    startDateFilter: string;
+    endDateFilter: string;
+    dateFilterType: 'ORDER_DATE' | 'DEAL_DATE';
+    sortBy: 'date' | 'dueDate' | 'updatedAt';
+}> {
+    try {
+        const s = sessionStorage.getItem(ORDERS_VIEW_STORAGE_KEY);
+        if (s) return JSON.parse(s);
+    } catch (_) {}
+    return {};
+}
+
 const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLocal, customers, setCustomers, suppliers, setSuppliers, employees, addActivity, initialOpenOrderId, onOrderOpened, openNewOrderRequest, onClearedOpenNewOrderRequest, statusConfigs, getNextOrderNumber, vatRate }) => {
+    const { user } = useAuth();
+    const isAdmin = user?.roleType === 'ADMIN';
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [isImportModalOpen, setIsImportModalOpen] = useState(false);
     const [editingOrder, setEditingOrder] = useState<Order | null>(null);
     const [orderFormHeaderContent, setOrderFormHeaderContent] = useState<React.ReactNode>(null);
-    const [searchTerm, setSearchTerm] = useState('');
-    const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
+    const [orderLockedByOther, setOrderLockedByOther] = useState<{ userName: string } | null>(null);
+    const savedView = useRef(getOrdersViewFromStorage()).current;
+    const [searchTerm, setSearchTerm] = useState(() => savedView.searchTerm ?? '');
+    const [debouncedSearchTerm, setDebouncedSearchTerm] = useState(() => savedView.searchTerm ?? '');
     const abortControllerRef = useRef<AbortController | null>(null);
-    const [customerFilter, setCustomerFilter] = useState<string[]>([]);
-    const [customerIsImportPlaceholderOnly, setCustomerIsImportPlaceholderOnly] = useState(false);
-    const [supplierFilter, setSupplierFilter] = useState<string[]>([]);
-    const [employeeFilter, setEmployeeFilter] = useState<string[]>([]); // New Employee Filter
-    const [orderStatusFilter, setOrderStatusFilter] = useState<string[]>([]);
-    const [paymentStatusFilter, setPaymentStatusFilter] = useState<PaymentStatus[]>([]);
-    const [monthFilter, setMonthFilter] = useState<string>('all');
-    const [yearFilter, setYearFilter] = useState<string>('all');
-    const [startDateFilter, setStartDateFilter] = useState<string>(''); // NEW: Date Range Start
-    const [endDateFilter, setEndDateFilter] = useState<string>('');     // NEW: Date Range End
-    const [dateFilterType, setDateFilterType] = useState<'ORDER_DATE' | 'DEAL_DATE'>('ORDER_DATE');
-    const [sortBy, setSortBy] = useState<'date' | 'dueDate' | 'updatedAt'>('updatedAt');
+    const [customerFilter, setCustomerFilter] = useState<string[]>(() => Array.isArray(savedView.customerFilter) ? savedView.customerFilter : []);
+    const [customerIsImportPlaceholderOnly, setCustomerIsImportPlaceholderOnly] = useState(() => savedView.customerIsImportPlaceholderOnly ?? false);
+    const [supplierFilter, setSupplierFilter] = useState<string[]>(() => Array.isArray(savedView.supplierFilter) ? savedView.supplierFilter : []);
+    const [employeeFilter, setEmployeeFilter] = useState<string[]>(() => Array.isArray(savedView.employeeFilter) ? savedView.employeeFilter : []);
+    const [orderStatusFilter, setOrderStatusFilter] = useState<string[]>(() => Array.isArray(savedView.orderStatusFilter) ? savedView.orderStatusFilter : []);
+    const [paymentStatusFilter, setPaymentStatusFilter] = useState<PaymentStatus[]>(() => Array.isArray(savedView.paymentStatusFilter) ? savedView.paymentStatusFilter : []);
+    const [monthFilter, setMonthFilter] = useState<string>(() => savedView.monthFilter ?? 'all');
+    const [yearFilter, setYearFilter] = useState<string>(() => savedView.yearFilter ?? 'all');
+    const [startDateFilter, setStartDateFilter] = useState<string>(() => savedView.startDateFilter ?? '');
+    const [endDateFilter, setEndDateFilter] = useState<string>(() => savedView.endDateFilter ?? '');
+    const [dateFilterType, setDateFilterType] = useState<'ORDER_DATE' | 'DEAL_DATE'>(() => savedView.dateFilterType ?? 'ORDER_DATE');
+    const [sortBy, setSortBy] = useState<'date' | 'dueDate' | 'updatedAt'>(() => savedView.sortBy ?? 'updatedAt');
     
     // Pagination state
     const [currentPage, setCurrentPage] = useState(1);
@@ -3404,7 +3559,8 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
     const [totalCount, setTotalCount] = useState(0);
     const [loading, setLoading] = useState(false);
     const [paginatedOrders, setPaginatedOrders] = useState<Order[]>([]);
-    const [summaryTotals, setSummaryTotals] = useState({ totalAmount: 0, totalProfit: 0, totalBalance: 0, totalCost: 0, totalAmountInclVat: 0, totalBalanceInclVat: 0 }); 
+    const [summaryTotals, setSummaryTotals] = useState({ totalAmount: 0, totalProfit: 0, totalBalance: 0, totalCost: 0, totalAmountInclVat: 0, totalBalanceInclVat: 0 });
+    const [exportingExcel, setExportingExcel] = useState(false); 
 
     const customerOptions = useMemo(() => customers.map(c => ({ value: c.id, label: c.name })), [customers]);
     const supplierOptions = useMemo(() => suppliers.map(s => ({ value: s.id, label: s.name })), [suppliers]);
@@ -3425,7 +3581,29 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
         { value: 10, name: 'אוקטובר' }, { value: 11, name: 'נובמבר' }, { value: 12, name: 'דצמבר' },
     ];
 
-    const handleEditOrder = (order: Order) => {
+    const closeOrderModal = React.useCallback(() => {
+        const orderId = editingOrder?.id;
+        setOrderFormHeaderContent(null);
+        setOrderLockedByOther(null);
+        setEditingOrder(null);
+        setIsModalOpen(false);
+        if (orderId && user?.id) {
+            mongoService.releaseOrderLock(orderId).catch(() => {});
+        }
+    }, [editingOrder?.id, user?.id]);
+
+    const handleEditOrder = async (order: Order) => {
+        setOrderLockedByOther(null);
+        if (order.id && user?.id) {
+            try {
+                const result = await mongoService.acquireOrderLock(order.id, user.name || undefined);
+                if (!result.success && result.lockedBy) {
+                    setOrderLockedByOther({ userName: result.lockedBy.userName });
+                }
+            } catch {
+                setOrderLockedByOther({ userName: 'משתמש אחר' });
+            }
+        }
         setEditingOrder(order);
         setIsModalOpen(true);
     };
@@ -3435,6 +3613,27 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
         const t = setTimeout(() => setDebouncedSearchTerm(searchTerm), 350);
         return () => clearTimeout(t);
     }, [searchTerm]);
+
+    // Persist filters/view to sessionStorage so they survive navigation between pages
+    useEffect(() => {
+        try {
+            sessionStorage.setItem(ORDERS_VIEW_STORAGE_KEY, JSON.stringify({
+                searchTerm,
+                customerFilter,
+                customerIsImportPlaceholderOnly,
+                supplierFilter,
+                employeeFilter,
+                orderStatusFilter,
+                paymentStatusFilter,
+                monthFilter,
+                yearFilter,
+                startDateFilter,
+                endDateFilter,
+                dateFilterType,
+                sortBy,
+            }));
+        } catch (_) {}
+    }, [searchTerm, customerFilter, customerIsImportPlaceholderOnly, supplierFilter, employeeFilter, orderStatusFilter, paymentStatusFilter, monthFilter, yearFilter, startDateFilter, endDateFilter, dateFilterType, sortBy]);
 
     const resetFilters = () => {
         setSearchTerm('');
@@ -3642,8 +3841,19 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
         }
     }, [initialOpenOrderId, paginatedOrders, orders, onOrderOpened]);
 
+    // Poll order list when Orders page is visible (every 90s) for data sync
+    const refetchOrdersRef = useRef(refetchOrders);
+    refetchOrdersRef.current = refetchOrders;
+    useEffect(() => {
+        const interval = setInterval(() => {
+            if (document.visibilityState === 'visible') refetchOrdersRef.current(true);
+        }, 90 * 1000);
+        return () => clearInterval(interval);
+    }, []);
+
     useEffect(() => {
         if (openNewOrderRequest && onClearedOpenNewOrderRequest) {
+            setOrderLockedByOther(null);
             setEditingOrder(null);
             setIsModalOpen(true);
             onClearedOpenNewOrderRequest();
@@ -3690,8 +3900,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
         if (keepOpen) {
                 setEditingOrder(savedOrder);
         } else {
-            setIsModalOpen(false);
-            setEditingOrder(null);
+            closeOrderModal();
             }
         } catch (error) {
             console.error('Error saving order:', error);
@@ -3760,6 +3969,134 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
         }
         return Array.from(byKey.values());
     }, [paginatedOrders, dateFilterType]);
+
+    const exportOrdersToCSV = (filename: string, rows: (string | number)[][]) => {
+        const processRow = (row: (string | number)[]) => {
+            return row.map(val => {
+                if (val === null || val === undefined) return '';
+                let result = String(val);
+                result = result.replace(/"/g, '""');
+                if (result.search(/("|,|\n)/g) >= 0) result = `"${result}"`;
+                return result;
+            }).join(',');
+        };
+        const csvContent = '\uFEFF' + rows.map(processRow).join('\n');
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = filename;
+        link.style.visibility = 'hidden';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(link.href);
+    };
+
+    const buildOrderRow = (order: Order): (string | number)[] => {
+        const { totalAmount, profit, totalCost, totalPaid } = calculateOrderTotals(order);
+        const statusConfig = statusConfigs.find(c => c.label === order.orderStatus);
+        const isActiveDeal = statusConfig ? statusConfig.isActiveDeal : true;
+        const currentOrderVat = order.vatRate ?? vatRate;
+        const totalDueWithVat = totalAmount * (1 + currentOrderVat / 100);
+        const balanceDue = isActiveDeal ? Math.max(0, totalDueWithVat - totalPaid) : 0;
+        const calculationBaseDate = order.dealStartDate || order.date;
+        const dueDate = calculateDueDate(calculationBaseDate, order.paymentTerms);
+        const displayDate = dateFilterType === 'ORDER_DATE' ? order.date : order.dealStartDate;
+        const relatedSupplierIds = new Set<string>();
+        if (order.supplierId) relatedSupplierIds.add(order.supplierId);
+        order.lineItems.forEach(li => li.supplierId && relatedSupplierIds.add(li.supplierId));
+        order.additionalServices.forEach(as => as.supplierId && relatedSupplierIds.add(as.supplierId));
+        const relatedSupplierNames = Array.from(relatedSupplierIds)
+            .map(id => suppliers.find(s => s.id === id)?.name)
+            .filter(Boolean) as string[];
+        return [
+            displayDate ? new Date(displayDate).toLocaleDateString('he-IL') : '—',
+            order.orderStatus || '—',
+            order.orderNumber || '—',
+            (order.description || '').replace(/\n/g, ' '),
+            getCustomerName(order.customerId),
+            relatedSupplierNames.join('; ') || '—',
+            totalAmount.toFixed(2),
+            totalCost.toFixed(2),
+            profit.toFixed(2),
+            dueDate.toLocaleDateString('he-IL'),
+            balanceDue.toFixed(2)
+        ];
+    };
+
+    const handleExportExcel = async () => {
+        setExportingExcel(true);
+        try {
+            const filters = {
+                customerFilter,
+                supplierFilter,
+                employeeFilter,
+                orderStatusFilter,
+                paymentStatusFilter,
+                monthFilter,
+                yearFilter,
+                startDateFilter,
+                endDateFilter,
+                dateFilterType,
+                searchTerm: debouncedSearchTerm,
+                sortBy,
+                showCompletedOrders: true,
+                customerIsImportPlaceholderOnly
+            };
+            const EXPORT_LIMIT = 15000;
+            const result = await mongoService.getOrdersPaginated(filters, 1, EXPORT_LIMIT);
+            const ordersToExport = result.orders;
+            const header = [
+                dateFilterType === 'ORDER_DATE' ? 'תאריך הזמנה' : 'תאריך אישור',
+                'סטטוס',
+                'מספר הזמנה',
+                'תיאור',
+                'לקוח',
+                'ספקים',
+                'מחיר הזמנה',
+                'עלות הזמנה',
+                'רווח',
+                'מועד תשלום',
+                'יתרה לתשלום'
+            ];
+            const dataRows = ordersToExport.map(order => buildOrderRow(order));
+            const exportedSum = ordersToExport.reduce(
+                (acc, order) => {
+                    const { totalAmount, profit, totalCost, totalPaid } = calculateOrderTotals(order);
+                    const statusConfig = statusConfigs.find(c => c.label === order.orderStatus);
+                    const isActiveDeal = statusConfig ? statusConfig.isActiveDeal : true;
+                    const currentOrderVat = order.vatRate ?? vatRate;
+                    const totalDueWithVat = totalAmount * (1 + currentOrderVat / 100);
+                    const balanceDue = isActiveDeal ? Math.max(0, totalDueWithVat - totalPaid) : 0;
+                    acc.totalAmount += totalAmount;
+                    acc.totalCost += totalCost;
+                    acc.totalProfit += profit;
+                    acc.totalBalance += balanceDue;
+                    return acc;
+                },
+                { totalAmount: 0, totalCost: 0, totalProfit: 0, totalBalance: 0 }
+            );
+            const summaryRow = [
+                'סה"כ',
+                '',
+                '',
+                '',
+                '',
+                '',
+                exportedSum.totalAmount.toFixed(2),
+                exportedSum.totalCost.toFixed(2),
+                exportedSum.totalProfit.toFixed(2),
+                '',
+                exportedSum.totalBalance.toFixed(2)
+            ];
+            const dateStr = new Date().toISOString().slice(0, 10);
+            exportOrdersToCSV(`orders_export_${dateStr}.csv`, [header, ...dataRows, summaryRow]);
+        } catch (err) {
+            console.error('Export Excel failed:', err);
+        } finally {
+            setExportingExcel(false);
+        }
+    };
     
     return (
         <div>
@@ -3855,14 +4192,28 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                                         <option value="updatedAt">עודכנו לאחרונה</option>
                                     </select>
                                 </div>
-                                <button
-                                    type="button"
-                                    onClick={() => setIsImportModalOpen(true)}
-                                    className="flex items-center px-4 py-2 rounded-md text-sm font-medium border border-slate-300 bg-white text-slate-600 hover:bg-slate-50"
-                                >
-                                    <DownloadIcon className="w-5 h-5 me-2" />
-                                    ייבוא מטבלת שליטה (CSV)
-                                </button>
+                                {isAdmin && (
+                                    <>
+                                        <button
+                                            type="button"
+                                            onClick={handleExportExcel}
+                                            disabled={exportingExcel}
+                                            className="flex items-center px-4 py-2 rounded-md text-sm font-medium border border-slate-300 bg-white text-slate-600 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                            title="הורד כל ההזמנות לפי הסינון הנוכחי לקובץ Excel (CSV)"
+                                        >
+                                            <DownloadIcon className="w-5 h-5 me-2" />
+                                            {exportingExcel ? 'מוריד...' : 'הורד Excel (כל התוצאות)'}
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => setIsImportModalOpen(true)}
+                                            className="flex items-center px-4 py-2 rounded-md text-sm font-medium border border-slate-300 bg-white text-slate-600 hover:bg-slate-50"
+                                        >
+                                            <DownloadIcon className="w-5 h-5 me-2" />
+                                            ייבוא מטבלת שליטה (CSV)
+                                        </button>
+                                    </>
+                                )}
                              </div>
                              
                              <button 
@@ -3978,9 +4329,9 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                                         <div className="line-clamp-2 break-words">{order.description}</div>
                                         {order.parentOrderId && <div className="text-xs text-slate-400">מקושר להזמנת אב</div>}
                                     </td>
-                                    <td className="px-4 py-4 text-sm text-slate-500 max-w-[140px]" title={getCustomerName(order.customerId)}>
+                                    <td className="px-4 py-4 text-sm text-slate-500 min-w-[140px] max-w-[220px]" title={getCustomerName(order.customerId)}>
                                         <div className="flex items-center gap-2 min-w-0">
-                                            <span className="truncate">{getCustomerName(order.customerId)}</span>
+                                            <span className="break-words line-clamp-2">{getCustomerName(order.customerId)}</span>
                                             {whatsappUrl && <a href={whatsappUrl} target="crm_whatsapp" title={`שלח וואטסאפ ל-${primaryContact?.phone}`} className="text-green-500 hover:text-green-700"><WhatsAppIcon className="h-5 w-5"/></a>}
                                             {gmailUrl && <a href={gmailUrl} target="crm_email" title={`שלח אימייל ל-${primaryContact?.email}`} className="text-slate-500 hover:text-primary"><EmailIcon className="h-5 w-5"/></a>}
                                             {telUrl && <a href={telUrl} title={`התקשר ל-${primaryContact?.phone}`} className="text-slate-500 hover:text-primary"><PhoneIcon className="h-5 w-5"/></a>}
@@ -4156,7 +4507,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
             {isModalOpen && (
                 <Modal 
                     title={editingOrder ? `עריכת הזמנה ${editingOrder.orderNumber}` : `הוספת הזמנה חדשה (${getNextOrderNumber()})`}
-                    onClose={() => { setOrderFormHeaderContent(null); setIsModalOpen(false); }}
+                    onClose={closeOrderModal}
                     size="8xl"
                     headerEnd={orderFormHeaderContent}
                 >
@@ -4170,7 +4521,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                         employees={employees}
                         onSave={handleSaveOrder} 
                         onDraftCreate={handleDraftCreate}
-                        onCancel={() => setIsModalOpen(false)} 
+                        onCancel={closeOrderModal} 
                         addActivity={addActivity}
                         onSwitchOrder={async (id) => {
                             try {
@@ -4184,6 +4535,8 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                         getNextOrderNumber={getNextOrderNumber}
                         vatRate={vatRate}
                         setHeaderContent={setOrderFormHeaderContent}
+                        readOnly={!!orderLockedByOther}
+                        lockedByUserName={orderLockedByOther?.userName}
                     />
                 </Modal>
             )}

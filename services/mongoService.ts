@@ -1,7 +1,8 @@
 import {
     Customer, Order, Supplier, Employee, Activity, ActivityFilters, ActivitiesResult, OrderStatusConfiguration,
     FixedExpense, VariableExpense, Loan, Debt, Receivable, EquityInvestment,
-    AttendanceRecord, ManualEvent, WallPost, CallLog, ImprovementSuggestion, ImprovementSuggestionStatus, ImprovementSuggestionType
+    AttendanceRecord, ManualEvent, WallPost, CallLog, ImprovementSuggestion, ImprovementSuggestionStatus, ImprovementSuggestionType,
+    PerformanceMetricsPayload
 } from '../types';
 
 // API Base URL - use relative path in production
@@ -169,6 +170,30 @@ interface PayableItem {
     itemIndex: number;
 }
 
+const ORDERS_VIEW_STORAGE_KEY = 'eli_orders_view';
+
+/** Read order-level filters from Orders page storage so payables report can use the same set. */
+export function getOrderFiltersFromOrdersView(): Partial<{
+    orderStatusFilter: string[];
+    dateFilterType: string;
+    startDateFilter: string;
+    endDateFilter: string;
+    monthFilter: string;
+    yearFilter: string;
+    customerFilter: string[];
+    supplierFilter: string[];
+    employeeFilter: string[];
+    paymentStatusFilter: string[];
+    customerIsImportPlaceholderOnly: boolean;
+    showCompletedOrders: boolean;
+}> {
+    try {
+        const s = sessionStorage.getItem(ORDERS_VIEW_STORAGE_KEY);
+        if (s) return JSON.parse(s);
+    } catch (_) {}
+    return {};
+}
+
 export async function getPayableItems(
     filters: {
         supplierFilterId?: string;
@@ -176,6 +201,19 @@ export async function getPayableItems(
         dateEnd?: string;
         showPaid?: boolean;
         viewMode?: 'forecast' | 'purchase_history' | 'payment_log';
+        /** Order-level filters (when provided, payables use same order set as Orders page) */
+        orderStatusFilter?: string[];
+        dateFilterType?: string;
+        startDateFilter?: string;
+        endDateFilter?: string;
+        monthFilter?: string;
+        yearFilter?: string;
+        customerFilter?: string[];
+        supplierFilter?: string[];
+        employeeFilter?: string[];
+        paymentStatusFilter?: string[];
+        customerIsImportPlaceholderOnly?: boolean;
+        showCompletedOrders?: boolean;
     } = {},
     page: number = 1,
     limit: number = 1000
@@ -365,6 +403,20 @@ export async function createActivity(activity: Activity): Promise<Activity> {
         method: 'POST',
         body: JSON.stringify(activity),
     });
+}
+
+// ==================== PERFORMANCE METRICS ====================
+export async function getPerformanceMetrics(filters: {
+    from?: string;
+    to?: string;
+    employeeId?: string;
+} = {}): Promise<PerformanceMetricsPayload> {
+    const params = new URLSearchParams();
+    if (filters.from) params.append('from', filters.from);
+    if (filters.to) params.append('to', filters.to);
+    if (filters.employeeId) params.append('employeeId', filters.employeeId);
+    const q = params.toString();
+    return apiRequest<PerformanceMetricsPayload>(`/performance-metrics${q ? `?${q}` : ''}`);
 }
 
 // ==================== STATUS CONFIGS ====================

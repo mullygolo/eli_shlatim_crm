@@ -1335,7 +1335,11 @@ const OrderForm: React.FC<{
             const { checked } = e.target as HTMLInputElement;
             setFormData(prev => ({...prev, [name]: checked }));
         } else {
-             setFormData(prev => ({ ...prev, [name]: name === 'vatRate' ? (parseFloat(value) || 0) : value }));
+            setFormData(prev => ({
+                ...prev,
+                [name]: name === 'vatRate' ? (parseFloat(value) || 0) : value,
+                ...(name === 'orderStatus' && user?.id && employees.some(emp => emp.id === user.id) ? { employeeId: user.id } : {}),
+            }));
         }
         if (name === 'date') {
             setDateString(value);
@@ -2617,10 +2621,10 @@ const OrderForm: React.FC<{
                 </div>
                 <div>
                     <label className="block text-sm font-medium text-slate-700">סוכן מטפל</label>
-                    <select name="employeeId" value={formData.employeeId} onChange={handleMasterChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm">
-                        <option value="">בחר עובד</option>
-                        {employees.map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
-                    </select>
+                    <div className="mt-1 block w-full rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+                        {formData.employeeId ? (employees.find(e => e.id === formData.employeeId)?.name ?? formData.employeeId) : '—'}
+                    </div>
+                    <p className="mt-0.5 text-xs text-slate-500">מתעדכן אוטומטית לפי משנה הסטטוס</p>
                 </div>
             </div>
 
@@ -3656,8 +3660,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
     const handleStatusChange = async (orderId: string, newStatus: string) => {
         const originalOrder = paginatedOrders.find(o => o.id === orderId) || orders.find(o => o.id === orderId);
         if (!originalOrder || originalOrder.orderStatus === newStatus) return;
-        
-        const user = employees.find(emp => emp.id === originalOrder.employeeId)?.name || 'מערכת';
+        const currentUserName = employees.find(emp => emp.id === user?.id)?.name || user?.name || 'מערכת';
         const config = statusConfigs.find(c => c.label === newStatus);
         const isNowActiveDeal = config ? config.isActiveDeal : false;
         let newDealStartDate = originalOrder.dealStartDate;
@@ -3668,17 +3671,19 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
             id: `log_${Date.now()}`,
             timestamp: new Date(),
             content: `שינוי סטטוס`,
-            user: user,
+            user: currentUserName,
             type: 'LOG',
             changes: [
                 { field: 'orderStatus', label: 'סטטוס', oldValue: originalOrder.orderStatus, newValue: newStatus, action: 'UPDATED' }
             ]
         };
-        const newStatusHistoryEntry = { status: newStatus, startDate: new Date() };
+        const assignedId = user?.id ?? originalOrder.employeeId;
+        const newStatusHistoryEntry = { status: newStatus, startDate: new Date(), employeeId: assignedId };
         const updatedOrder: Order = {
             ...originalOrder,
             orderStatus: newStatus,
-            dealStartDate: newDealStartDate, 
+            employeeId: assignedId,
+            dealStartDate: newDealStartDate,
             timeline: [logEvent, ...originalOrder.timeline],
             statusHistory: [...(originalOrder.statusHistory || []), newStatusHistoryEntry],
         };
@@ -3829,17 +3834,24 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
         }
     }, [orders, currentPage, pageSize, customerFilter, supplierFilter, employeeFilter, orderStatusFilter, paymentStatusFilter, monthFilter, yearFilter, startDateFilter, endDateFilter, dateFilterType, debouncedSearchTerm, sortBy, customerIsImportPlaceholderOnly, statusConfigs, vatRate]);
 
+    // When opening order via link (e.g. from Logs, Reports, Customers) — fetch from server so modal shows up-to-date data
     useEffect(() => {
-        if (initialOpenOrderId) {
-            const orderToOpen = paginatedOrders.find(o => o.id === initialOpenOrderId) || orders.find(o => o.id === initialOpenOrderId);
-            if (orderToOpen) {
-                handleEditOrder(orderToOpen);
-            }
-            if (onOrderOpened) {
-                onOrderOpened();
-            }
-        }
-    }, [initialOpenOrderId, paginatedOrders, orders, onOrderOpened]);
+        if (!initialOpenOrderId || !onOrderOpened) return;
+        const orderId = initialOpenOrderId;
+        onOrderOpened(); // clear openOrderId immediately to avoid re-running
+        let cancelled = false;
+        mongoService.getOrderById(orderId)
+            .then((orderFromServer) => {
+                if (!cancelled) handleEditOrder(orderFromServer);
+            })
+            .catch((err) => {
+                if (!cancelled) {
+                    console.error('Failed to load order for open link:', err);
+                    alert('לא ניתן לטעון את ההזמנה. ייתכן שהיא נמחקה או שאין גישה.');
+                }
+            });
+        return () => { cancelled = true; };
+    }, [initialOpenOrderId]);
 
     // Poll order list when Orders page is visible (every 90s) for data sync
     const refetchOrdersRef = useRef(refetchOrders);

@@ -1,7 +1,7 @@
 
 import React from 'react';
 import { Page } from '../types';
-import { DashboardIcon, OrdersIcon, CustomersIcon, SuppliersIcon, ReportsIcon, SettingsIcon, FinanceIcon, ClockIcon, PriceListIcon, PhoneIcon, LightbulbIcon, TrendingUpIcon } from './icons';
+import { DashboardIcon, OrdersIcon, CustomersIcon, SuppliersIcon, ReportsIcon, SettingsIcon, FinanceIcon, ClockIcon, PriceListIcon, PhoneIcon, LightbulbIcon } from './icons';
 import { PAGE_TITLES } from '../App';
 import { useAuth } from '../contexts/AuthContext';
 
@@ -13,8 +13,7 @@ interface SidebarProps {
 const Sidebar: React.FC<SidebarProps> = ({ currentPage, setCurrentPage }) => {
     const { user } = useAuth();
     const isEmployee = user?.roleType === 'EMPLOYEE';
-    const isAdmin = user?.roleType === 'ADMIN';
-
+    
     const navItems: { page: Page; icon: React.ReactNode; label?: string }[] = [
         { page: 'Dashboard', icon: <DashboardIcon className="h-6 w-6" /> },
         { page: 'Orders', icon: <OrdersIcon className="h-6 w-6" /> },
@@ -23,7 +22,6 @@ const Sidebar: React.FC<SidebarProps> = ({ currentPage, setCurrentPage }) => {
         { page: 'PriceList', icon: <PriceListIcon className="h-6 w-6" /> },
         { page: 'Reports', icon: <ReportsIcon className="h-6 w-6" />, label: 'תשלום לספקים' },
         ...(isEmployee ? [] : [{ page: 'Finance' as Page, icon: <FinanceIcon className="h-6 w-6" />, label: 'דוחות כספיים' }]),
-        ...(isAdmin ? [{ page: 'Performance' as Page, icon: <TrendingUpIcon className="h-6 w-6" />, label: 'דוח ביצועים' }] : []),
         { page: 'Attendance', icon: <ClockIcon className="h-6 w-6" />, label: 'נוכחות ושכר' },
         { page: 'CallCenter', icon: <PhoneIcon className="h-6 w-6" />, label: 'מרכזייה' },
         { page: 'ImprovementSuggestions' as Page, icon: <LightbulbIcon className="h-6 w-6" />, label: 'הצעות ייעול' },

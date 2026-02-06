@@ -38,7 +38,6 @@ import AttendancePage from './components/AttendancePage';
 import PriceListPage from './components/PriceListPage';
 import CallCenterPage from './components/CallCenterPage';
 import ImprovementSuggestionsPage from './components/ImprovementSuggestionsPage';
-import PerformanceDashboardPage from './components/PerformanceDashboardPage';
 
 // A map for page titles
 export const PAGE_TITLES: Record<Page, string> = {
@@ -58,7 +57,6 @@ export const PAGE_TITLES: Record<Page, string> = {
     PriceList: 'מחירון',
     CallCenter: 'מרכזייה',
     ImprovementSuggestions: 'הצעות ייעול',
-    Performance: 'דוח ביצועים',
 };
 
 const App: React.FC = () => {
@@ -99,15 +97,12 @@ const App: React.FC = () => {
     // Auth context
     const { logout, isAuthenticated } = useAuth();
     
-    // Redirect EMPLOYEE away from restricted pages; Performance only for ADMIN
+    // Redirect EMPLOYEE away from restricted pages
     useEffect(() => {
         if (user?.roleType === 'EMPLOYEE') {
             if (currentPage === 'Finance' || currentPage === 'Settings') {
                 setCurrentPage('Dashboard');
             }
-        }
-        if (currentPage === 'Performance' && user?.roleType !== 'ADMIN') {
-            setCurrentPage('Dashboard');
         }
     }, [currentPage, user]);
     
@@ -312,10 +307,10 @@ const App: React.FC = () => {
         setOpenOrderId(orderId);
     }, []);
 
-    // Refresh global orders when entering pages that display order-derived data (single source of truth from server)
+    // When opening Reports (payments to suppliers), refresh orders so the list matches the payables API and navigation to order works
     useEffect(() => {
-        if (['Reports', 'Orders', 'Dashboard', 'Finance'].includes(currentPage)) {
-            getOrders().then(setOrders).catch((err) => console.error('Error refreshing orders:', err));
+        if (currentPage === 'Reports') {
+            getOrders().then(setOrders).catch((err) => console.error('Error refreshing orders for Reports:', err));
         }
     }, [currentPage]);
     
@@ -529,8 +524,6 @@ const App: React.FC = () => {
                 return <CallCenterPage />;
             case 'ImprovementSuggestions':
                 return <ImprovementSuggestionsPage currentPage={currentPage} />;
-            case 'Performance':
-                return <PerformanceDashboardPage employees={employees} onNavigateToOrder={handleNavigateToOrder} />;
             default:
                 return <Dashboard customers={customers} orders={orders} activities={activities} monthlyGoal={monthlyGoal} setMonthlyGoal={setMonthlyGoalWithSync} employees={employees} onNavigateToOrder={handleNavigateToOrder} statusConfigs={statusConfigs} vatRate={vatRate} systemMessage={systemMessage} manualEvents={manualEvents} addManualEvent={addManualEvent} />;
         }

@@ -698,12 +698,14 @@ async function getFilteredOrderSet(
     collection: any,
     filters: any,
     statusConfigs: OrderStatusConfiguration[],
-    customers: Customer[],
-    options?: { skipLimit?: boolean }
+    customers: Customer[]
 ): Promise<{ orders: Order[]; allMatchingDocs: any[] }> {
     const { query, dateFieldForSort, dateFilterType } = buildOrdersQuery(filters, customers);
-    const cursor = collection.find(query).sort({ [dateFieldForSort]: -1 });
-    const allMatchingDocs = options?.skipLimit ? await cursor.toArray() : await cursor.limit(ORDERS_PAGINATED_LOAD_LIMIT).toArray();
+    const allMatchingDocs = await collection
+        .find(query)
+        .sort({ [dateFieldForSort]: -1 })
+        .limit(ORDERS_PAGINATED_LOAD_LIMIT)
+        .toArray();
     const allMatchingOrders = allMatchingDocs.map(deserializeDates) as Order[];
     const orders = postFilterAndDedupeOrders(allMatchingOrders, allMatchingDocs, filters, statusConfigs, dateFilterType);
     return { orders, allMatchingDocs };
@@ -824,12 +826,6 @@ export async function getPayableItems(
         endDateFilter?: string;
         monthFilter?: string;
         yearFilter?: string;
-        customerFilter?: string[];
-        supplierFilter?: string[];
-        employeeFilter?: string[];
-        paymentStatusFilter?: string[];
-        customerIsImportPlaceholderOnly?: boolean;
-        showCompletedOrders?: boolean;
     } = {},
     page: number = 1,
     limit: number = 1000
@@ -839,7 +835,7 @@ export async function getPayableItems(
     page: number;
     limit: number;
     totalPages: number;
-    summaryStats: { totalDebt: number; totalCostNet: number; overdueDebt: number; thisMonthDue: number; unassignedCount: number };
+    summaryStats: { totalDebt: number; overdueDebt: number; thisMonthDue: number; unassignedCount: number };
 }> {
     try {
         const database = await getDb();
@@ -869,25 +865,19 @@ export async function getPayableItems(
             orderStatusFilter: filters.orderStatusFilter && filters.orderStatusFilter.length > 0
                 ? filters.orderStatusFilter
                 : activeDealLabels,
-            showCompletedOrders: filters.showCompletedOrders !== undefined ? filters.showCompletedOrders : true,
+            showCompletedOrders: true,
             dateFilterType: filters.dateFilterType || 'ORDER_DATE',
             startDateFilter: filters.startDateFilter,
             endDateFilter: filters.endDateFilter,
             monthFilter: filters.monthFilter,
-            yearFilter: filters.yearFilter,
-            customerFilter: filters.customerFilter,
-            supplierFilter: filters.supplierFilter,
-            employeeFilter: filters.employeeFilter,
-            paymentStatusFilter: filters.paymentStatusFilter,
-            customerIsImportPlaceholderOnly: filters.customerIsImportPlaceholderOnly,
+            yearFilter: filters.yearFilter
         };
         // When using default (no client orderStatusFilter), use isCollectionMode so post-filter keeps only active deals if query had no status
         if (!filters.orderStatusFilter || filters.orderStatusFilter.length === 0) {
             orderFiltersForReport.isCollectionMode = activeDealLabels.length > 0 ? false : true;
         }
 
-        // skipLimit: true so we include all matching orders and totals match Orders page
-        const { orders: activeOrdersCapped } = await getFilteredOrderSet(collection, orderFiltersForReport, statusConfigs, customers, { skipLimit: true });
+        const { orders: activeOrdersCapped } = await getFilteredOrderSet(collection, orderFiltersForReport, statusConfigs, customers);
 
         // Build items with merge of duplicate logical lines (same order + description + cost + supplier)
         const mergeKeyToItem = new Map<string, PayableItem>();
@@ -1061,12 +1051,9 @@ export async function getPayableItems(
             return dateA.getTime() - dateB.getTime();
         });
         
-        // totalCostNet = sum over ALL items from order set (no date/supplier/showPaid filter), so it matches Orders page "סה\"כ עלות"
-        const totalCostNet = items.reduce((sum, item) => sum + item.cost, 0);
-        // Summary stats for display (totalDebt, overdue, etc.) use filtered items
+        // Calculate summary stats on ALL filtered items (not just current page)
         const summaryStats = {
             totalDebt: filteredItems.reduce((sum, item) => sum + item.remainingAmount, 0),
-            totalCostNet,
             overdueDebt: filteredItems
                 .filter(i => i.remainingAmount > 0.1 && i.timeStatus === 'איחור')
                 .reduce((sum, item) => sum + item.remainingAmount, 0),
@@ -3726,404 +3713,5 @@ export async function suggestProductMatch(adHocProduct: AdHocProduct): Promise<P
         console.error('Error suggesting product match:', error);
         throw error;
     }
-}
-
-// ==================== PERFORMANCE METRICS (דוח ביצועים) ====================
-/** All metrics calculations start from this date (Israel). Plan: 5.6.2026 */
-export const METRICS_START_DATE = '2026-06-05';
-
-export interface EmployeePerformanceMetrics {
-    employeeId: string;
-    employeeName: string;
-    orderCount: number;
-    totalAmount: number;
-    totalProfit: number;
-    uniqueCustomers: number;
-    avgSalePerCustomer: number;
-    avgProfitMarginPercent: number;
-    newCustomersCreated: number;
-    statusChangesCount: number;
-    statusChangesByStatus: Record<string, number>;
-    workHoursTotal: number;
-    conversionLeadToActive: number;
-    conversionLeadToCompleted: number;
-    leadsCount: number;
-    activeOrCompletedCount: number;
-    avgClosingTimeHours: number | null;
-    currentWorkloadOpen: number;
-    lostOrdersCount: number;
-    serviceCallOrdersCount: number;
-    repeatCustomers2Plus: number;
-    repeatCustomers3Plus: number;
-}
-
-export interface BusinessPerformanceSummary {
-    totalOrders: number;
-    totalAmount: number;
-    totalProfit: number;
-    salesByMonth: { monthKey: string; label: string; orderCount: number; totalAmount: number; totalProfit: number }[];
-    statusDistribution: { statusLabel: string; count: number; isLead: boolean; isActiveDeal: boolean; isCompleted: boolean; isLost: boolean }[];
-    avgClosingTimeHours: number | null;
-}
-
-export interface ActivityScoreEntry {
-    userId: string;
-    username: string;
-    score: number;
-    actionCounts: Record<string, number>;
-}
-
-export interface RedFlagOrder {
-    orderId: string;
-    orderNumber: string;
-    description: string;
-    orderStatus: string;
-    employeeId: string;
-    employeeName: string;
-    lastActivityAt: Date | null;
-    hoursSinceActivity: number;
-}
-
-export interface PerformanceMetricsPayload {
-    metricsStartDate: string;
-    business: BusinessPerformanceSummary;
-    employees: EmployeePerformanceMetrics[];
-    activityScore: ActivityScoreEntry[];
-    redFlags: RedFlagOrder[];
-    from?: string;
-    to?: string;
-}
-
-/** Activity Score weights by action (and optionally entityType/metadata). */
-const ACTIVITY_SCORE_WEIGHTS: Record<string, number> = {
-    update: 3,           // e.g. note on order
-    status_change: 10,
-    create: 5,           // new order
-    payment: 5,
-    sync: 2,
-    delete: 1,
-    merge: 5,
-    login: 0,
-    logout: 0,
-    other: 1
-};
-
-/** Extra points when status_change leads to active or completed deal (from metadata.newStatus). */
-const ACTIVITY_SCORE_CLOSING_BONUS = 20;
-
-export async function getPerformanceMetrics(filters: {
-    from?: string;
-    to?: string;
-    employeeId?: string;
-}, vatRate: number): Promise<PerformanceMetricsPayload> {
-    try {
-        const database = await getDb();
-        const [statusConfigs, employees, customers] = await Promise.all([
-            getStatusConfigs(),
-            getEmployees(),
-            getCustomers()
-        ]);
-        const { start: metricsStart } = getDayRangeIsrael(METRICS_START_DATE);
-
-        const dateField = 'date';
-        const query: any = {};
-        query[dateField] = { $gte: metricsStart.toISOString() };
-        if (filters.from) {
-            const { start } = getDayRangeIsrael(filters.from);
-            query[dateField] = query[dateField] || {};
-            query[dateField].$gte = start.toISOString();
-        }
-        if (filters.to) {
-            const { end } = getDayRangeIsrael(filters.to);
-            query[dateField] = query[dateField] || {};
-            query[dateField].$lte = end.toISOString();
-        }
-        if (filters.employeeId) query.employeeId = filters.employeeId;
-
-        const ordersCollection = database.collection<Order>('orders');
-        const ordersDocs = await ordersCollection.find(query).sort({ date: -1 }).toArray();
-        const orders = ordersDocs.map(deserializeDates) as Order[];
-
-        const employeeMap = new Map(employees.map(e => [e.id, e]));
-        const statusByLabel = new Map(statusConfigs.map(c => [c.label, c]));
-
-        const businessSalesByMonth = new Map<string, { orderCount: number; totalAmount: number; totalProfit: number }>();
-        const statusDistributionMap = new Map<string, number>();
-
-        const empMetrics = new Map<string, EmployeePerformanceMetrics>();
-        for (const emp of employees) {
-            empMetrics.set(emp.id, {
-                employeeId: emp.id,
-                employeeName: emp.name || emp.username || emp.id,
-                orderCount: 0,
-                totalAmount: 0,
-                totalProfit: 0,
-                uniqueCustomers: 0,
-                avgSalePerCustomer: 0,
-                avgProfitMarginPercent: 0,
-                newCustomersCreated: 0,
-                statusChangesCount: 0,
-                statusChangesByStatus: {},
-                workHoursTotal: 0,
-                conversionLeadToActive: 0,
-                conversionLeadToCompleted: 0,
-                leadsCount: 0,
-                activeOrCompletedCount: 0,
-                avgClosingTimeHours: null,
-                currentWorkloadOpen: 0,
-                lostOrdersCount: 0,
-                serviceCallOrdersCount: 0,
-                repeatCustomers2Plus: 0,
-                repeatCustomers3Plus: 0
-            });
-        }
-
-        const customerOrderCountByEmployee = new Map<string, Map<string, number>>();
-        const closingTimesByEmployee: Record<string, number[]> = {};
-        const leadIdsThatBecameActive = new Set<string>();
-        const leadIdsThatBecameCompleted = new Set<string>();
-
-        for (const order of orders) {
-            const { totalAmount, profit } = calculateOrderTotals(order);
-            const config = statusByLabel.get(order.orderStatus);
-            const isLead = config?.isLead ?? false;
-            const isActive = config?.isActiveDeal ?? false;
-            const isCompleted = config?.isCompleted ?? false;
-            const isLost = config?.isLost ?? false;
-
-            const monthKey = (() => {
-                const d = order.date instanceof Date ? order.date : new Date(order.date);
-                return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-            })();
-            if (!businessSalesByMonth.has(monthKey)) {
-                businessSalesByMonth.set(monthKey, { orderCount: 0, totalAmount: 0, totalProfit: 0 });
-            }
-            const bm = businessSalesByMonth.get(monthKey)!;
-            bm.orderCount++;
-            bm.totalAmount += totalAmount;
-            bm.totalProfit += profit;
-
-            statusDistributionMap.set(order.orderStatus, (statusDistributionMap.get(order.orderStatus) || 0) + 1);
-
-            const empId = order.employeeId;
-            if (empId && empMetrics.has(empId)) {
-                const m = empMetrics.get(empId)!;
-                m.orderCount++;
-                m.totalAmount += totalAmount;
-                m.totalProfit += profit;
-                if (!customerOrderCountByEmployee.has(empId)) customerOrderCountByEmployee.set(empId, new Map());
-                const custCount = customerOrderCountByEmployee.get(empId)!;
-                custCount.set(order.customerId, (custCount.get(order.customerId) || 0) + 1);
-                if (isLead) m.leadsCount++;
-                if (isActive || isCompleted) m.activeOrCompletedCount++;
-                if (isLost) m.lostOrdersCount++;
-                if (order.type === 'קריאת שירות') m.serviceCallOrdersCount++;
-
-                const closingTime = getClosingTimeForOrder(order, statusConfigs);
-                if (closingTime != null) {
-                    if (!closingTimesByEmployee[empId]) closingTimesByEmployee[empId] = [];
-                    closingTimesByEmployee[empId].push(closingTime);
-                }
-                if (isLead && (isActive || isCompleted)) leadIdsThatBecameActive.add(order.id);
-                if (isLead && isCompleted) leadIdsThatBecameCompleted.add(order.id);
-            }
-        }
-
-        for (const [empId, m] of empMetrics) {
-            const custCount = customerOrderCountByEmployee.get(empId);
-            if (custCount) {
-                m.uniqueCustomers = custCount.size;
-                m.avgSalePerCustomer = custCount.size > 0 ? m.totalAmount / custCount.size : 0;
-                m.repeatCustomers2Plus = [...custCount.values()].filter(c => c >= 2).length;
-                m.repeatCustomers3Plus = [...custCount.values()].filter(c => c >= 3).length;
-            }
-            if (m.totalAmount > 0) m.avgProfitMarginPercent = (m.totalProfit / m.totalAmount) * 100;
-            if (m.leadsCount > 0) {
-                m.conversionLeadToActive = orders.filter(o => o.employeeId === empId && leadIdsThatBecameActive.has(o.id)).length;
-                m.conversionLeadToCompleted = orders.filter(o => o.employeeId === empId && leadIdsThatBecameCompleted.has(o.id)).length;
-            }
-            const times = closingTimesByEmployee[empId];
-            if (times && times.length > 0) {
-                m.avgClosingTimeHours = times.reduce((a, b) => a + b, 0) / times.length;
-            }
-        }
-
-        const activitiesFrom = filters.from || METRICS_START_DATE;
-        const activitiesTo = filters.to || getDateStringIsrael(new Date());
-        const activitiesResult = await getActivitiesFiltered({
-            from: activitiesFrom,
-            to: activitiesTo,
-            userId: filters.employeeId,
-            page: 1,
-            limit: 10000
-        });
-        for (const a of activitiesResult.activities) {
-            const uid = a.userId;
-            if (!uid) continue;
-            if (filters.employeeId && uid !== filters.employeeId) continue;
-            if (!empMetrics.has(uid)) continue;
-            const m = empMetrics.get(uid)!;
-            if (a.entityType === 'customer' && a.action === 'create') m.newCustomersCreated++;
-            if (a.action === 'status_change') {
-                m.statusChangesCount++;
-                const newStatus = (a.metadata?.newStatus as string) || '';
-                m.statusChangesByStatus[newStatus] = (m.statusChangesByStatus[newStatus] || 0) + 1;
-            }
-        }
-
-        const attendanceFrom = filters.from || METRICS_START_DATE;
-        const attendanceTo = filters.to || getDateStringIsrael(new Date());
-        const attendanceResult = await getAttendanceRecordsPaginated(
-            { dateStart: attendanceFrom, dateEnd: attendanceTo, employeeId: filters.employeeId },
-            1,
-            10000
-        );
-        for (const r of attendanceResult.records) {
-            const empId = r.employeeId;
-            if (!empMetrics.has(empId)) continue;
-            const rawIn = r.clockIn;
-            const rawOut = r.clockOut;
-            if (rawIn == null || rawOut == null) continue;
-            const clockIn = rawIn instanceof Date ? rawIn : new Date(rawIn);
-            const clockOut = rawOut instanceof Date ? rawOut : new Date(rawOut);
-            const hours = (clockOut.getTime() - clockIn.getTime()) / (1000 * 60 * 60);
-            empMetrics.get(empId)!.workHoursTotal += Math.max(0, hours);
-        }
-
-        const openStatuses = new Set(statusConfigs.filter(c => c.isLead || c.isActiveDeal || c.isQuote).map(c => c.label));
-        const allOrdersForWorkload = await ordersCollection.find({
-            employeeId: filters.employeeId ? { $eq: filters.employeeId } : { $in: employees.map(e => e.id) },
-            orderStatus: { $in: Array.from(openStatuses) }
-        }).toArray();
-        for (const doc of allOrdersForWorkload) {
-            const o = deserializeDates(doc) as Order;
-            if (o.employeeId && empMetrics.has(o.employeeId)) {
-                empMetrics.get(o.employeeId)!.currentWorkloadOpen++;
-            }
-        }
-
-        const businessSalesByMonthSorted = Array.from(businessSalesByMonth.entries())
-            .sort((a, b) => a[0].localeCompare(b[0]))
-            .map(([monthKey, data]) => {
-                const [y, m] = monthKey.split('-').map(Number);
-                const label = new Date(y, m - 1, 1).toLocaleString('he-IL', { month: 'long', year: 'numeric' });
-                return { monthKey, label, ...data };
-            });
-
-        const statusDistribution = Array.from(statusDistributionMap.entries()).map(([statusLabel, count]) => {
-            const config = statusByLabel.get(statusLabel);
-            return {
-                statusLabel,
-                count,
-                isLead: config?.isLead ?? false,
-                isActiveDeal: config?.isActiveDeal ?? false,
-                isCompleted: config?.isCompleted ?? false,
-                isLost: config?.isLost ?? false
-            };
-        });
-
-        let avgClosingTimeOverall: number | null = null;
-        const allClosingTimes: number[] = [];
-        for (const order of orders) {
-            const t = getClosingTimeForOrder(order, statusConfigs);
-            if (t != null) allClosingTimes.push(t);
-        }
-        if (allClosingTimes.length > 0) {
-            avgClosingTimeOverall = allClosingTimes.reduce((a, b) => a + b, 0) / allClosingTimes.length;
-        }
-
-        const business: BusinessPerformanceSummary = {
-            totalOrders: orders.length,
-            totalAmount: orders.reduce((s, o) => s + calculateOrderTotals(o).totalAmount, 0),
-            totalProfit: orders.reduce((s, o) => s + calculateOrderTotals(o).profit, 0),
-            salesByMonth: businessSalesByMonthSorted,
-            statusDistribution,
-            avgClosingTimeHours: avgClosingTimeOverall
-        };
-
-        const activityScoreMap = new Map<string, { score: number; actionCounts: Record<string, number> }>();
-        for (const a of activitiesResult.activities) {
-            const uid = a.userId || 'unknown';
-            if (!activityScoreMap.has(uid)) activityScoreMap.set(uid, { score: 0, actionCounts: {} });
-            const entry = activityScoreMap.get(uid)!;
-            const action = a.action || 'other';
-            entry.actionCounts[action] = (entry.actionCounts[action] || 0) + 1;
-            let points = ACTIVITY_SCORE_WEIGHTS[action] ?? 1;
-            const newStatus = a.metadata?.newStatus as string | undefined;
-            if (action === 'status_change' && newStatus) {
-                const cfg = statusConfigs.find(c => c.label === newStatus);
-                if (cfg?.isActiveDeal || cfg?.isCompleted) points += ACTIVITY_SCORE_CLOSING_BONUS;
-            }
-            entry.score += points;
-        }
-        const activityScore: ActivityScoreEntry[] = Array.from(activityScoreMap.entries()).map(([userId, data]) => ({
-            userId,
-            username: employeeMap.get(userId)?.name || (activitiesResult.activities.find(a => a.userId === userId)?.username as string) || userId,
-            score: data.score,
-            actionCounts: data.actionCounts
-        }));
-
-        const redFlags: RedFlagOrder[] = [];
-        const openOrderIds = new Set(orders.filter(o => openStatuses.has(o.orderStatus)).map(o => o.id));
-        const HOURS_48 = 48;
-        for (const order of orders) {
-            if (!openStatuses.has(order.orderStatus)) continue;
-            const lastTs = getLastActivityTimestampForOrder(order);
-            const now = Date.now();
-            const lastMs = lastTs ? new Date(lastTs).getTime() : (order.createdAt ? new Date(order.createdAt).getTime() : new Date(order.date).getTime());
-            const hoursSince = (now - lastMs) / (1000 * 60 * 60);
-            if (hoursSince >= HOURS_48) {
-                redFlags.push({
-                    orderId: order.id,
-                    orderNumber: order.orderNumber,
-                    description: order.description,
-                    orderStatus: order.orderStatus,
-                    employeeId: order.employeeId,
-                    employeeName: employeeMap.get(order.employeeId)?.name || order.employeeId,
-                    lastActivityAt: lastTs ? new Date(lastTs) : null,
-                    hoursSinceActivity: Math.round(hoursSince * 10) / 10
-                });
-            }
-        }
-        redFlags.sort((a, b) => b.hoursSinceActivity - a.hoursSinceActivity);
-
-        return {
-            metricsStartDate: METRICS_START_DATE,
-            business,
-            employees: Array.from(empMetrics.values()),
-            activityScore,
-            redFlags,
-            from: filters.from,
-            to: filters.to
-        };
-    } catch (error) {
-        console.error('Error getPerformanceMetrics:', error);
-        throw error;
-    }
-}
-
-function getClosingTimeForOrder(order: Order, statusConfigs: OrderStatusConfiguration[]): number | null {
-    const history = order.statusHistory;
-    if (!history || history.length === 0) return null;
-    const orderStart = order.createdAt ? new Date(order.createdAt).getTime() : new Date(order.date).getTime();
-    let firstActiveOrCompletedAt: number | null = null;
-    const sorted = [...history].sort((a, b) => new Date(a.startDate).getTime() - new Date(b.startDate).getTime());
-    for (const entry of sorted) {
-        const config = statusConfigs.find(c => c.label === entry.status);
-        if (config?.isActiveDeal || config?.isCompleted) {
-            firstActiveOrCompletedAt = new Date(entry.startDate).getTime();
-            break;
-        }
-    }
-    if (firstActiveOrCompletedAt == null) return null;
-    return (firstActiveOrCompletedAt - orderStart) / (1000 * 60 * 60);
-}
-
-function getLastActivityTimestampForOrder(order: Order): Date | string | null {
-    if (order.timeline && order.timeline.length > 0) {
-        const sorted = [...order.timeline].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-        return sorted[0].timestamp;
-    }
-    return null;
 }
 

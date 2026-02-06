@@ -7,8 +7,34 @@ import crypto from 'crypto';
 import { getClient, listClients } from '../services/greenInvoiceService.js';
 import { getCustomers, getCustomerById, updateCustomer, mergeCustomers } from '../services/mongoService.js';
 import { applyGreenInvoiceClientToCustomer, findSiblingForMerge } from '../services/greenInvoiceSyncService.js';
+import type { GreenInvoiceClient } from '../types/greenInvoice.js';
 
 const router = Router();
+
+/** Normalize webhook payload (name, contact, emails[]) to GreenInvoiceClient shape (names, contactPerson, email/emails). */
+function normalizeWebhookClient(p: Record<string, any>): GreenInvoiceClient {
+    const id = (p.id ?? p.clientId ?? p.client_id)?.toString?.()?.trim?.() ?? '';
+    const name = (p.name ?? p.names ?? '').toString().trim();
+    const emails = Array.isArray(p.emails) ? p.emails : p.email ? [p.email] : [];
+    const email = typeof p.email === 'string' ? p.email : emails[0];
+    return {
+        id,
+        names: name,
+        name,
+        email,
+        emails: emails.length ? emails : undefined,
+        phone: (p.phone ?? p.mobile ?? '').toString().trim(),
+        address: (p.address ?? '').toString().trim(),
+        city: (p.city ?? '').toString().trim(),
+        zip: (p.zip ?? '').toString().trim(),
+        country: (p.country ?? '').toString().trim(),
+        taxId: (p.taxId ?? p.tax_id ?? p.business_id ?? '').toString().trim(),
+        department: (p.department ?? '').toString().trim(),
+        contactPerson: (p.contact ?? p.contactPerson ?? '').toString().trim(),
+        created_at: p.createdAt ? new Date(p.createdAt).toISOString() : p.created_at,
+        updated_at: p.updatedAt ? new Date(p.updatedAt).toISOString() : p.updated_at,
+    } as GreenInvoiceClient;
+}
 
 const WEBHOOK_SECRET = process.env.GREENINVOICE_WEBHOOK_SECRET || '';
 
@@ -59,27 +85,37 @@ router.post('/', async (req: Request, res: Response) => {
         return res.status(401).json({ ok: false, error: 'Invalid signature' });
     }
 
-    const event = (req.body?.event ?? req.body?.type ?? req.body?.name ?? '').toString().toLowerCase();
+    const event = (req.body?.event ?? req.body?.type ?? '').toString().toLowerCase();
     const data = req.body?.data ?? req.body?.item ?? req.body?.payload ?? req.body;
     const clientId = (data?.id ?? data?.clientId ?? req.body?.id ?? req.body?.clientId ?? data?.client_id)?.toString?.()?.trim?.();
     const targetClientId = (data?.mergedInto ?? data?.merged_into ?? data?.targetId ?? data?.target_id ?? data?.target)?.toString?.()?.trim?.();
 
-    console.log('[Webhook GreenInvoice] Received', { event, clientId, targetClientId, bodyKeys: Object.keys(req.body || {}), dataKeys: data ? Object.keys(data) : [] });
-    if (!event) {
-        console.warn('[Webhook GreenInvoice] Missing event — full body sample:', JSON.stringify(req.body).slice(0, 500));
-    }
-
+    // Green Invoice may send the client object directly (no event wrapper): { id, name, phone, emails, contact, ... }
+    const payloadIsClient = clientId && (data?.name ?? data?.names ?? req.body?.name ?? req.body?.names);
     const isClientCreated = event === 'client/created' || event === 'client.created' || event === 'client_created' || (event.includes('client') && event.includes('created'));
     const isClientDeactivated = event === 'client/deactivated' || event === 'client.deactivated' || event === 'client_deactivated' || event === 'client/deleted' || event === 'client.deleted' || event === 'client_deleted' || (event.includes('client') && (event.includes('deactivat') || event.includes('deleted')));
     const isClientMerged = event === 'client/merged' || event === 'client.merged' || event === 'client_merged' || (event.includes('client') && event.includes('merge'));
 
-    if (isClientCreated && clientId) {
+    console.log('[Webhook GreenInvoice] Received', { event, clientId, targetClientId, payloadIsClient, bodyKeys: Object.keys(req.body || {}), dataKeys: data ? Object.keys(data) : [] });
+
+    const runSyncClient = async (clientPayload: any) => {
+        const existingCustomers = await getCustomers();
+        const normalized = normalizeWebhookClient(clientPayload);
+        const result = await applyGreenInvoiceClientToCustomer(normalized, existingCustomers);
+        console.log('[Webhook GreenInvoice] Synced client to CRM', { id: normalized.id, name: normalized.names || normalized.name, created: !!result.created, updated: !!result.updated });
+    };
+
+    if ((isClientCreated && clientId) || payloadIsClient) {
         setImmediate(async () => {
             try {
-                const giClient = await getClient(clientId);
-                const existingCustomers = await getCustomers();
-                await applyGreenInvoiceClientToCustomer(giClient, existingCustomers);
-                console.log('[Webhook GreenInvoice] Synced client to CRM', { id: clientId, name: giClient.names || giClient.name });
+                if (payloadIsClient && data && typeof data === 'object') {
+                    await runSyncClient(data);
+                } else if (clientId) {
+                    const giClient = await getClient(clientId);
+                    const existingCustomers = await getCustomers();
+                    await applyGreenInvoiceClientToCustomer(giClient, existingCustomers);
+                    console.log('[Webhook GreenInvoice] Synced client to CRM (from API)', { id: clientId, name: giClient.names || giClient.name });
+                }
             } catch (err: any) {
                 console.error('[Webhook GreenInvoice] Error syncing client:', err?.message || err);
             }
@@ -124,7 +160,7 @@ router.post('/', async (req: Request, res: Response) => {
         });
     }
 
-    res.status(200).json({ ok: true, received: event });
+    res.status(200).json({ ok: true, received: event || (payloadIsClient ? 'client/sync' : ''), synced: payloadIsClient || isClientCreated });
 });
 
 export default router;

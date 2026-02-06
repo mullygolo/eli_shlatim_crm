@@ -32,7 +32,18 @@ function verifySignature(rawBody: string, signatureHeader: string | undefined): 
 }
 
 /**
- * POST /greeninvoice
+ * GET / — allow checking that the webhook URL is reachable (e.g. from browser or Green Invoice config).
+ */
+router.get('/', (_req: Request, res: Response) => {
+    res.status(200).json({
+        ok: true,
+        message: 'Green Invoice webhook endpoint. Send POST with event payload (client/created, client/merged, etc.).',
+        endpoint: 'POST /api/webhook/greeninvoice',
+    });
+});
+
+/**
+ * POST / — receive webhook events from Green Invoice.
  * Body: { event?, type?, data?, item?, id? } — event type and payload (format may vary by Green Invoice).
  */
 router.post('/', async (req: Request, res: Response) => {

@@ -37,11 +37,10 @@ const PORT = process.env.PORT || 3002;
 // Middleware
 app.use(cors());
 // Green Invoice webhook needs raw body for signature verification — mount before global json
-app.use(
-    '/api/webhook/greeninvoice',
-    express.json({ limit: '1mb', verify: (req: any, _res, buf) => { req.rawBody = buf.toString('utf8'); } }),
-    webhookGreenInvoiceRouter
-);
+// Mount both with and without trailing slash so external services (e.g. Green Invoice) always hit the route
+const greenInvoiceWebhookBody = express.json({ limit: '1mb', verify: (req: any, _res, buf) => { req.rawBody = buf.toString('utf8'); } });
+app.use('/api/webhook/greeninvoice', greenInvoiceWebhookBody, webhookGreenInvoiceRouter);
+app.use('/api/webhook/greeninvoice/', greenInvoiceWebhookBody, webhookGreenInvoiceRouter);
 app.use(express.json({ limit: '50mb' })); // Increase limit for base64 images
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 

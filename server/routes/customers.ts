@@ -126,7 +126,7 @@ router.post('/merge', async (req, res) => {
     }
 });
 
-// Sync customers from GreenInvoice
+// Sync customers from GreenInvoice: updates existing (by GI id or name/businessId), creates only when no match. Running list prevents duplicates in same run.
 router.post('/sync-from-greeninvoice', async (req, res) => {
     try {
         const { listClients } = await import('../services/greenInvoiceService.js');

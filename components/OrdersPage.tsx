@@ -3677,12 +3677,11 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                 { field: 'orderStatus', label: 'סטטוס', oldValue: originalOrder.orderStatus, newValue: newStatus, action: 'UPDATED' }
             ]
         };
-        const assignedId = user?.id ?? originalOrder.employeeId;
-        const newStatusHistoryEntry = { status: newStatus, startDate: new Date(), employeeId: assignedId };
+        const newStatusHistoryEntry = { status: newStatus, startDate: new Date() };
         const updatedOrder: Order = {
             ...originalOrder,
             orderStatus: newStatus,
-            employeeId: assignedId,
+            employeeId: user?.id ?? originalOrder.employeeId,
             dealStartDate: newDealStartDate,
             timeline: [logEvent, ...originalOrder.timeline],
             statusHistory: [...(originalOrder.statusHistory || []), newStatusHistoryEntry],
@@ -3834,24 +3833,17 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
         }
     }, [orders, currentPage, pageSize, customerFilter, supplierFilter, employeeFilter, orderStatusFilter, paymentStatusFilter, monthFilter, yearFilter, startDateFilter, endDateFilter, dateFilterType, debouncedSearchTerm, sortBy, customerIsImportPlaceholderOnly, statusConfigs, vatRate]);
 
-    // When opening order via link (e.g. from Logs, Reports, Customers) — fetch from server so modal shows up-to-date data
     useEffect(() => {
-        if (!initialOpenOrderId || !onOrderOpened) return;
-        const orderId = initialOpenOrderId;
-        onOrderOpened(); // clear openOrderId immediately to avoid re-running
-        let cancelled = false;
-        mongoService.getOrderById(orderId)
-            .then((orderFromServer) => {
-                if (!cancelled) handleEditOrder(orderFromServer);
-            })
-            .catch((err) => {
-                if (!cancelled) {
-                    console.error('Failed to load order for open link:', err);
-                    alert('לא ניתן לטעון את ההזמנה. ייתכן שהיא נמחקה או שאין גישה.');
-                }
-            });
-        return () => { cancelled = true; };
-    }, [initialOpenOrderId]);
+        if (initialOpenOrderId) {
+            const orderToOpen = paginatedOrders.find(o => o.id === initialOpenOrderId) || orders.find(o => o.id === initialOpenOrderId);
+            if (orderToOpen) {
+                handleEditOrder(orderToOpen);
+            }
+            if (onOrderOpened) {
+                onOrderOpened();
+            }
+        }
+    }, [initialOpenOrderId, paginatedOrders, orders, onOrderOpened]);
 
     // Poll order list when Orders page is visible (every 90s) for data sync
     const refetchOrdersRef = useRef(refetchOrders);

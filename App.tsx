@@ -38,6 +38,7 @@ import AttendancePage from './components/AttendancePage';
 import PriceListPage from './components/PriceListPage';
 import CallCenterPage from './components/CallCenterPage';
 import ImprovementSuggestionsPage from './components/ImprovementSuggestionsPage';
+import PerformanceDashboardPage from './components/PerformanceDashboardPage';
 
 // A map for page titles
 export const PAGE_TITLES: Record<Page, string> = {
@@ -51,6 +52,7 @@ export const PAGE_TITLES: Record<Page, string> = {
     Timesheets: 'גיליונות שעות',
     Quotes: 'הצעות מחיר',
     Reports: 'תשלום לספקים',
+    Performance: 'דוח ביצועים',
     Settings: 'הגדרות מערכת',
     Finance: 'דוחות / תקציב',
     Attendance: 'נוכחות ושכר',
@@ -307,12 +309,19 @@ const App: React.FC = () => {
         setOpenOrderId(orderId);
     }, []);
 
-    // When opening Reports (payments to suppliers), refresh orders so the list matches the payables API and navigation to order works
+    // When opening Dashboard or Reports, refresh orders so widgets (e.g. lost deals) and payables use up-to-date data
     useEffect(() => {
-        if (currentPage === 'Reports') {
-            getOrders().then(setOrders).catch((err) => console.error('Error refreshing orders for Reports:', err));
+        if (currentPage === 'Dashboard' || currentPage === 'Reports') {
+            getOrders().then(setOrders).catch((err) => console.error('Error refreshing orders:', err));
         }
     }, [currentPage]);
+
+    // Performance page is ADMIN only; redirect others to Dashboard
+    useEffect(() => {
+        if (currentPage === 'Performance' && user?.roleType !== 'ADMIN') {
+            setCurrentPage('Dashboard');
+        }
+    }, [currentPage, user?.roleType]);
     
     const onOrderOpened = useCallback(() => {
         setOpenOrderId(null);
@@ -472,6 +481,9 @@ const App: React.FC = () => {
                             statusConfigs={statusConfigs} 
                             vatRate={vatRate}
                         />;
+            case 'Performance':
+                if (user?.roleType !== 'ADMIN') return <Dashboard customers={customers} orders={orders} activities={activities} monthlyGoal={monthlyGoal} setMonthlyGoal={setMonthlyGoalWithSync} employees={employees} onNavigateToOrder={handleNavigateToOrder} statusConfigs={statusConfigs} vatRate={vatRate} systemMessage={systemMessage} manualEvents={manualEvents} addManualEvent={addManualEvent} />;
+                return <PerformanceDashboardPage employees={employees} onNavigateToOrder={handleNavigateToOrder} />;
             case 'Finance':
                 return <FinancePage 
                             fixedExpenses={fixedExpenses} setFixedExpenses={setFixedExpensesWithSync}

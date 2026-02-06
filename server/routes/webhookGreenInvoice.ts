@@ -1,12 +1,12 @@
 /**
  * Webhook endpoint for Green Invoice (חשבונית ירוקה).
- * POST /api/webhook/greeninvoice — receives events (client/created, etc.) for two-way sync.
+ * POST /api/webhook/greeninvoice — receives events (client/created, client/deactivated, client/merged, etc.) for two-way sync.
  */
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
-import { getClient } from '../services/greenInvoiceService.js';
-import { getCustomers } from '../services/mongoService.js';
-import { applyGreenInvoiceClientToCustomer } from '../services/greenInvoiceSyncService.js';
+import { getClient, listClients } from '../services/greenInvoiceService.js';
+import { getCustomers, getCustomerById, updateCustomer, mergeCustomers } from '../services/mongoService.js';
+import { applyGreenInvoiceClientToCustomer, findSiblingForMerge } from '../services/greenInvoiceSyncService.js';
 
 const router = Router();
 
@@ -51,16 +51,17 @@ router.post('/', async (req: Request, res: Response) => {
     const event = (req.body?.event ?? req.body?.type ?? req.body?.name ?? '').toString().toLowerCase();
     const data = req.body?.data ?? req.body?.item ?? req.body?.payload ?? req.body;
     const clientId = (data?.id ?? data?.clientId ?? req.body?.id ?? req.body?.clientId ?? data?.client_id)?.toString?.()?.trim?.();
+    const targetClientId = (data?.mergedInto ?? data?.merged_into ?? data?.targetId ?? data?.target_id ?? data?.target)?.toString?.()?.trim?.();
 
-    console.log('[Webhook GreenInvoice] Received', { event, clientId, bodyKeys: Object.keys(req.body || {}), dataKeys: data ? Object.keys(data) : [] });
-    if (!event || !clientId) {
-        console.warn('[Webhook GreenInvoice] Missing event or clientId — full body sample:', JSON.stringify(req.body).slice(0, 500));
+    console.log('[Webhook GreenInvoice] Received', { event, clientId, targetClientId, bodyKeys: Object.keys(req.body || {}), dataKeys: data ? Object.keys(data) : [] });
+    if (!event) {
+        console.warn('[Webhook GreenInvoice] Missing event — full body sample:', JSON.stringify(req.body).slice(0, 500));
     }
 
-    // Support both "client/created" and "client.created" or "client_created"
     const isClientCreated = event === 'client/created' || event === 'client.created' || event === 'client_created' || (event.includes('client') && event.includes('created'));
+    const isClientDeactivated = event === 'client/deactivated' || event === 'client.deactivated' || event === 'client_deactivated' || event === 'client/deleted' || event === 'client.deleted' || event === 'client_deleted' || (event.includes('client') && (event.includes('deactivat') || event.includes('deleted')));
+    const isClientMerged = event === 'client/merged' || event === 'client.merged' || event === 'client_merged' || (event.includes('client') && event.includes('merge'));
 
-    // Respond quickly; process client/created in background if needed
     if (isClientCreated && clientId) {
         setImmediate(async () => {
             try {
@@ -70,6 +71,44 @@ router.post('/', async (req: Request, res: Response) => {
                 console.log('[Webhook GreenInvoice] Synced client to CRM', { id: clientId, name: giClient.names || giClient.name });
             } catch (err: any) {
                 console.error('[Webhook GreenInvoice] Error syncing client:', err?.message || err);
+            }
+        });
+    }
+
+    if ((isClientDeactivated || isClientMerged) && clientId) {
+        setImmediate(async () => {
+            try {
+                const allCustomers = await getCustomers();
+                const victim = allCustomers.find(c => c.greenInvoiceClientId === clientId);
+                if (!victim) {
+                    console.log('[Webhook GreenInvoice] No CRM customer linked to deactivated/merged GI client', { clientId });
+                    return;
+                }
+                let veteran: { id: string } | null = null;
+                if (isClientMerged && targetClientId) {
+                    const byTarget = allCustomers.find(c => c.greenInvoiceClientId === targetClientId);
+                    if (byTarget && byTarget.id !== victim.id) veteran = byTarget;
+                }
+                if (!veteran) {
+                    const activeGiIds = new Set<string>();
+                    try {
+                        const clients = await listClients();
+                        clients.forEach(c => activeGiIds.add(c.id));
+                    } catch {
+                        activeGiIds.add(targetClientId || '');
+                    }
+                    if (targetClientId) activeGiIds.add(targetClientId);
+                    veteran = findSiblingForMerge(victim, allCustomers, activeGiIds);
+                }
+                if (veteran) {
+                    await mergeCustomers(veteran.id, victim.id);
+                    console.log('[Webhook GreenInvoice] Merged CRM customer (GI deactivated/merged)', { victimId: victim.id, veteranId: veteran.id });
+                } else {
+                    await updateCustomer({ ...victim, greenInvoiceClientId: undefined });
+                    console.log('[Webhook GreenInvoice] Unlinked CRM customer from removed GI client', { customerId: victim.id, formerGiId: clientId });
+                }
+            } catch (err: any) {
+                console.error('[Webhook GreenInvoice] Error handling deactivated/merged:', err?.message || err);
             }
         });
     }

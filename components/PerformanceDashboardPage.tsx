@@ -102,7 +102,7 @@ const PerformanceDashboardPage: React.FC<PerformanceDashboardPageProps> = ({ emp
 
             {data && (
                 <p className="text-xs text-slate-500">
-                    חישובים מתאריך {data.metricsStartDate} (תאריך ישראל). טווח: {data.from || data.metricsStartDate} – {data.to || 'היום'}
+                    טווח: {data.metricsStartDate} – {data.to || 'היום'}
                 </p>
             )}
 
@@ -166,6 +166,28 @@ function BusinessTab({ summary }: { summary: BusinessPerformanceSummary }) {
                     </p>
                 </div>
             </div>
+            {(summary.ordersThisMonth != null || summary.dealsApprovedThisMonth != null || summary.conversionRate != null) && (
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    {summary.ordersThisMonth != null && (
+                        <div className="bg-white p-4 rounded-lg shadow-sm border border-slate-200">
+                            <h3 className="text-xs font-medium text-slate-500 uppercase">הזמנות נוצרו החודש</h3>
+                            <p className="text-2xl font-bold text-slate-900 mt-1">{summary.ordersThisMonth}</p>
+                        </div>
+                    )}
+                    {summary.dealsApprovedThisMonth != null && (
+                        <div className="bg-white p-4 rounded-lg shadow-sm border border-slate-200">
+                            <h3 className="text-xs font-medium text-slate-500 uppercase">אושרו כעסקה החודש</h3>
+                            <p className="text-2xl font-bold text-slate-900 mt-1">{summary.dealsApprovedThisMonth}</p>
+                        </div>
+                    )}
+                    {summary.conversionRate != null && (
+                        <div className="bg-white p-4 rounded-lg shadow-sm border border-slate-200">
+                            <h3 className="text-xs font-medium text-slate-500 uppercase">יחס המרה (ליד → עסקה)</h3>
+                            <p className="text-2xl font-bold text-slate-900 mt-1">{(summary.conversionRate * 100).toFixed(1)}%</p>
+                        </div>
+                    )}
+                </div>
+            )}
             <div className="bg-white rounded-lg shadow-sm border border-slate-200 overflow-hidden">
                 <h3 className="px-4 py-3 bg-slate-50 border-b border-slate-200 font-semibold text-slate-800">מכירות לפי חודש</h3>
                 <div className="overflow-x-auto">
@@ -229,10 +251,15 @@ function EmployeesTab({ employees: list, onNavigateToOrder }: { employees: Emplo
                             <th className="px-3 py-2 text-xs font-medium text-slate-500">רווח</th>
                             <th className="px-3 py-2 text-xs font-medium text-slate-500">לקוחות</th>
                             <th className="px-3 py-2 text-xs font-medium text-slate-500">ממוצע ללקוח</th>
+                            <th className="px-3 py-2 text-xs font-medium text-slate-500">יחס המרה</th>
+                            <th className="px-3 py-2 text-xs font-medium text-slate-500">אחוז רווח</th>
+                            <th className="px-3 py-2 text-xs font-medium text-slate-500">זמן סגירה</th>
                             <th className="px-3 py-2 text-xs font-medium text-slate-500">לקוחות חדשים</th>
                             <th className="px-3 py-2 text-xs font-medium text-slate-500">שינויי סטטוס</th>
                             <th className="px-3 py-2 text-xs font-medium text-slate-500">שעות</th>
                             <th className="px-3 py-2 text-xs font-medium text-slate-500">עומס פתוח</th>
+                            <th className="px-3 py-2 text-xs font-medium text-slate-500">לקוחות חוזרים 2+</th>
+                            <th className="px-3 py-2 text-xs font-medium text-slate-500">קריאות שירות</th>
                             <th className="px-3 py-2 text-xs font-medium text-slate-500">הפסדים</th>
                         </tr>
                     </thead>
@@ -245,10 +272,15 @@ function EmployeesTab({ employees: list, onNavigateToOrder }: { employees: Emplo
                                 <td className="px-3 py-2 text-green-600">₪{m.totalProfit.toLocaleString()}</td>
                                 <td className="px-3 py-2 text-slate-600">{m.uniqueCustomers}</td>
                                 <td className="px-3 py-2 text-slate-600">₪{m.avgSalePerCustomer.toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
+                                <td className="px-3 py-2 text-slate-600">{m.conversionRate != null ? `${(m.conversionRate * 100).toFixed(0)}%` : '—'}</td>
+                                <td className="px-3 py-2 text-slate-600">{m.avgProfitPercentPerCustomer != null ? `${m.avgProfitPercentPerCustomer.toFixed(0)}%` : '—'}</td>
+                                <td className="px-3 py-2 text-slate-600">{m.avgClosingTimeHours != null ? `${Math.round(m.avgClosingTimeHours)} ש'` : '—'}</td>
                                 <td className="px-3 py-2 text-slate-600">{m.newCustomersCreated}</td>
                                 <td className="px-3 py-2 text-slate-600">{m.statusChangesCount}</td>
                                 <td className="px-3 py-2 text-slate-600">{m.workHoursTotal.toFixed(1)}</td>
                                 <td className="px-3 py-2 text-slate-600">{m.currentWorkloadOpen}</td>
+                                <td className="px-3 py-2 text-slate-600">{m.returningCustomers2Plus ?? '—'}</td>
+                                <td className="px-3 py-2 text-slate-600">{m.serviceCallOrdersOpened ?? '—'}</td>
                                 <td className="px-3 py-2 text-red-600">{m.lostOrdersCount}</td>
                             </tr>
                         ))}

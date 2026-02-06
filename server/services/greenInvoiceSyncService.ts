@@ -169,3 +169,23 @@ export async function applyGreenInvoiceClientToCustomer(
     const created = await createCustomer(newCustomer);
     return { created };
 }
+
+/**
+ * Find a CRM customer that can serve as merge target (veteran) for an "orphan" whose GI client was merged/deactivated.
+ * Returns a customer with same name or businessId that has greenInvoiceClientId in the active set (the survivor in GI).
+ */
+export function findSiblingForMerge(
+    orphan: Customer,
+    allCustomers: Customer[],
+    activeGiIds: Set<string>
+): Customer | null {
+    const nameNorm = (orphan.name || '').trim().toLowerCase();
+    const businessIdNorm = (orphan.businessId || '').trim();
+    return allCustomers.find(c => {
+        if (c.id === orphan.id) return false;
+        if (!c.greenInvoiceClientId || !activeGiIds.has(c.greenInvoiceClientId)) return false;
+        const sameName = (c.name || '').trim().toLowerCase() === nameNorm;
+        const sameBiz = businessIdNorm && (c.businessId || '').trim() === businessIdNorm;
+        return sameName || sameBiz;
+    }) || null;
+}

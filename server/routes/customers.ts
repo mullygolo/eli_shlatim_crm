@@ -1,9 +1,9 @@
 import { Router } from 'express';
 import type { Customer } from '../types.js';
-import { getCustomers, createCustomer, updateCustomer, deleteCustomer, getCustomersPaginated, getSettings } from '../services/mongoService.js';
+import { getCustomers, getCustomerById, createCustomer, updateCustomer, deleteCustomer, getCustomersPaginated, getSettings, mergeCustomers } from '../services/mongoService.js';
 import { createOrGetClient, updateClient } from '../services/greenInvoiceService.js';
 import { mapCustomerToClient } from '../services/greenInvoiceMapper.js';
-import { applyGreenInvoiceClientToCustomer, giClientName } from '../services/greenInvoiceSyncService.js';
+import { applyGreenInvoiceClientToCustomer, giClientName, findSiblingForMerge } from '../services/greenInvoiceSyncService.js';
 
 const router = Router();
 
@@ -48,27 +48,17 @@ router.post('/', async (req, res) => {
             }
             throw err;
         }
-        
-        // Sync to GreenInvoice if enabled (skip placeholder customers from import – link manually later)
+
+        // Return immediately; sync to GreenInvoice in background (createOrGetClient does listClients and can take seconds)
         if (process.env.GREENINVOICE_SYNC_ENABLED === 'true' && !customer.greenInvoiceClientId && !customer.isImportPlaceholder) {
-            try {
-                const clientData = mapCustomerToClient(customer);
-                const greenInvoiceClient = await createOrGetClient(clientData, customer.businessId);
-                
-                // Update customer with GreenInvoice ID
-                const updatedCustomer = await updateCustomer({
-                    ...customer,
-                    greenInvoiceClientId: greenInvoiceClient.id
-                });
-                
-                res.status(201).json(updatedCustomer);
-                return;
-            } catch (greenInvoiceError) {
-                console.error('Error syncing customer to GreenInvoice:', greenInvoiceError);
-                // Continue even if GreenInvoice sync fails
-            }
+            const clientData = mapCustomerToClient(customer);
+            createOrGetClient(clientData, customer.businessId)
+                .then(greenInvoiceClient =>
+                    updateCustomer({ ...customer, greenInvoiceClientId: greenInvoiceClient.id })
+                )
+                .catch(err => console.error('Error syncing new customer to GreenInvoice:', err));
         }
-        
+
         res.status(201).json(customer);
     } catch (error) {
         res.status(500).json({ error: 'Failed to create customer' });
@@ -110,6 +100,32 @@ router.delete('/:id', async (req, res) => {
     }
 });
 
+// Merge victim into veteran (reassign orders, merge contacts/notes, delete victim). Persists to DB.
+// If victim had a Green Invoice client and we keep veteran's, mark victim's GI client inactive in background.
+router.post('/merge', async (req, res) => {
+    try {
+        const { veteranId, victimId } = req.body;
+        if (!veteranId || !victimId) {
+            return res.status(400).json({ error: 'נדרשים veteranId ו-victimId.' });
+        }
+        const victim = await getCustomerById(victimId);
+        const veteran = await getCustomerById(veteranId);
+        const victimHadGiId = victim?.greenInvoiceClientId;
+        const veteranHasGiId = veteran?.greenInvoiceClientId;
+        const merged = await mergeCustomers(veteranId, victimId);
+        if (process.env.GREENINVOICE_SYNC_ENABLED === 'true' && victimHadGiId && veteranHasGiId && victimHadGiId !== veteranHasGiId) {
+            updateClient(victimHadGiId, { names: victim?.name || 'Merged', active: false } as any).catch(err =>
+                console.warn('GreenInvoice: mark victim client inactive after merge:', (err as Error)?.message)
+            );
+        }
+        res.json(merged);
+    } catch (error: any) {
+        const msg = error?.message || 'Merge failed';
+        const status = msg.includes('לא נמצא') ? 404 : 500;
+        res.status(status).json({ error: msg });
+    }
+});
+
 // Sync customers from GreenInvoice
 router.post('/sync-from-greeninvoice', async (req, res) => {
     try {
@@ -128,7 +144,7 @@ router.post('/sync-from-greeninvoice', async (req, res) => {
         }
 
         const { getCustomers } = await import('../services/mongoService.js');
-        const existingCustomers = await getCustomers();
+        let runningCustomers = await getCustomers();
 
         const results = {
             created: [] as Customer[],
@@ -136,7 +152,7 @@ router.post('/sync-from-greeninvoice', async (req, res) => {
             skipped: [] as string[],
             errors: [] as string[]
         };
-        
+
         for (const giClient of greenInvoiceClients) {
             const displayName = giClientName(giClient);
             if (greenInvoiceClients.indexOf(giClient) === 0) {
@@ -144,15 +160,48 @@ router.post('/sync-from-greeninvoice', async (req, res) => {
                 console.log('Sample client data:', JSON.stringify(giClient, null, 2));
             }
             try {
-                const result = await applyGreenInvoiceClientToCustomer(giClient, existingCustomers);
-                if (result.created) results.created.push(result.created);
-                if (result.updated) results.updated.push(result.updated);
+                const result = await applyGreenInvoiceClientToCustomer(giClient, runningCustomers);
+                if (result.created) {
+                    results.created.push(result.created);
+                    runningCustomers = runningCustomers.concat(result.created);
+                }
+                if (result.updated) {
+                    results.updated.push(result.updated);
+                    runningCustomers = runningCustomers.map(c => c.id === result.updated!.id ? result.updated! : c);
+                }
             } catch (error: any) {
                 results.errors.push(`${displayName}: ${error.message}`);
             }
         }
+
+        const activeGiIds = new Set(greenInvoiceClients.map((c: { id: string }) => c.id));
+        const afterSyncCustomers = await getCustomers();
+        const orphans = afterSyncCustomers.filter((c: Customer) => c.greenInvoiceClientId && !activeGiIds.has(c.greenInvoiceClientId));
+        const mergedFromSync: string[] = [];
+        const unlinkedFromSync: string[] = [];
+        for (const orphan of orphans) {
+            try {
+                const sibling = findSiblingForMerge(orphan, afterSyncCustomers, activeGiIds);
+                if (sibling) {
+                    await mergeCustomers(sibling.id, orphan.id);
+                    mergedFromSync.push(`${orphan.name} → ${sibling.name}`);
+                } else {
+                    await updateCustomer({ ...orphan, greenInvoiceClientId: undefined });
+                    unlinkedFromSync.push(orphan.name || orphan.id);
+                }
+            } catch (err: any) {
+                results.errors.push(`מיזוג/ניתוק אחרי סנכרון (${orphan.name}): ${err.message}`);
+            }
+        }
+        if (mergedFromSync.length > 0 || unlinkedFromSync.length > 0) {
+            console.log('GreenInvoice sync: merged (GI client removed)', mergedFromSync, 'unlinked', unlinkedFromSync);
+        }
         
-        res.json(results);
+        res.json({
+            ...results,
+            mergedFromOrphans: mergedFromSync,
+            unlinkedOrphans: unlinkedFromSync,
+        });
     } catch (error: any) {
         res.status(500).json({ error: error.message || 'Failed to sync customers from GreenInvoice' });
     }

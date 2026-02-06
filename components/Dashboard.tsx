@@ -426,13 +426,24 @@ interface FinancialMetric {
     count: number;
 }
 
+type LostDealsPeriod = 'THIS_MONTH' | 'LAST_MONTH' | 'LAST_3';
+
 const StrongNumberCard: React.FC<{ 
     orders: Order[]; 
     statusConfigs: OrderStatusConfiguration[];
     vatRate: number;
     roleType?: string;
-}> = ({ orders, statusConfigs, vatRate, roleType }) => {
+    onNavigateToOrder?: (orderId: string) => void;
+}> = ({ orders, statusConfigs, vatRate, roleType, onNavigateToOrder }) => {
     const isEmployee = roleType === 'EMPLOYEE';
+    const [lostDealsPeriod, setLostDealsPeriod] = useState<LostDealsPeriod>('THIS_MONTH');
+    const [lostDealsModalOpen, setLostDealsModalOpen] = useState(false);
+    useEffect(() => {
+        if (!lostDealsModalOpen) return;
+        const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setLostDealsModalOpen(false); };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+    }, [lostDealsModalOpen]);
     // Helper to calculate metrics for a filtered list of orders
     const calculateMetrics = (filteredOrders: Order[]): FinancialMetric => {
         const result = filteredOrders.reduce((acc, order) => {
@@ -528,31 +539,53 @@ const StrongNumberCard: React.FC<{
         }
         const openQuotes = Array.from(quoteDedupMap.values());
 
-        // Lost Deals Calculation (Current Month - Event Based Logic)
+        // Lost Deals: event-based (when order entered "Lost" status). Support multiple periods + previous period for comparison.
         const lostStatuses = new Set(statusConfigs.filter(c => c.isLost).map(c => c.label));
-        const monthlyLostDeals = orders.filter(o => {
-            // 1. Must be currently in a "Lost" status
-            if (!lostStatuses.has(o.orderStatus)) return false;
-
-            // 2. Determine when it became "Lost". Use statusHistory to find the event date.
-            let eventDate = new Date(o.date); // Default to creation date if no history
-            
+        const getLostEventDate = (o: Order): Date => {
             if (o.statusHistory && o.statusHistory.length > 0) {
                 const historyEntry = o.statusHistory.find(h => h.status === o.orderStatus);
-                if (historyEntry) {
-                    eventDate = new Date(historyEntry.startDate);
-                } else {
-                    // Fallback: use the latest history entry
-                    const sortedHistory = [...o.statusHistory].sort((a,b) => new Date(b.startDate).getTime() - new Date(a.startDate).getTime());
-                    if (sortedHistory.length > 0) {
-                        eventDate = new Date(sortedHistory[0].startDate);
-                    }
-                }
+                if (historyEntry) return new Date(historyEntry.startDate);
+                const sorted = [...o.statusHistory].sort((a, b) => new Date(b.startDate).getTime() - new Date(a.startDate).getTime());
+                if (sorted.length > 0) return new Date(sorted[0].startDate);
             }
-
-            // 3. Check if that event happened this month
-            return eventDate.getTime() >= startOfMonth.getTime() && eventDate.getTime() < nextMonth.getTime();
-        });
+            return new Date(o.date);
+        };
+        const getRangeForPeriod = (period: LostDealsPeriod): { start: Date; end: Date } => {
+            const y = now.getFullYear(), m = now.getMonth();
+            if (period === 'THIS_MONTH') return { start: new Date(y, m, 1), end: new Date(y, m + 1, 0, 23, 59, 59, 999) };
+            if (period === 'LAST_MONTH') return { start: new Date(y, m - 1, 1), end: new Date(y, m, 0, 23, 59, 59, 999) };
+            // LAST_3: last 3 full months (e.g. today in Feb -> Nov 1 to Jan 31)
+            const end = new Date(y, m, 0, 23, 59, 59, 999);
+            const start = new Date(y, m - 3, 1);
+            return { start, end };
+        };
+        const getPreviousRangeForPeriod = (period: LostDealsPeriod): { start: Date; end: Date } => {
+            const y = now.getFullYear(), m = now.getMonth();
+            if (period === 'THIS_MONTH') return getRangeForPeriod('LAST_MONTH');
+            if (period === 'LAST_MONTH') return { start: new Date(y, m - 2, 1), end: new Date(y, m - 1, 0, 23, 59, 59, 999) };
+            const end = new Date(y, m - 3, 0, 23, 59, 59, 999);
+            const start = new Date(y, m - 6, 1);
+            return { start, end };
+        };
+        const inRange = (d: Date, r: { start: Date; end: Date }) => d.getTime() >= r.start.getTime() && d.getTime() <= r.end.getTime();
+        const rangeCurrent = getRangeForPeriod(lostDealsPeriod);
+        const rangePrevious = getPreviousRangeForPeriod(lostDealsPeriod);
+        const lostRaw = orders.filter(o => lostStatuses.has(o.orderStatus) && inRange(getLostEventDate(o), rangeCurrent));
+        const lostPrevRaw = orders.filter(o => lostStatuses.has(o.orderStatus) && inRange(getLostEventDate(o), rangePrevious));
+        // Deduplicate by order number so the same logical order (e.g. 030226001) is not shown multiple times; keep the one with latest lost event date
+        const dedupeByOrderNumber = (list: Order[]) => {
+            const byNumber = new Map<string, Order>();
+            for (const o of list) {
+                const key = (o.orderNumber != null && String(o.orderNumber).trim() !== '') ? String(o.orderNumber).trim().toUpperCase() : o.id || '';
+                if (!key) continue;
+                const existing = byNumber.get(key);
+                const oDate = getLostEventDate(o);
+                if (!existing || getLostEventDate(existing).getTime() < oDate.getTime()) byNumber.set(key, o);
+            }
+            return Array.from(byNumber.values());
+        };
+        const lostDealsList = dedupeByOrderNumber(lostRaw);
+        const lostDealsPreviousList = dedupeByOrderNumber(lostPrevRaw);
 
         // Collection Stats Logic
         let collectionOverdue = { count: 0, amountInclVat: 0 };
@@ -597,7 +630,10 @@ const StrongNumberCard: React.FC<{
             daily: calculateMetrics(dailyDeals),
             monthly: calculateMetrics(monthlyDeals),
             yearly: calculateMetrics(yearlyDeals),
-            lost: calculateMetrics(monthlyLostDeals),
+            lost: calculateMetrics(lostDealsList),
+            lostPrevious: calculateMetrics(lostDealsPreviousList),
+            lostDealsList,
+            lostPeriodLabel: lostDealsPeriod === 'THIS_MONTH' ? 'החודש' : lostDealsPeriod === 'LAST_MONTH' ? 'חודש שעבר' : '3 חודשים אחרונים',
             leads: untouchedLeads.length,
             quotes: {
                 count: openQuotes.length,
@@ -608,7 +644,7 @@ const StrongNumberCard: React.FC<{
                 thisMonth: collectionMonth
             }
         };
-    }, [orders, statusConfigs, vatRate]);
+    }, [orders, statusConfigs, vatRate, lostDealsPeriod]);
 
     const formatCurrency = (val: number) => val.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 0, maximumFractionDigits: 0 });
     
@@ -720,13 +756,30 @@ const StrongNumberCard: React.FC<{
                     </div>
                 </div>
 
-                {/* Lost Potential (New Card) */}
-                <div className="bg-red-50/60 border border-red-200 p-4 rounded-xl flex flex-col justify-between min-h-[130px] hover:shadow-md transition-all group">
+                {/* Lost Potential (New Card) - click opens detail modal */}
+                <div
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => setLostDealsModalOpen(true)}
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setLostDealsModalOpen(true); } }}
+                    className="bg-red-50/60 border border-red-200 p-4 rounded-xl flex flex-col justify-between min-h-[130px] hover:shadow-md transition-all group cursor-pointer focus:outline-none focus:ring-2 focus:ring-red-300"
+                >
                     <div className="flex justify-between items-start">
                         <div>
                             <div className="text-3xl font-black text-red-600">{stats.lost.count}</div>
                             <div className="text-xs font-bold text-red-800 mt-1">עסקאות אבודות</div>
-                            <div className="text-[10px] text-red-400">(החודש)</div>
+                            <div className="flex items-center gap-1 mt-0.5" onClick={(e) => e.stopPropagation()}>
+                                <select
+                                    value={lostDealsPeriod}
+                                    onChange={(e) => setLostDealsPeriod(e.target.value as LostDealsPeriod)}
+                                    className="text-[10px] text-red-600 bg-white/80 border border-red-100 rounded px-1 py-0.5 cursor-pointer focus:outline-none focus:ring-1 focus:ring-red-300"
+                                    aria-label="בחירת תקופה לעסקאות אבודות"
+                                >
+                                    <option value="THIS_MONTH">החודש</option>
+                                    <option value="LAST_MONTH">חודש שעבר</option>
+                                    <option value="LAST_3">3 חודשים אחרונים</option>
+                                </select>
+                            </div>
                         </div>
                         <div className="bg-white p-1.5 rounded-full border border-red-100 text-red-500">
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5">
@@ -743,8 +796,72 @@ const StrongNumberCard: React.FC<{
                             <span className="text-[10px] font-medium text-red-500">אובדן רווח:</span>
                             <span className="text-xs font-bold text-red-800 bg-red-100 px-1.5 py-0.5 rounded">{formatCurrency(stats.lost.profit)}</span>
                         </div>
+                        {stats.lostPrevious && (stats.lostPrevious.count > 0 || stats.lost.count > 0) && (
+                            <div className="text-[10px] text-slate-500 mt-1.5 pt-1 border-t border-red-100/50">
+                                לעומת תקופה קודמת: {stats.lostPrevious.count} עסקאות · {formatCurrency(stats.lostPrevious.revenueExclVat)}
+                            </div>
+                        )}
                     </div>
                 </div>
+
+                {/* Lost Deals Detail Modal */}
+                {lostDealsModalOpen && (
+                    <Modal
+                        title="עסקאות אבודות"
+                        onClose={() => setLostDealsModalOpen(false)}
+                    >
+                        <div className="space-y-4">
+                            <div className="flex items-center gap-2 flex-wrap">
+                                <span className="text-sm text-slate-600">תקופה:</span>
+                                <select
+                                    value={lostDealsPeriod}
+                                    onChange={(e) => setLostDealsPeriod(e.target.value as LostDealsPeriod)}
+                                    className="text-sm border border-slate-300 rounded px-2 py-1 focus:ring-2 focus:ring-primary focus:border-primary"
+                                >
+                                    <option value="THIS_MONTH">החודש</option>
+                                    <option value="LAST_MONTH">חודש שעבר</option>
+                                    <option value="LAST_3">3 חודשים אחרונים</option>
+                                </select>
+                                {stats.lostPrevious && (stats.lostPrevious.count > 0 || stats.lost.count > 0) && (
+                                    <span className="text-xs text-slate-500">לעומת תקופה קודמת: {stats.lostPrevious.count} עסקאות, {formatCurrency(stats.lostPrevious.revenueExclVat)} אובדן הכנסה</span>
+                                )}
+                            </div>
+                            <div className="overflow-x-auto max-h-[60vh] border border-slate-200 rounded-lg">
+                                <table className="min-w-full text-sm text-right">
+                                    <thead className="bg-slate-50 text-slate-600 font-bold sticky top-0">
+                                        <tr>
+                                            <th className="px-3 py-2">הזמנה</th>
+                                            <th className="px-3 py-2">תיאור</th>
+                                            <th className="px-3 py-2">אובדן הכנסה</th>
+                                            <th className="px-3 py-2">אובדן רווח</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-slate-100">
+                                        {stats.lostDealsList.length === 0 ? (
+                                            <tr><td colSpan={4} className="px-3 py-4 text-slate-500 text-center">אין עסקאות אבודות בתקופה הנבחרת</td></tr>
+                                        ) : (
+                                            stats.lostDealsList.map((order) => {
+                                                const { totalAmount, profit } = calculateOrderTotals(order);
+                                                return (
+                                                    <tr
+                                                        key={order.id}
+                                                        className="hover:bg-red-50/50 cursor-pointer"
+                                                        onClick={() => { onNavigateToOrder?.(order.id); setLostDealsModalOpen(false); }}
+                                                    >
+                                                        <td className="px-3 py-2 font-medium text-primary">{order.orderNumber}</td>
+                                                        <td className="px-3 py-2 text-slate-700 max-w-[200px] truncate" title={order.description}>{order.description || '—'}</td>
+                                                        <td className="px-3 py-2 font-medium">{formatCurrency(totalAmount)}</td>
+                                                        <td className="px-3 py-2">{formatCurrency(profit)}</td>
+                                                    </tr>
+                                                );
+                                            })
+                                        )}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </Modal>
+                )}
 
             </div>
         </div>
@@ -920,7 +1037,7 @@ const Dashboard: React.FC<DashboardProps> = ({
             </div>
 
             {/* Strong Numbers Row */}
-            <StrongNumberCard orders={orders} statusConfigs={statusConfigs} vatRate={vatRate} roleType={user?.roleType} />
+            <StrongNumberCard orders={orders} statusConfigs={statusConfigs} vatRate={vatRate} roleType={user?.roleType} onNavigateToOrder={onNavigateToOrder} />
 
             {/* Bottom Section: Operations Calendar & Tasks */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

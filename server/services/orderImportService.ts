@@ -542,7 +542,7 @@ export async function executeImport(
             additionalServices: [],
             attachments: [],
             timeline,
-            statusHistory: []
+            statusHistory: status ? [{ status, startDate: date }] : []
         };
 
         try {
@@ -573,7 +573,7 @@ export async function executeImport(
         orderUpdates.dealStartDate = csvDate;
         if (statusChanged) {
             const newStatusHistory = [...(existingOrder.statusHistory || [])];
-            newStatusHistory.push({ status: newStatus, startDate: new Date() });
+            newStatusHistory.push({ status: newStatus, startDate: csvDate });
             orderUpdates.orderStatus = newStatus;
             orderUpdates.statusHistory = newStatusHistory;
         }

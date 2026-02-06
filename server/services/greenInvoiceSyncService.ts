@@ -22,7 +22,8 @@ export type ApplyClientResult = { created?: Customer; updated?: Customer };
 
 /**
  * Apply one Green Invoice client to CRM: create new customer or update existing.
- * Matches by greenInvoiceClientId, then by name or businessId (taxId).
+ * Guarantees no duplicate: matches by greenInvoiceClientId first, then by name or businessId (taxId).
+ * When multiple CRM customers match by name/businessId, prefers one without greenInvoiceClientId to avoid overwriting an existing link.
  */
 export async function applyGreenInvoiceClientToCustomer(
     giClient: GreenInvoiceClient,
@@ -30,13 +31,18 @@ export async function applyGreenInvoiceClientToCustomer(
 ): Promise<ApplyClientResult> {
     const displayName = giClientName(giClient);
     const displayNameNorm = (displayName || '').trim().toLowerCase();
+    const giTaxId = String((giClient as any).taxId ?? (giClient as any).business_id ?? (giClient as any).tax_id ?? '').trim();
     let existingCustomer = existingCustomers.find(c => c.greenInvoiceClientId === giClient.id);
     if (!existingCustomer) {
-        existingCustomer = existingCustomers.find(c => {
+        const nameOrBizMatch = (c: Customer) => {
             const nameMatch = (c.name || '').trim().toLowerCase() === displayNameNorm;
-            const hpMatch = c.businessId && (giClient as any).taxId && String((giClient as any).taxId).trim() === (c.businessId || '').trim();
+            const hpMatch = !!giTaxId && !!((c.businessId || '').trim()) && giTaxId === (c.businessId || '').trim();
             return nameMatch || hpMatch;
-        });
+        };
+        const candidates = existingCustomers.filter(nameOrBizMatch);
+        existingCustomer = candidates.find(c => !c.greenInvoiceClientId)
+            ?? candidates.find(c => c.greenInvoiceClientId === giClient.id)
+            ?? candidates[0];
     }
 
     const addressParts: string[] = [];

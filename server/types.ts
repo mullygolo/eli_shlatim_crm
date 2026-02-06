@@ -256,6 +256,7 @@ export interface StatusHistoryEntry {
     status: string;
     startDate: Date;
     endDate?: Date;
+    employeeId?: string;
 }
 
 export enum OrderType {

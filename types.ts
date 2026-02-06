@@ -1,5 +1,68 @@
 
-export type Page = 'Dashboard' | 'Orders' | 'Customers' | 'Suppliers' | 'Employees' | 'Deals' | 'Transactions' | 'Timesheets' | 'Quotes' | 'Reports' | 'Settings' | 'Finance' | 'Attendance' | 'PriceList' | 'CallCenter' | 'ImprovementSuggestions';
+export type Page = 'Dashboard' | 'Orders' | 'Customers' | 'Suppliers' | 'Employees' | 'Deals' | 'Transactions' | 'Timesheets' | 'Quotes' | 'Reports' | 'Settings' | 'Finance' | 'Attendance' | 'PriceList' | 'CallCenter' | 'ImprovementSuggestions' | 'Performance';
+
+/** Performance dashboard API payload (דוח ביצועים). */
+export interface EmployeePerformanceMetrics {
+    employeeId: string;
+    employeeName: string;
+    orderCount: number;
+    totalAmount: number;
+    totalProfit: number;
+    uniqueCustomers: number;
+    avgSalePerCustomer: number;
+    avgProfitMarginPercent: number;
+    newCustomersCreated: number;
+    statusChangesCount: number;
+    statusChangesByStatus: Record<string, number>;
+    workHoursTotal: number;
+    conversionLeadToActive: number;
+    conversionLeadToCompleted: number;
+    leadsCount: number;
+    activeOrCompletedCount: number;
+    avgClosingTimeHours: number | null;
+    currentWorkloadOpen: number;
+    lostOrdersCount: number;
+    serviceCallOrdersCount: number;
+    repeatCustomers2Plus: number;
+    repeatCustomers3Plus: number;
+}
+
+export interface BusinessPerformanceSummary {
+    totalOrders: number;
+    totalAmount: number;
+    totalProfit: number;
+    salesByMonth: { monthKey: string; label: string; orderCount: number; totalAmount: number; totalProfit: number }[];
+    statusDistribution: { statusLabel: string; count: number; isLead: boolean; isActiveDeal: boolean; isCompleted: boolean; isLost: boolean }[];
+    avgClosingTimeHours: number | null;
+}
+
+export interface ActivityScoreEntry {
+    userId: string;
+    username: string;
+    score: number;
+    actionCounts: Record<string, number>;
+}
+
+export interface RedFlagOrder {
+    orderId: string;
+    orderNumber: string;
+    description: string;
+    orderStatus: string;
+    employeeId: string;
+    employeeName: string;
+    lastActivityAt: Date | null;
+    hoursSinceActivity: number;
+}
+
+export interface PerformanceMetricsPayload {
+    metricsStartDate: string;
+    business: BusinessPerformanceSummary;
+    employees: EmployeePerformanceMetrics[];
+    activityScore: ActivityScoreEntry[];
+    redFlags: RedFlagOrder[];
+    from?: string;
+    to?: string;
+}
 
 export type ImprovementSuggestionType = 'BUG' | 'IMPROVEMENT' | 'OTHER';
 export type ImprovementSuggestionStatus = 'NEW' | 'IN_PROGRESS' | 'DONE';
@@ -263,6 +326,8 @@ export interface StatusHistoryEntry {
     status: string;
     startDate: Date;
     endDate?: Date;
+    /** Who was assigned (made this status change) – for "time in status per employee" metrics. */
+    employeeId?: string;
 }
 
 export enum OrderType {

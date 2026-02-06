@@ -166,6 +166,16 @@ const MAX_EXPORT = 2000;
 
 const INITIAL_FILTERS = { from: '', to: '', userId: '', entityType: '', action: '', search: '' };
 
+/** YYYY-MM-DD in Israel timezone (for date inputs) */
+function todayIsrael(): string {
+    return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Jerusalem' });
+}
+function daysAgoIsrael(days: number): string {
+    const d = new Date();
+    d.setDate(d.getDate() - days);
+    return d.toLocaleDateString('en-CA', { timeZone: 'Asia/Jerusalem' });
+}
+
 const LogsAndAuditTab: React.FC<LogsAndAuditTabProps> = ({ employees, onNavigateToOrder }) => {
     const [activities, setActivities] = useState<Activity[]>([]);
     const [totalCount, setTotalCount] = useState(0);
@@ -212,6 +222,12 @@ const LogsAndAuditTab: React.FC<LogsAndAuditTabProps> = ({ employees, onNavigate
         setCurrentPage(1);
     };
 
+    const setQuickDateRange = (from: string, to: string) => {
+        setFilters((prev) => ({ ...prev, from, to }));
+        setAppliedFilters((prev) => ({ ...prev, from, to }));
+        setCurrentPage(1);
+    };
+
     const handleExportCsv = async () => {
         setLoading(true);
         try {
@@ -239,11 +255,19 @@ const LogsAndAuditTab: React.FC<LogsAndAuditTabProps> = ({ employees, onNavigate
     return (
         <div className="space-y-4">
             <div className="flex flex-wrap items-end gap-3">
+                <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs text-slate-500">טווח מהיר:</span>
+                    <button type="button" onClick={() => setQuickDateRange(todayIsrael(), todayIsrael())} className="px-2 py-1 text-xs rounded border border-slate-300 hover:bg-slate-50">היום</button>
+                    <button type="button" onClick={() => setQuickDateRange(daysAgoIsrael(6), todayIsrael())} className="px-2 py-1 text-xs rounded border border-slate-300 hover:bg-slate-50">7 ימים אחרונים</button>
+                    <button type="button" onClick={() => setQuickDateRange(daysAgoIsrael(29), todayIsrael())} className="px-2 py-1 text-xs rounded border border-slate-300 hover:bg-slate-50">30 ימים אחרונים</button>
+                    <button type="button" onClick={() => { setFilters((p) => ({ ...p, from: '', to: '' })); setAppliedFilters((p) => ({ ...p, from: '', to: '' })); setCurrentPage(1); }} className="px-2 py-1 text-xs rounded border border-slate-300 hover:bg-slate-50">נקה תאריכים</button>
+                </div>
                 <div>
                     <label className="block text-xs text-slate-500 mb-1">מתאריך</label>
                     <input
                         type="date"
                         value={filters.from}
+                        max={filters.to || undefined}
                         onChange={(e) => handleFilterChange('from', e.target.value)}
                         className="rounded border border-slate-300 px-2 py-1.5 text-sm"
                     />
@@ -253,6 +277,7 @@ const LogsAndAuditTab: React.FC<LogsAndAuditTabProps> = ({ employees, onNavigate
                     <input
                         type="date"
                         value={filters.to}
+                        min={filters.from || undefined}
                         onChange={(e) => handleFilterChange('to', e.target.value)}
                         className="rounded border border-slate-300 px-2 py-1.5 text-sm"
                     />

@@ -345,9 +345,11 @@ export async function findClientByNameOrBusinessId(name: string, businessId?: st
         
         const _name = (c: GreenInvoiceClient) => (c.names || c.name || '').toLowerCase();
         if (businessId) {
+            const bid = businessId.trim();
             const byBusinessId = clients.find(c =>
-                _name(c).includes(businessId.toLowerCase()) ||
-                (c as any).business_id === businessId
+                _name(c).includes(bid.toLowerCase()) ||
+                (c as any).business_id === bid ||
+                (c as any).taxId === bid
             );
             if (byBusinessId) return byBusinessId;
         }
@@ -365,16 +367,20 @@ export async function findClientByNameOrBusinessId(name: string, businessId?: st
 }
 
 /**
- * Create or get existing client
+ * Create or get existing client. When an existing client is found, updates it in Green Invoice
+ * with the current clientData (so CRM changes flow to Green Invoice).
  */
 export async function createOrGetClient(clientData: CreateClientRequest, businessId?: string): Promise<GreenInvoiceClient> {
-    // First, try to find existing client
     const existing = await findClientByNameOrBusinessId(clientData.names, businessId);
     if (existing) {
-        return existing;
+        try {
+            await updateClient(existing.id, clientData);
+            return (await getClient(existing.id)) || existing;
+        } catch (err) {
+            console.warn('GreenInvoice updateClient in createOrGetClient failed, returning existing:', (err as Error)?.message);
+            return existing;
+        }
     }
-
-    // If not found, create new client
     return createClient(clientData);
 }
 

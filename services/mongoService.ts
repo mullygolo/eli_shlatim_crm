@@ -1,7 +1,8 @@
 import {
     Customer, Order, Supplier, Employee, Activity, ActivityFilters, ActivitiesResult, OrderStatusConfiguration,
     FixedExpense, VariableExpense, Loan, Debt, Receivable, EquityInvestment,
-    AttendanceRecord, ManualEvent, WallPost, CallLog, ImprovementSuggestion, ImprovementSuggestionStatus, ImprovementSuggestionType
+    AttendanceRecord, ManualEvent, WallPost, CallLog, ImprovementSuggestion, ImprovementSuggestionStatus, ImprovementSuggestionType,
+    PerformanceMetricsPayload
 } from '../types';
 
 // API Base URL - use relative path in production
@@ -66,6 +67,14 @@ export async function updateCustomer(customer: Customer): Promise<Customer> {
 export async function deleteCustomer(customerId: string): Promise<void> {
     return apiRequest<void>(`/customers/${customerId}`, {
         method: 'DELETE',
+    });
+}
+
+/** Merge victim into veteran on server (orders reassigned, contacts/notes merged, victim deleted). */
+export async function mergeCustomers(veteranId: string, victimId: string): Promise<Customer> {
+    return apiRequest<Customer>('/customers/merge', {
+        method: 'POST',
+        body: JSON.stringify({ veteranId, victimId }),
     });
 }
 
@@ -841,4 +850,18 @@ export async function updateSettings(settings: Settings, userId?: string, reason
         method: 'PUT',
         body: JSON.stringify({ settings, userId, reason }),
     });
+}
+
+// ==================== PERFORMANCE METRICS (ADMIN only) ====================
+export async function getPerformanceMetrics(filters: {
+    from?: string;
+    to?: string;
+    employeeId?: string;
+}): Promise<PerformanceMetricsPayload> {
+    const params = new URLSearchParams();
+    if (filters.from) params.set('from', filters.from);
+    if (filters.to) params.set('to', filters.to);
+    if (filters.employeeId) params.set('employeeId', filters.employeeId);
+    const qs = params.toString();
+    return apiRequest<PerformanceMetricsPayload>(`/performance-metrics${qs ? `?${qs}` : ''}`);
 }

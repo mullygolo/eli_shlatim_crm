@@ -1,5 +1,5 @@
 
-export type Page = 'Dashboard' | 'Orders' | 'Customers' | 'Suppliers' | 'Employees' | 'Deals' | 'Transactions' | 'Timesheets' | 'Quotes' | 'Reports' | 'Settings' | 'Finance' | 'Attendance' | 'PriceList' | 'CallCenter' | 'ImprovementSuggestions';
+export type Page = 'Dashboard' | 'Orders' | 'Customers' | 'Suppliers' | 'Employees' | 'Deals' | 'Transactions' | 'Timesheets' | 'Quotes' | 'Reports' | 'Performance' | 'Settings' | 'Finance' | 'Attendance' | 'PriceList' | 'CallCenter' | 'ImprovementSuggestions';
 
 export type ImprovementSuggestionType = 'BUG' | 'IMPROVEMENT' | 'OTHER';
 export type ImprovementSuggestionStatus = 'NEW' | 'IN_PROGRESS' | 'DONE';
@@ -733,4 +733,67 @@ export interface AdHocProduct {
     customerName?: string;
     notes?: string;
     suggestedProductId?: string; // Link to product in price list (if suggested)
+}
+
+// Performance metrics (dashboard – ADMIN only)
+export interface BusinessPerformanceSummary {
+    totalOrders: number;
+    totalAmount: number;
+    totalProfit: number;
+    avgClosingTimeHours: number | null;
+    ordersThisMonth?: number;
+    dealsApprovedThisMonth?: number;
+    conversionRate?: number;
+    salesByMonth: { monthKey: string; label: string; orderCount: number; totalAmount: number; totalProfit: number }[];
+    statusDistribution: { statusLabel: string; count: number }[];
+}
+
+export interface EmployeePerformanceMetrics {
+    employeeId: string;
+    employeeName: string;
+    orderCount: number;
+    totalAmount: number;
+    totalProfit: number;
+    uniqueCustomers: number;
+    avgSalePerCustomer: number;
+    newCustomersCreated: number;
+    statusChangesCount: number;
+    workHoursTotal: number;
+    currentWorkloadOpen: number;
+    lostOrdersCount: number;
+    conversionRate?: number;
+    avgProfitPercentPerCustomer?: number;
+    avgClosingTimeHours?: number | null;
+    avgTimeInStatusHours?: number | null;
+    returningCustomers2Plus?: number;
+    returningCustomers3Plus?: number;
+    serviceCallOrdersOpened?: number;
+    statusChangesByStatus?: Record<string, number>;
+}
+
+export interface ActivityScoreEntry {
+    userId: string;
+    username: string;
+    score: number;
+    actionCounts: Record<string, number>;
+}
+
+export interface RedFlagOrder {
+    orderId: string;
+    orderNumber: string;
+    description: string;
+    orderStatus: string;
+    employeeName: string;
+    hoursSinceActivity: number;
+    flag?: string;
+}
+
+export interface PerformanceMetricsPayload {
+    from?: string;
+    to?: string;
+    metricsStartDate: string;
+    business: BusinessPerformanceSummary;
+    employees: EmployeePerformanceMetrics[];
+    activityScore: ActivityScoreEntry[];
+    redFlags: RedFlagOrder[];
 }

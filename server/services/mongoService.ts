@@ -6,7 +6,8 @@ import {
     PriceListProduct, SalesHistoryEntry, AdHocProduct,
     LineItem, AdditionalService, SupplierPayment, TransactionStatus,
     PaymentMethod, CustomerPayment, ReceivablePayment, DebtPayment,
-    OrderDocumentLink, ImprovementSuggestion, ImprovementSuggestionStatus, ImprovementSuggestionType
+    OrderDocumentLink, ImprovementSuggestion, ImprovementSuggestionStatus, ImprovementSuggestionType,
+    OrderType
 } from '../types.js';
 import { hashPassword } from '../utils/password.js';
 import { getTodayRangeIsrael, getDateStringIsrael, getMonthRangeIsrael, getDayRangeIsrael } from '../utils/timezone.js';
@@ -147,8 +148,31 @@ export async function createCustomer(customer: Customer): Promise<Customer> {
         const database = await getDb();
         const collection = database.collection<Customer>('customers');
         const key = customerLogicalKey(customer);
-        const existing = await collection.find({}).toArray();
-        const duplicate = (existing.map(deserializeDates) as Customer[]).find(c => customerLogicalKey(c) === key);
+        const nameNorm = (customer.name || '').trim().toLowerCase();
+        const businessIdNorm = (customer.businessId || '').trim().toLowerCase();
+        const seenIds = new Set<string>();
+        const candidates: Customer[] = [];
+        if (businessIdNorm) {
+            const doc = await collection.findOne({ businessId: businessIdNorm });
+            if (doc) {
+                const c = deserializeDates(doc) as Customer;
+                if (!seenIds.has(c.id)) {
+                    seenIds.add(c.id);
+                    candidates.push(c);
+                }
+            }
+        }
+        if (nameNorm) {
+            const docs = await collection.find({ name: { $regex: new RegExp('^' + escapeRegex(nameNorm) + '$', 'i') } }).limit(50).toArray();
+            for (const doc of docs) {
+                const c = deserializeDates(doc) as Customer;
+                if (!seenIds.has(c.id)) {
+                    seenIds.add(c.id);
+                    candidates.push(c);
+                }
+            }
+        }
+        const duplicate = candidates.find(c => customerLogicalKey(c) === key);
         if (duplicate) {
             const err = new Error('DUPLICATE_CUSTOMER') as Error & { code?: string };
             err.code = 'DUPLICATE_CUSTOMER';
@@ -190,6 +214,56 @@ export async function deleteCustomer(customerId: string): Promise<void> {
         console.error('Error deleting customer:', error);
         throw error;
     }
+}
+
+/** Reassign all orders from one customer to another (for merge). Returns count of updated orders. */
+export async function updateOrdersCustomerId(fromCustomerId: string, toCustomerId: string): Promise<number> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<Order>('orders');
+        const result = await collection.updateMany(
+            { customerId: fromCustomerId },
+            { $set: { customerId: toCustomerId, updatedAt: new Date() } }
+        );
+        return result.modifiedCount;
+    } catch (error) {
+        console.error('Error updating orders customerId:', error);
+        throw error;
+    }
+}
+
+/**
+ * Merge victim customer into veteran: reassign orders, merge contacts/notes, keep veteran's greenInvoiceClientId (or victim's if veteran has none), delete victim.
+ */
+export async function mergeCustomers(veteranId: string, victimId: string): Promise<Customer> {
+    const veteran = await getCustomerById(veteranId);
+    const victim = await getCustomerById(victimId);
+    if (!veteran) throw new Error('לקוח היעד (ותיק) לא נמצא.');
+    if (!victim) throw new Error('הלקוח למחיקה (קורבן) לא נמצא.');
+    if (veteranId === victimId) throw new Error('לא ניתן למזג לקוח עם עצמו.');
+
+    await updateOrdersCustomerId(victimId, veteranId);
+
+    const transferredContacts = (victim.contacts || []).map((c, i) => ({
+        ...c,
+        id: `cont_merged_${c.id}_${Date.now()}_${i}`,
+        isDefault: false,
+    }));
+    const mergedContacts = [...(veteran.contacts || []), ...transferredContacts];
+    const mergeNote = `\n[מיזוג ידני ${new Date().toLocaleDateString('he-IL')}]: מוזג מ-${victim.name} (ח.פ ${victim.businessId || '-'})`;
+    const mergedNotes = (veteran.notes || '').trim() + mergeNote;
+
+    const greenInvoiceClientId = veteran.greenInvoiceClientId || victim.greenInvoiceClientId || undefined;
+
+    const updatedVeteran: Customer = {
+        ...veteran,
+        contacts: mergedContacts,
+        notes: mergedNotes,
+        greenInvoiceClientId,
+    };
+    const saved = await updateCustomer(updatedVeteran);
+    await deleteCustomer(victimId);
+    return saved;
 }
 
 // Logical key for customer deduplication (name + businessId, normalized)
@@ -835,7 +909,7 @@ export async function getPayableItems(
     page: number;
     limit: number;
     totalPages: number;
-    summaryStats: { totalDebt: number; overdueDebt: number; thisMonthDue: number; unassignedCount: number };
+    summaryStats: { totalDebt: number; totalCostNet: number; overdueDebt: number; thisMonthDue: number; unassignedCount: number };
 }> {
     try {
         const database = await getDb();
@@ -1052,8 +1126,10 @@ export async function getPayableItems(
         });
         
         // Calculate summary stats on ALL filtered items (not just current page)
+        // totalCostNet = sum of cost (net) so it matches Orders page "סה״כ עלות לספקים" when same filters
         const summaryStats = {
             totalDebt: filteredItems.reduce((sum, item) => sum + item.remainingAmount, 0),
+            totalCostNet: filteredItems.reduce((sum, item) => sum + item.cost, 0),
             overdueDebt: filteredItems
                 .filter(i => i.remainingAmount > 0.1 && i.timeStatus === 'איחור')
                 .reduce((sum, item) => sum + item.remainingAmount, 0),
@@ -1393,12 +1469,16 @@ export async function getActivitiesFiltered(filters: ActivityFilters): Promise<A
         const collection = database.collection<Activity>('activities');
         const match: Record<string, unknown> = {};
         if (filters.from || filters.to) {
-            const dateMatch: Record<string, Date> = {};
-            if (filters.from) dateMatch.$gte = new Date(filters.from);
+            const dateMatch: Record<string, string | Date> = {};
+            // Use Israel timezone so "מתאריך" / "עד תאריך" are start/end of day in Israel.
+            // Activities store timestamp as ISO string (serializeDates), so query with ISO strings so the comparison matches.
+            if (filters.from) {
+                const { start } = getDayRangeIsrael(filters.from);
+                dateMatch.$gte = start.toISOString();
+            }
             if (filters.to) {
-                const toDate = new Date(filters.to);
-                toDate.setHours(23, 59, 59, 999);
-                dateMatch.$lte = toDate;
+                const { end } = getDayRangeIsrael(filters.to);
+                dateMatch.$lte = end.toISOString();
             }
             match.timestamp = dateMatch;
         }
@@ -3327,6 +3407,454 @@ export async function getSettings(): Promise<Settings> {
         console.error('Error fetching settings:', error);
         throw error;
     }
+}
+
+/** Metrics start date (Israeli 5.2.26 = 2026-02-05). All calculations use orders from this date onward. */
+const METRICS_START_DATE = '2026-02-05';
+
+/** Activity score points by action (for Activity Score metric). */
+const ACTIVITY_SCORE_POINTS: Record<string, number> = {
+    update: 3,           // עדכון הערה/מסמך
+    status_change: 10,
+    create: 5,
+    close_deal: 20,     // status_change to isActiveDeal/isCompleted (handled in logic)
+};
+
+/** Performance metrics for dashboard. ADMIN only. */
+export async function getPerformanceMetrics(
+    filters: { from?: string; to?: string; employeeId?: string },
+    vatRate: number
+): Promise<{
+    from?: string;
+    to?: string;
+    metricsStartDate: string;
+    business: {
+        totalOrders: number;
+        totalAmount: number;
+        totalProfit: number;
+        avgClosingTimeHours: number | null;
+        ordersThisMonth?: number;
+        dealsApprovedThisMonth?: number;
+        conversionRate?: number;
+        salesByMonth: { monthKey: string; label: string; orderCount: number; totalAmount: number; totalProfit: number }[];
+        statusDistribution: { statusLabel: string; count: number }[];
+    };
+    employees: {
+        employeeId: string;
+        employeeName: string;
+        orderCount: number;
+        totalAmount: number;
+        totalProfit: number;
+        uniqueCustomers: number;
+        avgSalePerCustomer: number;
+        newCustomersCreated: number;
+        statusChangesCount: number;
+        workHoursTotal: number;
+        currentWorkloadOpen: number;
+        lostOrdersCount: number;
+        conversionRate?: number;
+        avgProfitPercentPerCustomer?: number;
+        avgClosingTimeHours?: number | null;
+        avgTimeInStatusHours?: number | null;
+        returningCustomers2Plus?: number;
+        returningCustomers3Plus?: number;
+        serviceCallOrdersOpened?: number;
+        statusChangesByStatus?: Record<string, number>;
+    }[];
+    activityScore: {
+        userId: string;
+        username: string;
+        score: number;
+        actionCounts: Record<string, number>;
+    }[];
+    redFlags: {
+        orderId: string;
+        orderNumber: string;
+        description: string;
+        orderStatus: string;
+        employeeName: string;
+        hoursSinceActivity: number;
+        flag?: string;
+    }[];
+}> {
+    const database = await getDb();
+    const ordersCol = database.collection<Order>('orders');
+    const activitiesCol = database.collection<Activity>('activities');
+    const attendanceCol = database.collection<AttendanceRecord>('attendanceRecords');
+    const employeesCol = database.collection<Employee>('employees');
+
+    const [statusConfigs, settings, employeesDocs] = await Promise.all([
+        getStatusConfigs(),
+        getSettings().catch(() => ({ vatRate: 18 })),
+        employeesCol.find({}).toArray()
+    ]);
+    const employees = employeesDocs.map(d => deserializeDates(d) as Employee);
+    const empMap = new Map(employees.map(e => [e.id, e]));
+    const vat = settings?.vatRate ?? vatRate;
+
+    const metricsStart = new Date(METRICS_START_DATE + 'T00:00:00.000Z');
+    let dateStart: Date | null = null;
+    let dateEnd: Date | null = null;
+    if (filters.from) {
+        const r = getDayRangeIsrael(filters.from);
+        dateStart = r.start;
+    }
+    if (filters.to) {
+        const r = getDayRangeIsrael(filters.to);
+        dateEnd = r.end;
+    }
+
+    const orderQuery: Record<string, unknown> = { createdAt: { $gte: metricsStart } };
+    if (dateStart || dateEnd) {
+        orderQuery.date = {} as Record<string, Date>;
+        if (dateStart) (orderQuery.date as Record<string, Date>).$gte = dateStart;
+        if (dateEnd) (orderQuery.date as Record<string, Date>).$lte = dateEnd;
+    }
+    if (filters.employeeId) orderQuery.employeeId = filters.employeeId;
+
+    const orders = await ordersCol.find(orderQuery).sort({ date: -1 }).limit(20000).toArray();
+    const ordersList = orders.map(d => deserializeDates(d) as Order);
+
+    const leadLabels = new Set(statusConfigs.filter(c => c.isLead).map(c => c.label));
+    const quoteLabels = new Set(statusConfigs.filter(c => c.isQuote).map(c => c.label));
+    const activeDealLabels = new Set(statusConfigs.filter(c => c.isActiveDeal).map(c => c.label));
+    const completedLabels = new Set(statusConfigs.filter(c => c.isCompleted).map(c => c.label));
+    const lostLabels = new Set(statusConfigs.filter(c => c.isLost).map(c => c.label));
+    const openStatusLabels = new Set([...leadLabels, ...quoteLabels, ...activeDealLabels, ...completedLabels]);
+
+    const now = new Date();
+    const todayStr = getDateStringIsrael(now);
+    const [y, m] = todayStr.split('-').map(Number);
+    const { start: monthStart, end: monthEnd } = getMonthRangeIsrael(y, m);
+
+    let businessTotalOrders = 0;
+    let businessTotalAmount = 0;
+    let businessTotalProfit = 0;
+    const closingTimes: number[] = [];
+    const salesByMonthMap = new Map<string, { orderCount: number; totalAmount: number; totalProfit: number }>();
+    const statusDistMap = new Map<string, number>();
+
+    const empOrderCount = new Map<string, number>();
+    const empTotalAmount = new Map<string, number>();
+    const empTotalProfit = new Map<string, number>();
+    const empUniqueCustomers = new Map<string, Set<string>>();
+    const empClosingTimes = new Map<string, number[]>();
+    const empDealsCount = new Map<string, number>();
+    const empLeadsCount = new Map<string, number>();
+    const empServiceCallOpened = new Map<string, number>();
+    const firstOrderByCustomer = new Map<string, { order: Order }>();
+
+    for (const order of ordersList) {
+        const created = order.createdAt ? new Date(order.createdAt) : new Date(order.date);
+        const orderDate = order.date instanceof Date ? order.date : new Date(order.date);
+        const { totalAmount, profit } = calculateOrderTotals(order);
+        const config = statusConfigs.find(c => c.label === order.orderStatus);
+        const isActive = config?.isActiveDeal ?? false;
+        const isCompleted = config?.isCompleted ?? false;
+        const isLost = config?.isLost ?? false;
+
+        businessTotalOrders += 1;
+        businessTotalAmount += totalAmount;
+        businessTotalProfit += profit;
+        statusDistMap.set(order.orderStatus, (statusDistMap.get(order.orderStatus) ?? 0) + 1);
+
+        const monthKey = `${orderDate.getFullYear()}-${String(orderDate.getMonth() + 1).padStart(2, '0')}`;
+        const monthEntry = salesByMonthMap.get(monthKey) ?? { orderCount: 0, totalAmount: 0, totalProfit: 0 };
+        monthEntry.orderCount += 1;
+        monthEntry.totalAmount += totalAmount;
+        monthEntry.totalProfit += profit;
+        salesByMonthMap.set(monthKey, monthEntry);
+
+        if (order.dealStartDate && (isActive || isCompleted)) {
+            const dealStart = order.dealStartDate instanceof Date ? order.dealStartDate : new Date(order.dealStartDate);
+            const hours = (dealStart.getTime() - created.getTime()) / (1000 * 60 * 60);
+            if (hours >= 0) closingTimes.push(hours);
+        }
+
+        const eid = order.employeeId || '';
+        if (!eid) continue;
+        empOrderCount.set(eid, (empOrderCount.get(eid) ?? 0) + 1);
+        empTotalAmount.set(eid, (empTotalAmount.get(eid) ?? 0) + totalAmount);
+        empTotalProfit.set(eid, (empTotalProfit.get(eid) ?? 0) + profit);
+        if (!empUniqueCustomers.has(eid)) empUniqueCustomers.set(eid, new Set());
+        empUniqueCustomers.get(eid)!.add(order.customerId);
+        if (isActive || isCompleted) {
+            empDealsCount.set(eid, (empDealsCount.get(eid) ?? 0) + 1);
+            if (order.dealStartDate) {
+                const dealStart = order.dealStartDate instanceof Date ? order.dealStartDate : new Date(order.dealStartDate);
+                const hours = (dealStart.getTime() - created.getTime()) / (1000 * 60 * 60);
+                if (hours >= 0) {
+                    if (!empClosingTimes.has(eid)) empClosingTimes.set(eid, []);
+                    empClosingTimes.get(eid)!.push(hours);
+                }
+            }
+        }
+        if (leadLabels.has(order.orderStatus)) empLeadsCount.set(eid, (empLeadsCount.get(eid) ?? 0) + 1);
+        if (order.type === OrderType.SERVICE_CALL) empServiceCallOpened.set(eid, (empServiceCallOpened.get(eid) ?? 0) + 1);
+
+        const cid = order.customerId;
+        if (cid) {
+            const existing = firstOrderByCustomer.get(cid);
+            const orderDateMs = orderDate.getTime();
+            if (!existing || (existing.order.date instanceof Date ? existing.order.date.getTime() : new Date(existing.order.date).getTime()) > orderDateMs) {
+                firstOrderByCustomer.set(cid, { order });
+            }
+        }
+    }
+
+    const newCustomersByEmp = new Map<string, number>();
+    for (const [, { order }] of firstOrderByCustomer) {
+        const eid = order.employeeId || '';
+        if (eid) newCustomersByEmp.set(eid, (newCustomersByEmp.get(eid) ?? 0) + 1);
+    }
+
+    const ordersPerCustomer = new Map<string, { count: number; employeeId: string }>();
+    for (const order of ordersList) {
+        const cid = order.customerId;
+        if (!cid) continue;
+        const eid = order.employeeId || '';
+        const cur = ordersPerCustomer.get(cid) ?? { count: 0, employeeId: eid };
+        cur.count += 1;
+        ordersPerCustomer.set(cid, cur);
+    }
+    const returning2ByEmp = new Map<string, number>();
+    const returning3ByEmp = new Map<string, number>();
+    for (const [, { count, employeeId }] of ordersPerCustomer) {
+        if (count >= 2 && employeeId) returning2ByEmp.set(employeeId, (returning2ByEmp.get(employeeId) ?? 0) + 1);
+        if (count >= 3 && employeeId) returning3ByEmp.set(employeeId, (returning3ByEmp.get(employeeId) ?? 0) + 1);
+    }
+
+    const activityMatch: Record<string, unknown> = { entityType: 'order' };
+    if (filters.from || filters.to) {
+        const dateMatch: Record<string, string> = {};
+        if (filters.from) dateMatch.$gte = getDayRangeIsrael(filters.from).start.toISOString();
+        if (filters.to) dateMatch.$lte = getDayRangeIsrael(filters.to).end.toISOString();
+        activityMatch.timestamp = dateMatch;
+    }
+    const activities = await activitiesCol.find(activityMatch).sort({ timestamp: 1 }).limit(100000).toArray();
+    const activitiesList = activities.map(d => deserializeDates(d) as Activity);
+
+    const statusChangeCountByUser = new Map<string, number>();
+    const statusChangeByStatusByUser = new Map<string, Record<string, number>>();
+    const activityScoreByUser = new Map<string, { score: number; actionCounts: Record<string, number> }>();
+    const lostByUser = new Map<string, number>();
+    const statusChangeEventsByOrder = new Map<string, { userId: string; timestamp: Date; newStatus: string }[]>();
+
+    for (const a of activitiesList) {
+        const uid = a.userId || '';
+        const ts = a.timestamp instanceof Date ? a.timestamp : new Date(a.timestamp as string);
+        const meta = (a.metadata || {}) as Record<string, unknown>;
+
+        if (a.action === 'status_change' && a.entityId) {
+            statusChangeCountByUser.set(uid, (statusChangeCountByUser.get(uid) ?? 0) + 1);
+            const newStatus = String(meta.newStatus ?? '');
+            if (!statusChangeByStatusByUser.has(uid)) statusChangeByStatusByUser.set(uid, {});
+            const byStatus = statusChangeByStatusByUser.get(uid)!;
+            byStatus[newStatus] = (byStatus[newStatus] ?? 0) + 1;
+            statusChangeByStatusByUser.set(uid, byStatus);
+            if (lostLabels.has(newStatus)) lostByUser.set(uid, (lostByUser.get(uid) ?? 0) + 1);
+            const arr = statusChangeEventsByOrder.get(a.entityId) ?? [];
+            arr.push({ userId: uid, timestamp: ts, newStatus });
+            statusChangeEventsByOrder.set(a.entityId, arr);
+        }
+
+        let points = ACTIVITY_SCORE_POINTS[a.action ?? ''] ?? 0;
+        if (a.action === 'status_change' && meta.newStatus != null) {
+            const cfg = statusConfigs.find(c => c.label === String(meta.newStatus));
+            if (cfg?.isActiveDeal || cfg?.isCompleted) points = ACTIVITY_SCORE_POINTS.close_deal ?? 20;
+        }
+        if (!activityScoreByUser.has(uid)) activityScoreByUser.set(uid, { score: 0, actionCounts: {} });
+        const entry = activityScoreByUser.get(uid)!;
+        entry.score += points;
+        const actionLabel = a.action ?? 'other';
+        entry.actionCounts[actionLabel] = (entry.actionCounts[actionLabel] ?? 0) + 1;
+    }
+
+    const timeInStatusByUser: number[] = [];
+    for (const [orderId, events] of statusChangeEventsByOrder) {
+        const order = ordersList.find(o => o.id === orderId);
+        if (!order) continue;
+        events.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+        for (let i = 0; i < events.length - 1; i++) {
+            const hours = (events[i + 1].timestamp.getTime() - events[i].timestamp.getTime()) / (1000 * 60 * 60);
+            if (hours > 0 && hours < 365 * 24) timeInStatusByUser.push(hours);
+        }
+        if (events.length > 0) {
+            const last = events[events.length - 1];
+            const lastTs = last.timestamp.getTime();
+            const orderUpdated = order.updatedAt ? new Date(order.updatedAt).getTime() : lastTs;
+            const hours = (orderUpdated - lastTs) / (1000 * 60 * 60);
+            if (hours > 0 && hours < 365 * 24) timeInStatusByUser.push(hours);
+        }
+    }
+    const avgTimeInStatusHours = timeInStatusByUser.length > 0
+        ? timeInStatusByUser.reduce((s, h) => s + h, 0) / timeInStatusByUser.length
+        : null;
+
+    let attendanceFrom: Date | undefined;
+    let attendanceTo: Date | undefined;
+    if (filters.from) attendanceFrom = getDayRangeIsrael(filters.from).start;
+    if (filters.to) attendanceTo = getDayRangeIsrael(filters.to).end;
+    const attQuery: Record<string, unknown> = {};
+    if (attendanceFrom || attendanceTo) {
+        attQuery.date = {} as Record<string, Date>;
+        if (attendanceFrom) (attQuery.date as Record<string, Date>).$gte = attendanceFrom;
+        if (attendanceTo) (attQuery.date as Record<string, Date>).$lte = attendanceTo;
+    }
+    const attendanceDocs = await attendanceCol.find(attQuery).toArray();
+    const workHoursByEmp = new Map<string, number>();
+    for (const rec of attendanceDocs) {
+        const r = deserializeDates(rec) as AttendanceRecord;
+        const h = r.totalHours ?? 0;
+        workHoursByEmp.set(r.employeeId, (workHoursByEmp.get(r.employeeId) ?? 0) + h);
+    }
+
+    const leadOrActiveLabels = [...leadLabels, ...activeDealLabels];
+    const allOrdersForRedFlags = leadOrActiveLabels.length > 0
+        ? await ordersCol.find({ orderStatus: { $in: leadOrActiveLabels } }).limit(5000).toArray()
+        : [];
+    const lastActivityByOrder = new Map<string, Date>();
+    for (const a of activitiesList) {
+        if (a.entityType !== 'order' || !a.entityId) continue;
+        const ts = a.timestamp instanceof Date ? a.timestamp : new Date(a.timestamp as string);
+        const cur = lastActivityByOrder.get(a.entityId);
+        if (!cur || ts > cur) lastActivityByOrder.set(a.entityId, ts);
+    }
+    const openOrderIds = new Set(allOrdersForRedFlags.map((d: any) => (deserializeDates(d) as Order).id));
+    if (openOrderIds.size > 0) {
+        const allActivitiesForRedFlags = await activitiesCol
+            .find({ entityType: 'order', entityId: { $in: Array.from(openOrderIds) } })
+            .sort({ timestamp: -1 })
+            .limit(50000)
+            .toArray();
+        for (const d of allActivitiesForRedFlags) {
+            const a = deserializeDates(d) as Activity;
+            const eid = a.entityId || '';
+            if (!eid) continue;
+            const ts = a.timestamp instanceof Date ? a.timestamp : new Date(a.timestamp as string);
+            const cur = lastActivityByOrder.get(eid);
+            if (!cur || ts > cur) lastActivityByOrder.set(eid, ts);
+        }
+    }
+    const redFlags: { orderId: string; orderNumber: string; description: string; orderStatus: string; employeeName: string; hoursSinceActivity: number; flag?: string }[] = [];
+    for (const doc of allOrdersForRedFlags) {
+        const order = deserializeDates(doc) as Order;
+        const config = statusConfigs.find(c => c.label === order.orderStatus);
+        const isOpen = config && (config.isLead || config.isActiveDeal);
+        if (!isOpen) continue;
+        const lastTs = lastActivityByOrder.get(order.id);
+        const refTs = lastTs || order.createdAt || order.date;
+        const refDate = refTs instanceof Date ? refTs : new Date(refTs);
+        const hoursSince = (now.getTime() - refDate.getTime()) / (1000 * 60 * 60);
+        if (hoursSince < 48) continue;
+        const emp = empMap.get(order.employeeId || '');
+        redFlags.push({
+            orderId: order.id,
+            orderNumber: order.orderNumber || '',
+            description: order.description || '',
+            orderStatus: order.orderStatus || '',
+            employeeName: emp?.name ?? order.employeeId ?? '',
+            hoursSinceActivity: Math.round(hoursSince * 10) / 10,
+            flag: 'ללא פעילות מעל 48 שעות'
+        });
+    }
+
+    const businessOrdersThisMonth = ordersList.filter(o => {
+        const d = o.date instanceof Date ? o.date : new Date(o.date);
+        return d >= monthStart && d <= monthEnd;
+    }).length;
+    const businessDealsThisMonth = ordersList.filter(o => {
+        const d = o.date instanceof Date ? o.date : new Date(o.date);
+        if (d < monthStart || d > monthEnd) return false;
+        const config = statusConfigs.find(c => c.label === o.orderStatus);
+        return config?.isActiveDeal || config?.isCompleted;
+    }).length;
+    const leadsInRange = ordersList.filter(o => leadLabels.has(o.orderStatus)).length;
+    const dealsInRange = ordersList.filter(o => {
+        const config = statusConfigs.find(c => c.label === o.orderStatus);
+        return config?.isActiveDeal || config?.isCompleted;
+    }).length;
+    const businessConversion = leadsInRange > 0 ? dealsInRange / leadsInRange : undefined;
+
+    const salesByMonth = Array.from(salesByMonthMap.entries())
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([monthKey, v]) => {
+            const [yr, mo] = monthKey.split('-').map(Number);
+            const monthNames = ['ינואר', 'פברואר', 'מרץ', 'אפריל', 'מאי', 'יוני', 'יולי', 'אוגוסט', 'ספטמבר', 'אוקטובר', 'נובמבר', 'דצמבר'];
+            const label = `${monthNames[mo - 1] ?? monthKey} ${yr}`;
+            return { monthKey, label, orderCount: v.orderCount, totalAmount: v.totalAmount, totalProfit: v.totalProfit };
+        });
+
+    const employeesResult = await Promise.all(employees.map(async (emp) => {
+        const eid = emp.id;
+        const orderCount = empOrderCount.get(eid) ?? 0;
+        const totalAmount = empTotalAmount.get(eid) ?? 0;
+        const totalProfit = empTotalProfit.get(eid) ?? 0;
+        const uniqueCount = empUniqueCustomers.get(eid)?.size ?? 0;
+        const avgSale = uniqueCount > 0 ? totalAmount / uniqueCount : 0;
+        const leads = empLeadsCount.get(eid) ?? 0;
+        const deals = empDealsCount.get(eid) ?? 0;
+        const conversionRate = leads > 0 ? deals / leads : undefined;
+        const closingList = empClosingTimes.get(eid) ?? [];
+        const avgClosing = closingList.length > 0 ? closingList.reduce((s, h) => s + h, 0) / closingList.length : null;
+        const profitPct = totalAmount > 0 ? (totalProfit / totalAmount) * 100 : undefined;
+        const currentOpenQuery: Record<string, unknown> = { employeeId: eid, orderStatus: { $in: Array.from(openStatusLabels) } };
+        const currentOpen = await ordersCol.countDocuments(currentOpenQuery);
+        return {
+            employeeId: eid,
+            employeeName: emp.name || emp.username || eid,
+            orderCount,
+            totalAmount,
+            totalProfit,
+            uniqueCustomers: uniqueCount,
+            avgSalePerCustomer: avgSale,
+            newCustomersCreated: newCustomersByEmp.get(eid) ?? 0,
+            statusChangesCount: statusChangeCountByUser.get(eid) ?? 0,
+            workHoursTotal: workHoursByEmp.get(eid) ?? 0,
+            currentWorkloadOpen: currentOpen,
+            lostOrdersCount: lostByUser.get(eid) ?? 0,
+            conversionRate,
+            avgProfitPercentPerCustomer: profitPct,
+            avgClosingTimeHours: avgClosing,
+            avgTimeInStatusHours: avgTimeInStatusHours,
+            returningCustomers2Plus: returning2ByEmp.get(eid) ?? 0,
+            returningCustomers3Plus: returning3ByEmp.get(eid) ?? 0,
+            serviceCallOrdersOpened: empServiceCallOpened.get(eid) ?? 0,
+            statusChangesByStatus: statusChangeByStatusByUser.get(eid)
+        };
+    }));
+
+    const activityScoreResult = Array.from(activityScoreByUser.entries()).map(([userId, v]) => {
+        const emp = empMap.get(userId);
+        return {
+            userId,
+            username: emp?.name || emp?.username || userId,
+            score: v.score,
+            actionCounts: v.actionCounts
+        };
+    });
+
+    const avgClosingBusiness = closingTimes.length > 0 ? closingTimes.reduce((s, h) => s + h, 0) / closingTimes.length : null;
+
+    return {
+        from: filters.from,
+        to: filters.to,
+        metricsStartDate: METRICS_START_DATE,
+        business: {
+            totalOrders: businessTotalOrders,
+            totalAmount: businessTotalAmount,
+            totalProfit: businessTotalProfit,
+            avgClosingTimeHours: avgClosingBusiness,
+            ordersThisMonth: businessOrdersThisMonth,
+            dealsApprovedThisMonth: businessDealsThisMonth,
+            conversionRate: businessConversion,
+            salesByMonth,
+            statusDistribution: Array.from(statusDistMap.entries()).map(([statusLabel, count]) => ({ statusLabel, count }))
+        },
+        employees: employeesResult,
+        activityScore: activityScoreResult,
+        redFlags
+    };
 }
 
 export async function updateSettings(settings: Settings, userId?: string, reason?: string): Promise<Settings> {

@@ -38,6 +38,33 @@ const findDuplicateCustomer = (customers: Customer[], name: string, hp?: string,
     });
 };
 
+// Visual badges: origin (from GI vs app) and sync status to Green Invoice
+const fromGreenInvoice = (c: Customer) => (c.notes || '').trim().startsWith('יובא מחשבונית ירוקה');
+const syncedToGreenInvoice = (c: Customer) => !!c.greenInvoiceClientId;
+
+const formatCustomerCreatedAt = (d: Date | string | undefined): string => {
+    if (!d) return '—';
+    const date = typeof d === 'string' ? new Date(d) : d;
+    if (isNaN(date.getTime())) return '—';
+    return date.toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit', year: 'numeric' });
+};
+
+const CustomerSyncBadges: React.FC<{ customer: Customer; compact?: boolean }> = ({ customer, compact }) => {
+    const fromGI = fromGreenInvoice(customer);
+    const toGI = syncedToGreenInvoice(customer);
+    const badge = (label: string, title: string, bg: string) => (
+        <span key={label} title={title} className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium ${bg}`}>
+            {label}
+        </span>
+    );
+    return (
+        <div className={`flex flex-wrap gap-1 ${compact ? 'mt-0.5' : 'mt-2'}`}>
+            {fromGI ? badge('סונכרן מחשבונית ירוקה', 'הלקוח יובא/סונכרן מחשבונית ירוקה', 'bg-emerald-100 text-emerald-800') : badge('נוצר בתוכנה', 'הלקוח נוצר במערכת זו', 'bg-indigo-100 text-indigo-800')}
+            {toGI && badge('מסונכרן לחשבונית ירוקה', 'הלקוח מקושר ומופיע בחשבונית ירוקה', 'bg-amber-100 text-amber-800')}
+        </div>
+    );
+};
+
 // Enhanced document linking with list selection, allocation editing, and validation
 interface DocumentLinkingState {
     selectedDoc: { id: string; amount: number; type: number; description: string; date?: string } | null;
@@ -726,7 +753,7 @@ const ManualMergeModal: React.FC<{
 };
 
 // Enhanced form for adding a new customer with all details
-const NewCustomerForm: React.FC<{ onSave: (customer: Partial<Customer>, firstContact: Partial<Contact>) => void; onCancel: () => void; }> = ({ onSave, onCancel }) => {
+const NewCustomerForm: React.FC<{ onSave: (customer: Partial<Customer>, firstContact: Partial<Contact>) => void; onCancel: () => void; saving?: boolean }> = ({ onSave, onCancel, saving }) => {
     const [customerData, setCustomerData] = useState({ 
         name: '', 
         businessId: '',
@@ -753,18 +780,28 @@ const NewCustomerForm: React.FC<{ onSave: (customer: Partial<Customer>, firstCon
 
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
+        const companyName = (customerData.name || '').trim();
+        const contactName = (contactData.name || '').trim();
+        if (!companyName) {
+            alert('נא למלא את שם החברה.');
+            return;
+        }
+        if (!contactName) {
+            alert('נא למלא את שם איש הקשר.');
+            return;
+        }
         onSave(customerData, contactData);
     };
 
     return (
-        <form onSubmit={handleSubmit} className="space-y-6 text-start">
+        <form onSubmit={handleSubmit} className="space-y-6 text-start" noValidate>
             {/* Section 1: Company Details */}
             <div>
                 <h3 className="font-semibold text-lg text-slate-800 mb-3 border-b pb-1">פרטי החברה</h3>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div className="md:col-span-2">
                         <label className="block text-sm font-medium text-slate-700">שם החברה <span className="text-red-500">*</span></label>
-                        <input type="text" name="name" value={customerData.name} onChange={handleCustomerChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" required />
+                        <input type="text" name="name" value={customerData.name} onChange={handleCustomerChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" placeholder="חובה" required />
                     </div>
                     <div>
                         <label className="block text-sm font-medium text-slate-700">ח.פ / ת.ז (למניעת כפילויות)</label>
@@ -814,7 +851,7 @@ const NewCustomerForm: React.FC<{ onSave: (customer: Partial<Customer>, firstCon
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
                         <label className="block text-sm font-medium text-slate-700">שם מלא <span className="text-red-500">*</span></label>
-                        <input type="text" name="name" value={contactData.name} onChange={handleContactChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" required />
+                        <input type="text" name="contactName" value={contactData.name} onChange={e => { const v = e.target.value; setContactData(prev => ({ ...prev, name: v })); }} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" placeholder="חובה" required />
                     </div>
                     <div>
                         <label className="block text-sm font-medium text-slate-700">תפקיד</label>
@@ -838,8 +875,10 @@ const NewCustomerForm: React.FC<{ onSave: (customer: Partial<Customer>, firstCon
             </div>
 
             <div className="flex justify-end space-x-2 pt-4 space-x-reverse">
-                <button type="button" onClick={onCancel} className="px-4 py-2 bg-slate-200 text-slate-800 rounded-md hover:bg-slate-300">ביטול</button>
-                <button type="submit" className="px-4 py-2 bg-primary text-white rounded-md hover:bg-indigo-700">שמירה</button>
+                <button type="button" onClick={onCancel} disabled={saving} className="px-4 py-2 bg-slate-200 text-slate-800 rounded-md hover:bg-slate-300 disabled:opacity-50">ביטול</button>
+                <button type="submit" disabled={saving} className="px-4 py-2 bg-primary text-white rounded-md hover:bg-indigo-700 disabled:opacity-70">
+                    {saving ? 'שומר...' : 'שמירה'}
+                </button>
             </div>
         </form>
     );
@@ -913,6 +952,7 @@ const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, custo
 
     return (
         <div className="flex flex-col text-start">
+            <CustomerSyncBadges customer={editableCustomer} />
              <div className="border-b border-slate-200">
                 <nav className="-mb-px flex space-x-6 space-x-reverse px-1">
                     <button onClick={() => setActiveTab('details')} className={`whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm ${activeTab === 'details' ? 'border-primary text-primary' : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'}`}>פרטים</button>
@@ -923,6 +963,15 @@ const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, custo
             <div className="py-6">
                 {activeTab === 'details' && (
                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        {/* תאריך יצירה + מקור (תוכנה / חשבונית ירוקה) */}
+                        <div className="md:col-span-2 flex items-center gap-2 text-sm text-slate-600 bg-slate-50 rounded-lg px-3 py-2 border border-slate-200">
+                            <span className="font-medium text-slate-700">תאריך יצירה:</span>
+                            {fromGreenInvoice(editableCustomer) ? (
+                                <span>נוצר בחשבונית ירוקה ב־{formatCustomerCreatedAt(editableCustomer.createdAt)}</span>
+                            ) : (
+                                <span>נוצר בתוכנה ב־{formatCustomerCreatedAt(editableCustomer.createdAt)}</span>
+                            )}
+                        </div>
                         <div>
                             <label className="block text-sm font-medium text-slate-700 mb-1">שם חברה</label>
                             <input name="name" value={editableCustomer.name} onChange={handleCustomerChange} className="p-2 border rounded w-full"/>
@@ -1215,6 +1264,7 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
     const [pendingNewCustomer, setPendingNewCustomer] = useState<{customer: Partial<Customer>, contact: Partial<Contact>} | null>(null);
     const [isMergeModalOpen, setIsMergeModalOpen] = useState(false);
     const [isSyncingFromGreenInvoice, setIsSyncingFromGreenInvoice] = useState(false);
+    const [isSavingNewCustomer, setIsSavingNewCustomer] = useState(false);
 
     // Fetched customer orders (server source of truth for "היסטוריית הזמנות" – avoids stale global state)
     const [customerOrdersFetched, setCustomerOrdersFetched] = useState<Order[] | null>(null);
@@ -1344,6 +1394,7 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
     };
 
     const performCreateCustomer = async (customerData: Partial<Customer>, contactData: Partial<Contact>) => {
+        setIsSavingNewCustomer(true);
         try {
             const newContact: Contact = {
                 id: `cont_${Date.now()}`,
@@ -1370,26 +1421,31 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
                 paymentTerms: customerData.paymentTerms || 'תשלום מיידי',
             };
             
-            // Save to MongoDB
+            // Save to MongoDB (server creates customer and returns immediately; Green Invoice sync runs in background)
             const savedCustomer = await mongoService.createCustomer(newCustomer);
-            
-            // Update local state with the saved customer (which may have MongoDB _id)
+
+            // Update global customers list
             setCustomers(prev => [...prev, savedCustomer]);
-            // Refetch paginated customers to show the new customer
-            await refetchCustomers();
+            // Show new customer in table immediately (optimistic) so UI feels instant
+            setPaginatedCustomers(prev => [{ ...savedCustomer, debt: 0 } as Customer & { debt?: number }, ...prev]);
+            setTotalCount(prev => prev + 1);
             addActivity(`לקוח חדש נוסף: ${savedCustomer.name}`, { entityType: 'customer', entityId: savedCustomer.id, action: 'create', metadata: { name: savedCustomer.name } });
             setIsNewCustomerModalOpen(false);
             setPendingNewCustomer(null);
             setDuplicateFound(null);
+            // Refresh list in background to get server truth (debt, order) — don't block UI
+            refetchCustomers(true);
         } catch (error: any) {
             console.error('Error creating customer:', error);
             const msg = error?.message || '';
             if (msg.includes('כבר קיים') || msg.includes('DUPLICATE')) {
                 alert('לקוח עם אותו שם ו/או ח.פ כבר קיים במערכת. לא נוצר כפילות.');
-                await refetchCustomers();
+                refetchCustomers(true);
             } else {
                 alert('שגיאה בשמירת הלקוח. אנא נסה שוב.');
             }
+        } finally {
+            setIsSavingNewCustomer(false);
         }
     };
 
@@ -1399,7 +1455,6 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
         const oldCustomer = duplicateFound;
         const newData = pendingNewCustomer;
 
-        // Merge Contacts: Add the new contact to the old list
         const newContact: Contact = {
             id: `cont_merged_${Date.now()}`,
             name: newData.contact.name || '',
@@ -1412,62 +1467,44 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
 
         const updatedOldCustomer: Customer = {
             ...oldCustomer,
-            contacts: [...oldCustomer.contacts, newContact],
-            notes: oldCustomer.notes + (newData.customer.notes ? `\n[מיזוג]: ${newData.customer.notes}` : '')
+            contacts: [...(oldCustomer.contacts || []), newContact],
+            notes: (oldCustomer.notes || '') + (newData.customer.notes ? `\n[מיזוג]: ${newData.customer.notes}` : '')
         };
 
-        setCustomers(prev => prev.map(c => c.id === oldCustomer.id ? updatedOldCustomer : c));
-        // Refetch paginated customers after merge
-        await refetchCustomers();
-        addActivity(`לקוח מוזג לתוך כרטיס קיים: ${oldCustomer.name}`, { entityType: 'customer', entityId: oldCustomer.id, action: 'merge', metadata: { name: oldCustomer.name } });
-        
-        setDuplicateFound(null);
-        setPendingNewCustomer(null);
-        setIsNewCustomerModalOpen(false);
+        try {
+            await mongoService.updateCustomer(updatedOldCustomer);
+            setCustomers(prev => prev.map(c => c.id === oldCustomer.id ? updatedOldCustomer : c));
+            await refetchCustomers();
+            addActivity(`לקוח מוזג לתוך כרטיס קיים: ${oldCustomer.name}`, { entityType: 'customer', entityId: oldCustomer.id, action: 'merge', metadata: { name: oldCustomer.name } });
+            setDuplicateFound(null);
+            setPendingNewCustomer(null);
+            setIsNewCustomerModalOpen(false);
+        } catch (err: any) {
+            console.error('Merge with existing failed:', err);
+            alert(err?.message || 'שמירת המיזוג נכשלה. נסה שוב.');
+        }
     };
 
-    // MANUAL MERGE HANDLER
+    // MANUAL MERGE HANDLER — persists on server (orders reassigned, victim deleted)
     const handleManualMerge = async (victimId: string) => {
         if (!viewingCustomer) return;
         const veteranId = viewingCustomer.id;
         const victim = customers.find(c => c.id === victimId);
-        
         if (!victim) return;
-
-        // 1. Move Contacts
-        const transferredContacts = victim.contacts.map(c => ({
-            ...c,
-            isDefault: false, // Ensure no conflict with default contact of veteran
-            id: `cont_merged_${c.id}` // Regenerate ID just in case
-        }));
-
-        // 2. Update Orders
-        setOrders(prev => prev.map(o => {
-            if (o.customerId === victimId) {
-                return { ...o, customerId: veteranId };
-            }
-            return o;
-        }));
-
-        // 3. Update Veteran Customer
-        const updatedVeteran: Customer = {
-            ...viewingCustomer,
-            contacts: [...viewingCustomer.contacts, ...transferredContacts],
-            notes: viewingCustomer.notes + `\n[מיזוג ידני ${new Date().toLocaleDateString('he-IL')}]: מוזג מ-${victim.name} (ח.פ ${victim.businessId || '-'})`
-        };
-
-        setCustomers(prev => prev
-            .filter(c => c.id !== victimId) // Delete Victim
-            .map(c => c.id === veteranId ? updatedVeteran : c) // Update Veteran
-        );
-        // Refetch paginated customers after merge
-        await refetchCustomers();
-        addActivity(`בוצע מיזוג ידני: ${victim.name} מוזג לתוך ${viewingCustomer.name}`, { entityType: 'customer', entityId: viewingCustomer.id, action: 'merge', metadata: { victimName: victim.name, targetName: viewingCustomer.name } });
-        setViewingCustomer(updatedVeteran); // Update view
-        // Invalidate fetched customer orders so "היסטוריית הזמנות" uses updated global state (merged orders)
-        setCustomerOrdersFetched(null);
-        setCustomerOrdersFetchedForId(null);
-        setIsMergeModalOpen(false);
+        try {
+            const updatedVeteran = await mongoService.mergeCustomers(veteranId, victimId);
+            setCustomers(prev => prev.filter(c => c.id !== victimId).map(c => c.id === veteranId ? updatedVeteran : c));
+            setOrders(prev => prev.map(o => o.customerId === victimId ? { ...o, customerId: veteranId } : o));
+            await refetchCustomers();
+            addActivity(`בוצע מיזוג ידני: ${victim.name} מוזג לתוך ${viewingCustomer.name}`, { entityType: 'customer', entityId: viewingCustomer.id, action: 'merge', metadata: { victimName: victim.name, targetName: viewingCustomer.name } });
+            setViewingCustomer(updatedVeteran);
+            setCustomerOrdersFetched(null);
+            setCustomerOrdersFetchedForId(null);
+            setIsMergeModalOpen(false);
+        } catch (err: any) {
+            console.error('Merge failed:', err);
+            alert(err?.message || 'מיזוג נכשל. נסה שוב.');
+        }
     };
 
     const handleSaveCustomerUpdate = async (updatedCustomer: Customer) => {
@@ -1530,14 +1567,17 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
             await refetchCustomers();
             
             // Show results
+            const merged = results.mergedFromOrphans?.length ?? 0;
+            const unlinked = results.unlinkedOrphans?.length ?? 0;
             const message = `סנכרון הושלם:
 - נוצרו: ${results.created.length} לקוחות חדשים
 - עודכנו: ${results.updated.length} לקוחות קיימים
-- דולגו: ${results.skipped.length} לקוחות
-${results.errors.length > 0 ? `\n- שגיאות: ${results.errors.length}` : ''}`;
-            
+- דולגו: ${results.skipped?.length ?? 0} לקוחות
+${merged > 0 ? `- מוזגו (לאחר הסרת לקוח ב-GI): ${merged}` : ''}
+${unlinked > 0 ? `- נותקו מקישור ל-GI: ${unlinked}` : ''}
+${results.errors?.length > 0 ? `\n- שגיאות: ${results.errors.length}` : ''}`;
             alert(message);
-            addActivity(`בוצע סנכרון מ-חשבונית ירוקה: ${results.created.length} חדשים, ${results.updated.length} עודכנו`, { entityType: 'customer', action: 'sync', metadata: { created: results.created.length, updated: results.updated.length } });
+            addActivity(`בוצע סנכרון מ-חשבונית ירוקה: ${results.created.length} חדשים, ${results.updated.length} עודכנו${merged ? `, ${merged} מוזגו` : ''}`, { entityType: 'customer', action: 'sync', metadata: { created: results.created.length, updated: results.updated.length, mergedFromOrphans: merged } });
         } catch (error: any) {
             console.error('Error syncing from GreenInvoice:', error);
             alert(`שגיאה בסנכרון: ${error.message || 'שגיאה לא ידועה'}`);
@@ -1643,10 +1683,13 @@ ${results.errors.length > 0 ? `\n- שגיאות: ${results.errors.length}` : ''}
 
                             return(
                                 <tr key={customer.id} className="hover:bg-slate-50">
-                                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                                        <button onClick={() => handleViewCustomer(customer)} className="text-primary hover:text-indigo-800 font-semibold">
-                                            {customer.name} {customer.isSpecial && <span title="לקוח מיוחד">⭐</span>}
-                                        </button>
+                                    <td className="px-6 py-4 text-sm font-medium">
+                                        <div>
+                                            <button onClick={() => handleViewCustomer(customer)} className="text-primary hover:text-indigo-800 font-semibold">
+                                                {customer.name} {customer.isSpecial && <span title="לקוח מיוחד">⭐</span>}
+                                            </button>
+                                            <CustomerSyncBadges customer={customer} compact />
+                                        </div>
                                     </td>
                                     <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-500">{customer.businessId || '---'}</td>
                                     <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-500">
@@ -1765,7 +1808,7 @@ ${results.errors.length > 0 ? `\n- שגיאות: ${results.errors.length}` : ''}
             {/* New Customer Modal */}
             {isNewCustomerModalOpen && (
                 <Modal title="הוספת לקוח חדש" onClose={() => { setIsNewCustomerModalOpen(false); setDuplicateFound(null); }} size="2xl">
-                    <NewCustomerForm onSave={handleSaveNewCustomer} onCancel={() => setIsNewCustomerModalOpen(false)} />
+                    <NewCustomerForm onSave={handleSaveNewCustomer} onCancel={() => setIsNewCustomerModalOpen(false)} saving={isSavingNewCustomer} />
                 </Modal>
             )}
 

@@ -118,6 +118,12 @@ const calculateDueDate = (orderDate: Date | string, paymentTerms: string, custom
     }
 };
 
+// Consistent display for supplier payments: professional labels + uniform decimals
+const formatGross = (n: number) => `₪${n.toLocaleString('he-IL', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const formatNet = (n: number) => `₪${n.toLocaleString('he-IL', { maximumFractionDigits: 0 })}`;
+const LABEL_INCL_VAT = 'כולל מע"מ';
+const LABEL_EXCL_VAT = 'ללא מע"מ';
+
 const exportToCSV = (filename: string, rows: any[][]) => {
     const processRow = (row: any[]) => {
         return row.map(val => {
@@ -146,10 +152,14 @@ const exportToCSV = (filename: string, rows: any[][]) => {
 
 // --- Components ---
 
-const StatCard: React.FC<{ title: string; value: string; color?: string }> = ({ title, value, color = "text-slate-900" }) => (
+const StatCard: React.FC<{ title: string; value: string | React.ReactNode; color?: string }> = ({ title, value, color = "text-slate-900" }) => (
     <div className="bg-white p-4 md:p-6 rounded-lg shadow-sm border border-slate-200 text-start">
         <h3 className="text-xs md:text-sm font-medium text-slate-500 uppercase tracking-wider">{title}</h3>
-        <p className={`text-2xl md:text-3xl font-bold mt-2 ${color}`}>{value}</p>
+        {typeof value === 'string' ? (
+            <p className={`text-2xl md:text-3xl font-bold mt-2 ${color}`}>{value}</p>
+        ) : (
+            <div className={`mt-2 space-y-0.5 ${color}`}>{value}</div>
+        )}
     </div>
 );
 
@@ -445,10 +455,11 @@ const PaymentManagementModal: React.FC<{
                                     <p className="font-bold text-slate-800">נבחרו {itemsToPay.length} פריטים לתשלום</p>
                                     <p className="text-xs text-slate-500">ספק: {supplierName}</p>
                                 </div>
-                                <div className="text-left">
+                                <div className="text-left flex flex-col">
                                     <span className="block text-xs text-slate-500">סה"כ לתשלום</span>
-                                    <span className="text-xl font-bold text-red-600">₪{totalRemaining.toLocaleString()} (ברוטו)</span>
-                                    <span className="block text-sm text-slate-600">₪{itemsToPay.reduce((sum, i) => sum + (i.costGross > 0 ? i.cost * (i.remainingAmount / i.costGross) : 0), 0).toLocaleString(undefined, { maximumFractionDigits: 0 })} (נטו)</span>
+                                    <span className="text-xl font-bold text-red-600">{formatGross(totalRemaining)}</span>
+                                    <span className="text-xs text-slate-500">{LABEL_INCL_VAT}</span>
+                                    <span className="text-sm text-slate-600">{formatNet(itemsToPay.reduce((sum, i) => sum + (i.costGross > 0 ? i.cost * (i.remainingAmount / i.costGross) : 0), 0))} {LABEL_EXCL_VAT}</span>
                                 </div>
                             </div>
                         ) : (
@@ -456,20 +467,20 @@ const PaymentManagementModal: React.FC<{
                                 <p className="text-sm text-slate-600">עבור: <strong>{item?.orderNumber}</strong> - {item?.itemDescription}</p>
                                 <div className="flex flex-col gap-1 mt-2 bg-white p-2 rounded border border-slate-200">
                                     <div className="flex justify-between text-xs text-slate-500">
-                                        <span>עלות (נטו):</span>
-                                        <span>₪{item?.cost.toLocaleString()}</span>
+                                        <span>עלות (ללא מע"מ):</span>
+                                        <span>{item != null ? formatNet(item.cost) : ''}</span>
                                     </div>
                                     <div className="flex justify-between text-xs font-bold text-slate-700">
                                         <span>עלות (כולל מע"מ):</span>
-                                        <span>₪{item?.costGross.toLocaleString()}</span>
+                                        <span>{item != null ? formatGross(item.costGross) : ''}</span>
                                     </div>
                                     <div className="flex justify-between border-t pt-1 mt-1 text-sm">
                                         <span>שולם עד כה:</span>
-                                        <span className="text-green-600">₪{item?.paidAmount.toLocaleString()}</span>
+                                        <span className="text-green-600">{item != null ? formatGross(item.paidAmount) : ''}</span>
                                     </div>
                                     <div className="flex justify-between text-sm font-bold text-red-600">
                                         <span>יתרה לתשלום:</span>
-                                        <span>₪{item?.remainingAmount.toLocaleString()}</span>
+                                        <span>{item != null ? formatGross(item.remainingAmount) : ''}</span>
                                     </div>
                                 </div>
                             </>
@@ -625,10 +636,9 @@ function getReportsViewFromStorage(): Partial<{
     return {};
 }
 
+// Default empty = "all time" so תשלום לספקים totals match הזמנות (same order set, no date cut)
 function defaultDateStart(): string {
-    const d = new Date();
-    d.setMonth(d.getMonth() - 3);
-    return d.toISOString().split('T')[0];
+    return '';
 }
 
 const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigateToOrder, setOrders, statusConfigs, vatRate }) => {
@@ -640,10 +650,10 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
     // --- State ---
     const [viewMode, setViewMode] = useState<'forecast' | 'purchase_history' | 'payment_log'>(() => (savedView.viewMode === 'forecast' || savedView.viewMode === 'purchase_history' || savedView.viewMode === 'payment_log') ? savedView.viewMode : 'forecast');
 
-    // Filters
+    // Filters - dateStart/dateEnd never restored from storage so default is always "all time" and totals match Orders
     const [supplierFilterId, setSupplierFilterId] = useState<string>(() => savedView.supplierFilterId ?? 'all');
-    const [dateStart, setDateStart] = useState<string>(() => savedView.dateStart ?? defaultDateStart());
-    const [dateEnd, setDateEnd] = useState<string>(() => savedView.dateEnd ?? '');
+    const [dateStart, setDateStart] = useState<string>(() => defaultDateStart());
+    const [dateEnd, setDateEnd] = useState<string>(() => '');
     const [showPaid, setShowPaid] = useState(() => savedView.showPaid ?? false);
 
     // Expansion
@@ -669,6 +679,7 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
     const [loadingPayables, setLoadingPayables] = useState(true);
     const [summaryStats, setSummaryStats] = useState({
         totalDebt: 0,
+        totalCostNet: 0,
         overdueDebt: 0,
         thisMonthDue: 0,
         unassignedCount: 0
@@ -677,20 +688,18 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
     const [pageSize, setPageSize] = useState(() => typeof savedView.pageSize === 'number' && savedView.pageSize >= 1 ? savedView.pageSize : 50);
     const [totalCount, setTotalCount] = useState(0);
 
-    // Persist filters/view to sessionStorage so they survive navigation between pages
+    // Persist filters/view to sessionStorage (do not persist dateStart/dateEnd so default stays "all time" and matches Orders)
     useEffect(() => {
         try {
             sessionStorage.setItem(REPORTS_VIEW_STORAGE_KEY, JSON.stringify({
                 viewMode,
                 supplierFilterId,
-                dateStart,
-                dateEnd,
                 showPaid,
                 currentPage,
                 pageSize,
             }));
         } catch (_) {}
-    }, [viewMode, supplierFilterId, dateStart, dateEnd, showPaid, currentPage, pageSize]);
+    }, [viewMode, supplierFilterId, showPaid, currentPage, pageSize]);
     
     // Refetch function to reload payable items after payment updates or filter changes
     const refetchPayables = async () => {
@@ -718,7 +727,10 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
             }));
             
             setRawPayables(convertedPayables);
-            setSummaryStats(result.summaryStats);
+            setSummaryStats({
+                ...result.summaryStats,
+                totalCostNet: 'totalCostNet' in result.summaryStats ? result.summaryStats.totalCostNet : 0
+            });
             setTotalCount(result.totalCount);
         } catch (error) {
             console.error('Error loading payable items:', error);
@@ -1053,21 +1065,9 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
         });
     };
 
-    // Auto-expand current month + overdue
-    useEffect(() => {
-        const nowKey = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
-        setExpandedMonths(prev => {
-            const next = new Set(prev);
-            groupedData.forEach(g => {
-                if (g.monthYearKey <= nowKey) next.add(g.monthYearKey);
-            });
-            return next;
-        });
-    }, [groupedData.length]);
-
     // --- Summary Stats ---
     // Summary stats are now calculated on the server and returned with the API response
-    const { totalDebt, overdueDebt, thisMonthDue, unassignedCount } = summaryStats;
+    const { totalDebt, totalCostNet, overdueDebt, thisMonthDue, unassignedCount } = summaryStats;
 
     const selectedItems = getSelectedItems();
     const selectedItemsTotal = selectedItems.reduce((sum, i) => sum + i.remainingAmount, 0);
@@ -1089,7 +1089,7 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
                 g.notes || ''
             ]);
         } else {
-            header = ["ספק", "הזמנה", "פריט", "תאריך הזמנה", "תאריך יעד", "עלות נטו", "עלות ברוטו", "שולם", "יתרה", "סטטוס"];
+            header = ["ספק", "הזמנה", "פריט", "תאריך הזמנה", "תאריך יעד", "עלות ללא מע\"מ", "עלות כולל מע\"מ", "שולם", "יתרה", "סטטוס"];
             rows = filteredItems.map(item => [
                 item.supplierName,
                 item.orderNumber,
@@ -1109,11 +1109,48 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
 
     return (
         <div className="space-y-6 pb-24 relative">
-            {/* Stats Row - with and without VAT */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <StatCard title='סה"כ חוב פתוח' value={`₪${totalDebt.toLocaleString()} (ברוטו) / ₪${(totalDebt / (1 + vatRate / 100)).toLocaleString(undefined, { maximumFractionDigits: 0 })} (נטו)`} />
-                <StatCard title="תשלומים בפיגור" value={`₪${overdueDebt.toLocaleString()} (ברוטו) / ₪${(overdueDebt / (1 + vatRate / 100)).toLocaleString(undefined, { maximumFractionDigits: 0 })} (נטו)`} color="text-red-600" />
-                <StatCard title="לתשלום החודש" value={`₪${thisMonthDue.toLocaleString()} (ברוטו) / ₪${(thisMonthDue / (1 + vatRate / 100)).toLocaleString(undefined, { maximumFractionDigits: 0 })} (נטו)`} color="text-orange-600" />
+            {/* Stats Row - totalCostNet matches Orders page "סה״כ עלות לספקים" when same filters (all time, עסקאות מאושרות) */}
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                <StatCard
+                    title='סה"כ עלות לספקים'
+                    color="text-slate-900"
+                    value={
+                        <>
+                            <div className="text-2xl md:text-3xl font-bold">{formatNet(totalCostNet)} <span className="text-xs font-normal text-slate-500">{LABEL_EXCL_VAT}</span></div>
+                            <div className="text-lg font-semibold text-slate-500">{formatGross(totalCostNet * (1 + vatRate / 100))} <span className="text-xs">{LABEL_INCL_VAT}</span></div>
+                        </>
+                    }
+                />
+                <StatCard
+                    title='סה"כ חוב פתוח'
+                    color="text-slate-900"
+                    value={
+                        <>
+                            <div className="text-2xl md:text-3xl font-bold">{formatNet(totalDebt / (1 + vatRate / 100))} <span className="text-xs font-normal text-slate-500">{LABEL_EXCL_VAT}</span></div>
+                            <div className="text-lg font-semibold text-slate-500">{formatGross(totalDebt)} <span className="text-xs">{LABEL_INCL_VAT}</span></div>
+                        </>
+                    }
+                />
+                <StatCard
+                    title="תשלומים בפיגור"
+                    color="text-red-600"
+                    value={
+                        <>
+                            <div className="text-2xl md:text-3xl font-bold">{formatNet(overdueDebt / (1 + vatRate / 100))} <span className="text-xs font-normal text-red-500/80">{LABEL_EXCL_VAT}</span></div>
+                            <div className="text-lg font-semibold text-slate-500">{formatGross(overdueDebt)} <span className="text-xs">{LABEL_INCL_VAT}</span></div>
+                        </>
+                    }
+                />
+                <StatCard
+                    title="לתשלום החודש"
+                    color="text-orange-600"
+                    value={
+                        <>
+                            <div className="text-2xl md:text-3xl font-bold">{formatNet(thisMonthDue / (1 + vatRate / 100))} <span className="text-xs font-normal text-orange-500/80">{LABEL_EXCL_VAT}</span></div>
+                            <div className="text-lg font-semibold text-slate-500">{formatGross(thisMonthDue)} <span className="text-xs">{LABEL_INCL_VAT}</span></div>
+                        </>
+                    }
+                />
             </div>
 
             {unassignedCount > 0 && (
@@ -1222,8 +1259,9 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
                                                 {group.reference && <span className="font-mono text-xs text-slate-400">{group.reference}</span>}
                                             </div>
                                             
-                                            <div className="col-span-1 md:col-span-2 font-bold text-green-700 text-lg">
-                                                ₪{group.totalAmount.toLocaleString()} (ברוטו) / ₪{(group.totalAmount / (1 + vatRate / 100)).toLocaleString(undefined, { maximumFractionDigits: 0 })} (נטו)
+                                            <div className="col-span-1 md:col-span-2 font-bold text-green-700 text-lg flex flex-col items-center gap-0.5">
+                                                <span className="whitespace-nowrap">{formatGross(group.totalAmount)} <span className="text-sm font-normal opacity-90">{LABEL_INCL_VAT}</span></span>
+                                                <span className="text-sm font-medium text-slate-600 whitespace-nowrap">{formatNet(group.totalAmount / (1 + vatRate / 100))} <span className="text-xs opacity-90">{LABEL_EXCL_VAT}</span></span>
                                             </div>
                                             
                                             <div className="hidden md:block md:col-span-3 text-xs text-slate-500 text-start truncate px-2" title={group.notes}>
@@ -1252,7 +1290,8 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
                                                         </div>
                                                         <div className="bg-green-50 px-2 py-1 rounded border border-green-200 text-green-800">
                                                             <span className="block text-green-600">סה"כ שולם</span>
-                                                            <span className="font-bold">₪{total.toLocaleString()}</span>
+                                                            <span className="font-bold">{formatGross(total)}</span>
+                                                            <span className="text-[10px] text-green-600">{LABEL_INCL_VAT}</span>
                                                         </div>
                                                     </div>
 
@@ -1397,15 +1436,15 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
                                         <span className="text-xs bg-slate-200 text-slate-600 px-2 py-0.5 rounded-full">{group.items.length} פריטים</span>
                                     </div>
                                     <div className="flex flex-wrap gap-4 md:gap-6 text-sm">
-                                        <div className="hidden md:block">
-                                            <span className="text-slate-500">סה"כ:</span>{' '}
-                                            <span className="font-semibold">₪{group.totalDueNet.toLocaleString(undefined, { maximumFractionDigits: 0 })} (נטו) / ₪{group.totalDue.toLocaleString()} (ברוטו)</span>
+                                        <div className="hidden md:flex flex-col gap-1">
+                                            <span className="text-slate-500">סה"כ:</span>
+                                            <span className="font-semibold whitespace-nowrap">{formatGross(group.totalDue)} <span className="text-slate-500 text-xs font-normal">{LABEL_INCL_VAT}</span></span>
+                                            <span className="text-xs text-slate-500 whitespace-nowrap">{formatNet(group.totalDueNet)} {LABEL_EXCL_VAT}</span>
                                         </div>
-                                        <div>
-                                            <span className="text-slate-500">לתשלום:</span>{' '}
-                                            <span className="font-bold text-red-600">
-                                                ₪{(group.totalDue > 0 ? (group.totalDueNet * (group.totalDue - group.totalPaid) / group.totalDue).toLocaleString(undefined, { maximumFractionDigits: 0 }) : '0')} (נטו) / ₪{(group.totalDue - group.totalPaid).toLocaleString()} (ברוטו)
-                                            </span>
+                                        <div className="flex flex-col gap-1">
+                                            <span className="text-slate-500">יתרה לתשלום:</span>
+                                            <span className="font-bold text-red-600 whitespace-nowrap">{formatGross(group.totalDue - group.totalPaid)} <span className="text-xs font-normal opacity-90">{LABEL_INCL_VAT}</span></span>
+                                            <span className="text-xs text-slate-500 whitespace-nowrap">{formatNet(group.totalDue > 0 ? group.totalDueNet * (group.totalDue - group.totalPaid) / group.totalDue : 0)} {LABEL_EXCL_VAT}</span>
                                         </div>
                                     </div>
                                 </div>
@@ -1432,8 +1471,9 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
                                                             </span>
                                                             <span className={`text-[10px] px-1.5 py-0.5 rounded ${isUnassigned ? 'bg-rose-200 text-rose-800' : 'bg-slate-100'}`}>{sGroup.items.length}</span>
                                                         </div>
-                                                        <div className={`text-sm font-bold ${isUnassigned ? 'text-rose-800' : 'text-red-600'}`}>
-                                                            ₪{(sGroup.totalDue > 0 ? (sGroup.totalDueNet * (sGroup.totalDue - sGroup.totalPaid) / sGroup.totalDue).toLocaleString(undefined, { maximumFractionDigits: 0 }) : '0')} (נטו) / ₪{(sGroup.totalDue - sGroup.totalPaid).toLocaleString()} (ברוטו)
+                                                        <div className={`text-sm font-bold flex flex-col items-end gap-0.5 ${isUnassigned ? 'text-rose-800' : 'text-red-600'}`}>
+                                                            <span className="whitespace-nowrap">{formatGross(sGroup.totalDue - sGroup.totalPaid)} <span className="text-xs font-normal opacity-90">{LABEL_INCL_VAT}</span></span>
+                                                            <span className="text-xs text-slate-500 font-medium whitespace-nowrap">{formatNet(sGroup.totalDue > 0 ? sGroup.totalDueNet * (sGroup.totalDue - sGroup.totalPaid) / sGroup.totalDue : 0)} <span className="opacity-90">{LABEL_EXCL_VAT}</span></span>
                                                         </div>
                                                     </div>
                                                     {isSExpanded && (
@@ -1445,8 +1485,8 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
                                                                         <th className="px-4 py-2">הזמנה</th>
                                                                         <th className="px-4 py-2">פריט</th>
                                                                         <th className="px-4 py-2">{viewMode === 'forecast' ? 'תאריך יעד' : 'תאריך הזמנה'}</th>
-                                                                        <th className="px-4 py-2">סה"כ (נטו)</th>
-                                                                        <th className="px-4 py-2">סה"כ (ברוטו)</th>
+                                                                        <th className="px-4 py-2">סה"כ (ללא מע"מ)</th>
+                                                                        <th className="px-4 py-2">סה"כ (כולל מע"מ)</th>
                                                                         <th className="px-4 py-2">שולם</th>
                                                                         <th className="px-4 py-2">יתרה</th>
                                                                         <th className="px-4 py-2">סטטוס</th>
@@ -1475,10 +1515,10 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
                                                                             <td className="px-4 py-2 text-slate-500">
                                                                                 {(viewMode === 'forecast' ? item.dueDate : item.orderDate).toLocaleDateString('he-IL')}
                                                                             </td>
-                                                                            <td className="px-4 py-2 text-slate-600">₪{item.cost.toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
-                                                                            <td className="px-4 py-2 text-slate-700 font-medium">₪{item.costGross.toLocaleString()}</td>
-                                                                            <td className="px-4 py-2 text-green-600 font-medium">₪{item.paidAmount.toLocaleString()}</td>
-                                                                            <td className="px-4 py-2 font-bold text-red-600">₪{item.remainingAmount.toLocaleString()}</td>
+                                                                            <td className="px-4 py-2 text-slate-600 font-mono">{formatNet(item.cost)}</td>
+                                                                            <td className="px-4 py-2 text-slate-700 font-medium font-mono">{formatGross(item.costGross)}</td>
+                                                                            <td className="px-4 py-2 text-green-600 font-medium font-mono">{formatGross(item.paidAmount)}</td>
+                                                                            <td className="px-4 py-2 font-bold text-red-600 font-mono">{formatGross(item.remainingAmount)}</td>
                                                                             <td className="px-4 py-2">
                                                                                 <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
                                                                                     item.status === 'שולם' ? 'bg-green-100 text-green-700' :
@@ -1585,8 +1625,8 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
                 <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 bg-slate-900 text-white px-6 py-4 rounded-2xl shadow-2xl flex items-center gap-8 border border-slate-700 animate-slideUp">
                     <div className="flex flex-col">
                         <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">פריטים שנבחרו ({selectedItemIds.size})</span>
-                        <span className="text-xl font-black text-white">₪{selectedItemsTotal.toLocaleString()} (ברוטו)</span>
-                        <span className="text-xs text-slate-400">₪{selectedItemsTotalNet.toLocaleString(undefined, { maximumFractionDigits: 0 })} (נטו)</span>
+                        <span className="text-xl font-black text-white">{formatGross(selectedItemsTotal)}</span>
+                        <span className="text-xs text-slate-400">{LABEL_INCL_VAT} · {formatNet(selectedItemsTotalNet)} {LABEL_EXCL_VAT}</span>
                     </div>
                     <div className="h-8 w-px bg-slate-700"></div>
                     <div className="flex gap-3">

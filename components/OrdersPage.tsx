@@ -1335,7 +1335,11 @@ const OrderForm: React.FC<{
             const { checked } = e.target as HTMLInputElement;
             setFormData(prev => ({...prev, [name]: checked }));
         } else {
-             setFormData(prev => ({ ...prev, [name]: name === 'vatRate' ? (parseFloat(value) || 0) : value }));
+            setFormData(prev => ({
+                ...prev,
+                [name]: name === 'vatRate' ? (parseFloat(value) || 0) : value,
+                ...(name === 'orderStatus' && user?.id && employees.some(emp => emp.id === user.id) ? { employeeId: user.id } : {}),
+            }));
         }
         if (name === 'date') {
             setDateString(value);
@@ -2617,10 +2621,10 @@ const OrderForm: React.FC<{
                 </div>
                 <div>
                     <label className="block text-sm font-medium text-slate-700">סוכן מטפל</label>
-                    <select name="employeeId" value={formData.employeeId} onChange={handleMasterChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm">
-                        <option value="">בחר עובד</option>
-                        {employees.map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
-                    </select>
+                    <div className="mt-1 block w-full rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+                        {formData.employeeId ? (employees.find(e => e.id === formData.employeeId)?.name ?? formData.employeeId) : '—'}
+                    </div>
+                    <p className="mt-0.5 text-xs text-slate-500">מתעדכן אוטומטית לפי משנה הסטטוס</p>
                 </div>
             </div>
 
@@ -3656,8 +3660,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
     const handleStatusChange = async (orderId: string, newStatus: string) => {
         const originalOrder = paginatedOrders.find(o => o.id === orderId) || orders.find(o => o.id === orderId);
         if (!originalOrder || originalOrder.orderStatus === newStatus) return;
-        
-        const user = employees.find(emp => emp.id === originalOrder.employeeId)?.name || 'מערכת';
+        const currentUserName = employees.find(emp => emp.id === user?.id)?.name || user?.name || 'מערכת';
         const config = statusConfigs.find(c => c.label === newStatus);
         const isNowActiveDeal = config ? config.isActiveDeal : false;
         let newDealStartDate = originalOrder.dealStartDate;
@@ -3668,7 +3671,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
             id: `log_${Date.now()}`,
             timestamp: new Date(),
             content: `שינוי סטטוס`,
-            user: user,
+            user: currentUserName,
             type: 'LOG',
             changes: [
                 { field: 'orderStatus', label: 'סטטוס', oldValue: originalOrder.orderStatus, newValue: newStatus, action: 'UPDATED' }
@@ -3678,7 +3681,8 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
         const updatedOrder: Order = {
             ...originalOrder,
             orderStatus: newStatus,
-            dealStartDate: newDealStartDate, 
+            employeeId: user?.id ?? originalOrder.employeeId,
+            dealStartDate: newDealStartDate,
             timeline: [logEvent, ...originalOrder.timeline],
             statusHistory: [...(originalOrder.statusHistory || []), newStatusHistoryEntry],
         };
@@ -3919,10 +3923,25 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
     };
 
     const calculateStatusDuration = (order: Order): string | null => {
-        if (!order.statusHistory || order.statusHistory.length === 0) return null;
         const targetStatus = order.orderStatus;
-        let totalMilliseconds = 0;
         const now = new Date();
+        // Fallback for orders without statusHistory (e.g. imported): use createdAt or date as start
+        if (!order.statusHistory || order.statusHistory.length === 0) {
+            const startDate = order.createdAt ?? order.date;
+            if (!targetStatus || !startDate) return null;
+            const startTime = new Date(startDate).getTime();
+            const totalMilliseconds = Math.max(0, now.getTime() - startTime);
+            const seconds = Math.floor(totalMilliseconds / 1000);
+            const minutes = Math.floor((seconds % 3600) / 60);
+            const hours = Math.floor((seconds % 86400) / 3600);
+            const days = Math.floor(seconds / 86400);
+            const parts = [];
+            if (days > 0) parts.push(`${days} ימים`);
+            if (hours > 0) parts.push(`${hours} שעות`);
+            parts.push(`${minutes} דקות`);
+            return parts.join(', ');
+        }
+        let totalMilliseconds = 0;
         const history = [...order.statusHistory].sort((a, b) => 
             new Date(a.startDate).getTime() - new Date(b.startDate).getTime()
         );
@@ -3948,6 +3967,19 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
         if (hours > 0) parts.push(`${hours} שעות`);
         parts.push(`${minutes} דקות`);
         return parts.join(', ');
+    };
+
+    /** מספר הכניסה לסטטוס הנוכחי (1 = פעם ראשונה, 2 = חזרה שנייה, וכו') */
+    const getStatusVisitIndex = (order: Order): number => {
+        if (!order.statusHistory || order.statusHistory.length === 0) return order.orderStatus ? 1 : 0;
+        return order.statusHistory.filter(e => e.status === order.orderStatus).length;
+    };
+
+    const getStatusVisitLabel = (visitIndex: number): string | null => {
+        if (visitIndex <= 0) return null;
+        if (visitIndex === 1) return 'כניסה ראשונה';
+        if (visitIndex === 2) return 'כניסה שנייה';
+        return `כניסה ${visitIndex}`;
     };
 
     // Deduplicate by orderNumber on client so the same order never appears twice (e.g. ORD-1005). Keep latest by date per normalized orderNumber.
@@ -4250,6 +4282,8 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                         {filteredOrders.map(order => {
                             const { totalAmount, profit, totalCost, totalPaid } = calculateOrderTotals(order);
                             const durationText = calculateStatusDuration(order);
+                            const statusVisitIndex = getStatusVisitIndex(order);
+                            const statusVisitLabel = getStatusVisitLabel(statusVisitIndex);
                             const itemMarkup = totalCost > 0 ? (profit / totalCost) * 100 : (totalAmount > 0 ? 100 : 0);
                             const profitColorClass = getProfitMarginColor(itemMarkup);
                             const customer = customers.find(c => c.id === order.customerId);
@@ -4318,7 +4352,13 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                                             <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center px-1 text-inherit">
                                                 <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd"></path></svg>
                                             </div>
-                                            {durationText && <p className="text-xs text-slate-500 mt-1 text-center">({durationText})</p>}
+                                            {(durationText || statusVisitLabel) && (
+                                                <p className="text-xs text-slate-500 mt-1 text-center">
+                                                    {durationText && <span>({durationText})</span>}
+                                                    {durationText && statusVisitLabel && ' · '}
+                                                    {statusVisitLabel && <span title={`ההזמנה נמצאת בפעם ה-${statusVisitIndex} בסטטוס זה`}>{statusVisitLabel}</span>}
+                                                </p>
+                                            )}
                                         </div>
                                     </td>
                                     <td className="px-4 py-4 whitespace-nowrap text-sm font-medium">

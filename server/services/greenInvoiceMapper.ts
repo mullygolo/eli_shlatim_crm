@@ -2,6 +2,7 @@ import { Order, Customer, CustomerPayment, LineItem, AdditionalService, LineItem
 import { CreateInvoiceRequest, GreenInvoiceInvoiceItem, CreateClientRequest } from '../types/greenInvoice.js';
 import { calculateOrderTotals, calculateDueDate } from '../utils/calculations.js';
 import { getDateStringIsrael } from '../utils/timezone.js';
+import { normalizeIsraeliIdOrCompanyNumber } from '../utils/israeliId.js';
 
 /** פירוק כתובת מאוחדת (כשהלקוח נשמר רק עם address) לרחוב, יישוב, מיקוד — כדי לשלוח נכון לחשבונית ירוקה */
 export function parseCombinedAddress(full: string): { street: string; city: string; zip: string } {
@@ -79,8 +80,8 @@ export function mapCustomerToClient(customer: Customer): CreateClientRequest & {
     };
     const bizId = customer.businessId?.trim();
     if (bizId) {
-        const digitsOnly = bizId.replace(/\D/g, '');
-        if (digitsOnly.length >= 8 && digitsOnly.length <= 9) payload.taxId = digitsOnly;
+        const normalized = normalizeIsraeliIdOrCompanyNumber(bizId);
+        if (normalized) payload.taxId = normalized;
     }
     const contactName = primaryContact?.name?.trim();
     if (contactName) {

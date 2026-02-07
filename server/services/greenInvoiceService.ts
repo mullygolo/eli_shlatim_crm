@@ -9,6 +9,7 @@ import {
     GreenInvoiceError,
     GreenInvoiceDocumentType
 } from '../types/greenInvoice.js';
+import { normalizeIsraeliIdOrCompanyNumber } from '../utils/israeliId.js';
 
 dotenv.config();
 
@@ -339,9 +340,9 @@ export async function updateClient(
             phone: (clientData.phone ?? '').toString().trim(),
             address: (clientData.address ?? '').toString().trim()
         };
-        // Omit taxId on update to avoid "ח.פ אינו תקין" – GI validates check digit; update name/email/address only. User can set ח.פ in GI if needed.
-        // const taxId = (clientData.taxId ?? '').toString().trim().replace(/\D/g, '');
-        // if (taxId.length >= 8 && taxId.length <= 9) body.taxId = taxId;
+        const rawTaxId = (clientData.taxId ?? (clientData as any).businessId ?? '').toString().trim();
+        const taxId = normalizeIsraeliIdOrCompanyNumber(rawTaxId);
+        if (taxId) body.taxId = taxId;
         if ((clientData as any).contactPerson) body.contactPerson = (clientData as any).contactPerson;
         if ((clientData as any).contact) body.contact = (clientData as any).contact;
         if ((clientData as any).paymentTerms != null && (clientData as any).paymentTerms !== '') body.paymentTerms = (clientData as any).paymentTerms;

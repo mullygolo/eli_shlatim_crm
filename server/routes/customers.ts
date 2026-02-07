@@ -112,7 +112,8 @@ router.delete('/:id', async (req, res) => {
 });
 
 // Merge victim into veteran (reassign orders, merge contacts/notes, delete victim). Persists to DB.
-// If victim had a Green Invoice client and we keep veteran's, mark victim's GI client inactive in background.
+// Green Invoice has no public API for merging two clients; merge is UI-only (איחוד כרטיסי לקוח).
+// So we only mark the victim's GI client as inactive; user can merge manually in GI if needed.
 router.post('/merge', async (req, res) => {
     try {
         const { veteranId, victimId } = req.body;

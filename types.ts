@@ -67,6 +67,12 @@ export interface Customer {
     businessId?: string; // ח.פ / ת.ז
     website: string;
     address: string;
+    /** רחוב ומספר — תואם לשדה "רחוב ומספר" בחשבונית ירוקה */
+    addressStreet?: string;
+    /** יישוב — תואם לשדה "יישוב" בחשבונית ירוקה */
+    addressCity?: string;
+    /** מיקוד — תואם לשדה "מיקוד" בחשבונית ירוקה */
+    addressZip?: string;
     category: string;
     notes: string;
     isSpecial: boolean;
@@ -76,6 +82,8 @@ export interface Customer {
     paymentTerms?: string;
     // GreenInvoice integration field
     greenInvoiceClientId?: string; // ID of client in GreenInvoice
+    /** When set, creation date in Green Invoice (for display; avoids showing sync date as "created in GI") */
+    greenInvoiceCreatedAt?: Date;
     /** Created from control-table import when customer name was not matched; do not sync to Green Invoice until user links to real customer */
     isImportPlaceholder?: boolean;
 }

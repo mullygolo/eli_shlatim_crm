@@ -313,23 +313,67 @@ export async function listClients(): Promise<GreenInvoiceClient[]> {
 }
 
 /**
- * Update a client
+ * Update a client. Uses same path prefix as getClient: /v1/clients/:id.
+ * Accepts multiple response shapes (data[] / item / client object) from Green Invoice API.
  */
-export async function updateClient(clientId: string, clientData: CreateClientRequest): Promise<GreenInvoiceClient> {
+export async function updateClient(
+    clientId: string,
+    clientData: CreateClientRequest & {
+        taxId?: string;
+        contactPerson?: string;
+        contact?: string;
+        paymentTerms?: string | number;
+        remarks?: string;
+        city?: string;
+        zip?: string;
+        country?: string;
+    }
+): Promise<GreenInvoiceClient> {
     try {
-        const response = await apiRequest<{ status: string; data: GreenInvoiceClient[] }>(
-            `/client/${clientId}`,
+        const email = (clientData.email ?? '').toString().trim();
+        const body: Record<string, unknown> = {
+            names: clientData.names,
+            name: clientData.names,
+            email,
+            emails: email ? [email] : [],
+            phone: (clientData.phone ?? '').toString().trim(),
+            address: (clientData.address ?? '').toString().trim()
+        };
+        // Omit taxId on update to avoid "ח.פ אינו תקין" – GI validates check digit; update name/email/address only. User can set ח.פ in GI if needed.
+        // const taxId = (clientData.taxId ?? '').toString().trim().replace(/\D/g, '');
+        // if (taxId.length >= 8 && taxId.length <= 9) body.taxId = taxId;
+        if ((clientData as any).contactPerson) body.contactPerson = (clientData as any).contactPerson;
+        if ((clientData as any).contact) body.contact = (clientData as any).contact;
+        if ((clientData as any).paymentTerms != null && (clientData as any).paymentTerms !== '') body.paymentTerms = (clientData as any).paymentTerms;
+        if ((clientData as any).remarks != null && (clientData as any).remarks !== '') body.remarks = (clientData as any).remarks;
+        if ((clientData as any).city) body.city = (clientData as any).city;
+        if ((clientData as any).zip) body.zip = (clientData as any).zip;
+        if ((clientData as any).country) body.country = (clientData as any).country;
+        const response = await apiRequest<any>(
+            `/v1/clients/${clientId}`,
             {
                 method: 'PUT',
-                body: JSON.stringify(clientData)
+                body: JSON.stringify(body)
             }
         );
 
-        if (response.status !== 'success' || !response.data || response.data.length === 0) {
-            throw new Error('Failed to update client');
+        if (response?.status === 'error' || response?.status === 'fail') {
+            const msg = response?.message ?? response?.error ?? response?.errorMessage ?? 'Unknown error';
+            console.warn('GreenInvoice updateClient: API returned error', response);
+            throw new Error(msg);
         }
 
-        return response.data[0];
+        const arr = response?.data ?? response?.items ?? response?.item;
+        const client = Array.isArray(arr) && arr.length > 0 ? arr[0]
+            : response?.item && typeof response.item === 'object' ? response.item
+            : response?.client && typeof response.client === 'object' ? response.client
+            : response?.id === clientId || (response?.id == null && (response?.names != null || response?.name != null)) ? response : null;
+
+        if (client && ((client as any).id === clientId || (client as any).id == null)) {
+            return client as GreenInvoiceClient;
+        }
+        console.warn('GreenInvoice updateClient: unexpected response shape', JSON.stringify(response).slice(0, 500));
+        throw new Error(response?.message ?? response?.error ?? 'Failed to update client: unexpected API response');
     } catch (error) {
         console.error('Error updating GreenInvoice client:', error);
         throw error;

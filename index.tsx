@@ -1,9 +1,8 @@
-import React, { Suspense, lazy } from 'react';
+import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { AuthProvider } from './contexts/AuthContext';
 import { RootErrorBoundary } from './components/RootErrorBoundary';
-
-const App = lazy(() => import('./App'));
+import App from './App';
 
 function showBootstrapError(message: string, detail?: string) {
   const rootElement = document.getElementById('root');
@@ -37,9 +36,7 @@ try {
     <React.StrictMode>
       <RootErrorBoundary>
         <AuthProvider>
-          <Suspense fallback={<LoadingFallback />}>
-            <App />
-          </Suspense>
+          <App />
         </AuthProvider>
       </RootErrorBoundary>
     </React.StrictMode>

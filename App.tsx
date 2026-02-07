@@ -309,9 +309,9 @@ const App: React.FC = () => {
         setOpenOrderId(orderId);
     }, []);
 
-    // When opening Dashboard or Reports, refresh orders so widgets (e.g. lost deals) and payables use up-to-date data
+    // When opening Dashboard, Reports, or Orders, refresh orders so data is up-to-date (including changes by other users)
     useEffect(() => {
-        if (currentPage === 'Dashboard' || currentPage === 'Reports') {
+        if (currentPage === 'Dashboard' || currentPage === 'Reports' || currentPage === 'Orders') {
             getOrders().then(setOrders).catch((err) => console.error('Error refreshing orders:', err));
         }
     }, [currentPage]);
@@ -577,13 +577,21 @@ const App: React.FC = () => {
         const newOrders = typeof updater === 'function' ? updater(orders) : updater;
         setOrders(newOrders);
         try {
+            const savedById = new Map<string, Order>();
             for (const order of newOrders) {
                 const existing = orders.find(o => o.id === order.id);
                 if (existing) {
-                    if (existing !== order) await updateOrder(order);
+                    if (existing !== order) {
+                        const saved = await updateOrder(order);
+                        savedById.set(saved.id, saved);
+                    }
                 } else {
-                    await createOrder(order);
+                    const created = await createOrder(order);
+                    savedById.set(created.id, created);
                 }
+            }
+            if (savedById.size > 0) {
+                setOrders(prev => prev.map(o => savedById.get(o.id) ?? o));
             }
             const removedIds = orders.filter(o => !newOrders.find(no => no.id === o.id)).map(o => o.id);
             for (const id of removedIds) {

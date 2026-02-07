@@ -93,6 +93,7 @@ router.post('/', async (req: Request, res: Response) => {
     // Green Invoice may send the client object directly (no event wrapper): { id, name, phone, emails, contact, ... }
     const payloadIsClient = clientId && (data?.name ?? data?.names ?? req.body?.name ?? req.body?.names);
     const isClientCreated = event === 'client/created' || event === 'client.created' || event === 'client_created' || (event.includes('client') && event.includes('created'));
+    const isClientUpdated = event === 'client/updated' || event === 'client.updated' || event === 'client_updated' || (event.includes('client') && event.includes('updated'));
     const isClientDeactivated = event === 'client/deactivated' || event === 'client.deactivated' || event === 'client_deactivated' || event === 'client/deleted' || event === 'client.deleted' || event === 'client_deleted' || (event.includes('client') && (event.includes('deactivat') || event.includes('deleted')));
     const isClientMerged = event === 'client/merged' || event === 'client.merged' || event === 'client_merged' || (event.includes('client') && event.includes('merge'));
 
@@ -118,6 +119,19 @@ router.post('/', async (req: Request, res: Response) => {
                 }
             } catch (err: any) {
                 console.error('[Webhook GreenInvoice] Error syncing client:', err?.message || err);
+            }
+        });
+    }
+
+    if (isClientUpdated && clientId) {
+        setImmediate(async () => {
+            try {
+                const giClient = await getClient(clientId);
+                const existingCustomers = await getCustomers();
+                const result = await applyGreenInvoiceClientToCustomer(giClient, existingCustomers);
+                console.log('[Webhook GreenInvoice] Updated client in CRM (from GI)', { id: clientId, name: giClient.names || giClient.name, updated: !!result.updated });
+            } catch (err: any) {
+                console.error('[Webhook GreenInvoice] Error updating client from GI:', err?.message || err);
             }
         });
     }
@@ -160,7 +174,7 @@ router.post('/', async (req: Request, res: Response) => {
         });
     }
 
-    res.status(200).json({ ok: true, received: event || (payloadIsClient ? 'client/sync' : ''), synced: payloadIsClient || isClientCreated });
+    res.status(200).json({ ok: true, received: event || (payloadIsClient ? 'client/sync' : ''), synced: payloadIsClient || isClientCreated || isClientUpdated });
 });
 
 export default router;

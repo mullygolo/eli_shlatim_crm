@@ -68,24 +68,35 @@ router.post('/', async (req, res) => {
 router.put('/:id', async (req, res) => {
     try {
         const customer = await updateCustomer(req.body);
-        
-        // Sync to GreenInvoice in background so save responds immediately (non-blocking)
+        let syncToGI: 'ok' | 'skipped' | 'error' = 'skipped';
+        let syncToGIMessage: string | undefined;
+
         if (process.env.GREENINVOICE_SYNC_ENABLED === 'true' && !customer.isImportPlaceholder) {
             const clientData = mapCustomerToClient(customer);
             if (customer.greenInvoiceClientId) {
-                updateClient(customer.greenInvoiceClientId, clientData).catch(err =>
-                    console.error('GreenInvoice updateClient (background):', err)
-                );
+                try {
+                    console.log('[Customers] Syncing to Green Invoice:', { customerId: customer.id, name: customer.name, greenInvoiceClientId: customer.greenInvoiceClientId });
+                    await updateClient(customer.greenInvoiceClientId, clientData);
+                    syncToGI = 'ok';
+                } catch (err: any) {
+                    syncToGI = 'error';
+                    syncToGIMessage = err?.message || String(err);
+                    console.error('GreenInvoice updateClient failed:', syncToGIMessage);
+                }
             } else {
-                createOrGetClient(clientData, customer.businessId)
-                    .then(greenInvoiceClient =>
-                        updateCustomer({ ...customer, greenInvoiceClientId: greenInvoiceClient.id })
-                    )
-                    .catch(err => console.error('GreenInvoice createOrGetClient (background):', err));
+                try {
+                    const greenInvoiceClient = await createOrGetClient(clientData, customer.businessId);
+                    await updateCustomer({ ...customer, greenInvoiceClientId: greenInvoiceClient.id });
+                    syncToGI = 'ok';
+                } catch (err: any) {
+                    syncToGI = 'error';
+                    syncToGIMessage = err?.message || String(err);
+                    console.error('GreenInvoice createOrGetClient failed:', syncToGIMessage);
+                }
             }
         }
-        
-        res.json(customer);
+
+        res.json({ ...customer, syncToGI, syncToGIMessage });
     } catch (error) {
         res.status(500).json({ error: 'Failed to update customer' });
     }

@@ -716,6 +716,8 @@ const OrderForm: React.FC<{
     const isEditMode = !!order;
     const { user } = useAuth();
     const isAdmin = user?.roleType === 'ADMIN';
+    /** שם המשתמש המחובר — לכתיבה ביומן (מי שבפועל ביצע את הפעולה) */
+    const loggedInUserName = (user && employees.find(e => e.id === user.id)?.name) || user?.name || 'מערכת';
 
     const [formData, setFormData] = useState<Omit<Order, 'id' | 'orderNumber'>>(
         order 
@@ -863,7 +865,7 @@ const OrderForm: React.FC<{
             const docLogEvent: TimelineEvent = {
                 id: `log_doc_${Date.now()}`,
                 timestamp: new Date(),
-                user: employees.find(emp => emp.id === order.employeeId)?.name || 'מערכת',
+                user: loggedInUserName,
                 type: 'LOG',
                 content: `נוצר מסמך ${docLabel} בחשבונית ירוקה`
             };
@@ -924,7 +926,7 @@ const OrderForm: React.FC<{
             const draftLogEvent: TimelineEvent = {
                 id: `log_draft_${Date.now()}`,
                 timestamp: new Date(),
-                user: employees.find(emp => emp.id === order.employeeId)?.name || 'מערכת',
+                user: loggedInUserName,
                 type: 'LOG',
                 content: `נוצרה טיוטת מסמך ${draftDocLabel} בחשבונית ירוקה`
             };
@@ -1357,7 +1359,6 @@ const OrderForm: React.FC<{
         if (!paymentIdToDelete) return;
         
         const targetPayment = formData.payments.find(p => p.id === paymentIdToDelete);
-        const user = employees.find(emp => emp.id === formData.employeeId)?.name || 'מערכת';
         const payDateStr = targetPayment?.date ? new Date(targetPayment.date).toLocaleDateString('he-IL') : '';
         const parts = [`תשלום הוסר: ₪${targetPayment?.amount.toLocaleString()} (${targetPayment?.method})`, payDateStr];
         if (targetPayment?.reference) parts.push(`אסמכתא: ${targetPayment.reference}`);
@@ -1370,7 +1371,7 @@ const OrderForm: React.FC<{
             timeline: [{
                 id: `log_pay_del_${Date.now()}`,
                 timestamp: new Date(),
-                user,
+                user: loggedInUserName,
                 type: 'LOG',
                 content
             }, ...prev.timeline]
@@ -1669,13 +1670,12 @@ const OrderForm: React.FC<{
 
     const handleAddTimelineEvent = () => {
         if (!newTimelineEntry.content.trim()) return;
-        const currentUser = employees.find(emp => emp.id === formData.employeeId)?.name || 'מערכת';
         const targetAssigneeId = newTimelineEntry.assigneeId || formData.employeeId;
 
         const newEvent: TimelineEvent = {
             id: `tl_${Date.now()}`,
             timestamp: new Date(),
-            user: currentUser, 
+            user: loggedInUserName, 
             type: newTimelineEntry.type,
             content: newTimelineEntry.content,
             ...(newTimelineEntry.type === 'TASK' && {
@@ -1694,7 +1694,7 @@ const OrderForm: React.FC<{
             const wallPost: WallPost = {
                 id: `wall_${Date.now()}`,
                 authorId: user?.id ?? '',
-                authorName: user?.name ?? currentUser,
+                authorName: user?.name ?? loggedInUserName,
                 content: newTimelineEntry.content.trim(),
                 createdAt: new Date(),
                 orderId: order?.id,
@@ -1714,7 +1714,6 @@ const OrderForm: React.FC<{
     };
 
     const handleToggleTaskComplete = (eventId: string, currentStatus: boolean) => {
-        const currentUser = employees.find(emp => emp.id === formData.employeeId)?.name || 'מערכת';
         let taskContent = '';
 
         const updatedTimeline = formData.timeline.map(event => {
@@ -1725,20 +1724,20 @@ const OrderForm: React.FC<{
                     ...event, 
                     isCompleted: newStatus,
                     completedAt: newStatus ? new Date() : undefined,
-                    completedBy: newStatus ? currentUser : undefined 
+                    completedBy: newStatus ? loggedInUserName : undefined 
                 };
             }
             return event;
         });
 
         const logContent = !currentStatus
-            ? `משימה הושלמה ע"י ${currentUser}: "${taskContent}"`
-            : `משימה סומנה כלא הושלמה ע"י ${currentUser}: "${taskContent}"`;
+            ? `משימה הושלמה ע"י ${loggedInUserName}: "${taskContent}"`
+            : `משימה סומנה כלא הושלמה ע"י ${loggedInUserName}: "${taskContent}"`;
 
         const logEvent: TimelineEvent = {
             id: `tl_log_${Date.now()}`,
             timestamp: new Date(),
-            user: currentUser,
+            user: loggedInUserName,
             type: 'LOG',
             content: logContent,
         };
@@ -2133,8 +2132,6 @@ const OrderForm: React.FC<{
              }
         }
 
-        const user = employees.find(emp => emp.id === formData.employeeId)?.name || 'מערכת';
-        
         let finalDealStartDate = formData.dealStartDate;
         if (dealStartDateString) {
             finalDealStartDate = new Date(dealStartDateString);
@@ -2162,7 +2159,7 @@ const OrderForm: React.FC<{
                 id: `log_${Date.now()}`,
                 timestamp: new Date(),
                 content: 'הזמנה נוצרה',
-                user,
+                user: loggedInUserName,
                 type: 'LOG'
             });
             updatedFormData.statusHistory = [{ status: updatedFormData.orderStatus, startDate: new Date() }];
@@ -2174,7 +2171,7 @@ const OrderForm: React.FC<{
                      id: `log_audit_${Date.now()}`,
                      timestamp: new Date(),
                      content: 'עדכון פרטי הזמנה',
-                     user,
+                     user: loggedInUserName,
                      type: 'LOG',
                      changes: diff
                  });
@@ -2325,6 +2322,10 @@ const OrderForm: React.FC<{
         ? new Date(formData.createdAt).toLocaleDateString('he-IL')
         : (formData.date ? new Date(formData.date).toLocaleDateString('he-IL') : new Date().toLocaleDateString('he-IL'));
 
+    const dealDateDisplay = formData.dealStartDate
+        ? new Date(formData.dealStartDate).toLocaleDateString('he-IL')
+        : '—';
+
     useEffect(() => {
         if (!setHeaderContent) return;
         setHeaderContent(
@@ -2361,19 +2362,23 @@ const OrderForm: React.FC<{
                 <span className="w-px h-4 bg-slate-200 flex-shrink-0" aria-hidden />
                 <span className={`flex items-center gap-1.5 ${iDealActiveAndDated ? 'text-green-700' : 'text-slate-500'}`} title={hasDealDate ? 'תאריך אישור עסקה' : 'טרם אושרה עסקה'}>
                     <span className="font-medium">{hasDealDate ? 'אישור עסקה:' : 'טרם אושרה'}</span>
-                    <input
-                        type="date"
-                        name="dealStartDate"
-                        value={dealStartDateString}
-                        onChange={handleMasterChange}
-                        min={minDealDate}
-                        className={`w-[6.5rem] py-1 px-1.5 rounded border text-xs font-medium bg-white cursor-pointer ${iDealActiveAndDated ? 'border-green-200 text-green-700 bg-green-50/50' : hasDealDate ? 'border-slate-200 text-slate-600' : 'border-dashed border-slate-200 text-slate-400'}`}
-                    />
+                    {isAdmin ? (
+                        <input
+                            type="date"
+                            name="dealStartDate"
+                            value={dealStartDateString}
+                            onChange={handleMasterChange}
+                            min={minDealDate}
+                            className={`w-[6.5rem] py-1 px-1.5 rounded border text-xs font-medium bg-white cursor-pointer ${iDealActiveAndDated ? 'border-green-200 text-green-700 bg-green-50/50' : hasDealDate ? 'border-slate-200 text-slate-600' : 'border-dashed border-slate-200 text-slate-400'}`}
+                        />
+                    ) : (
+                        <span className="font-mono font-semibold text-slate-700">{dealDateDisplay}</span>
+                    )}
                 </span>
             </div>
         );
         return () => { setHeaderContent(null); };
-    }, [setHeaderContent, createdDateDisplay, createdAtString, dealStartDateString, hasDealDate, iDealActiveAndDated, isAdmin, minDealDate, formData.hiddenFromSalesGoal]);
+    }, [setHeaderContent, createdDateDisplay, createdAtString, dealDateDisplay, dealStartDateString, hasDealDate, iDealActiveAndDated, isAdmin, minDealDate, formData.hiddenFromSalesGoal]);
 
     return (
         <>
@@ -3154,7 +3159,7 @@ const OrderForm: React.FC<{
                                 const linkLogEvent: TimelineEvent = {
                                     id: `log_link_${Date.now()}`,
                                     timestamp: new Date(),
-                                    user: employees.find(emp => emp.id === order.employeeId)?.name || 'מערכת',
+                                    user: loggedInUserName,
                                     type: 'LOG',
                                     content: `שויך מסמך חשבונית ירוקה להזמנה (${paymentsAdded} תשלומים)`
                                 };
@@ -3660,7 +3665,6 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
     const handleStatusChange = async (orderId: string, newStatus: string) => {
         const originalOrder = paginatedOrders.find(o => o.id === orderId) || orders.find(o => o.id === orderId);
         if (!originalOrder || originalOrder.orderStatus === newStatus) return;
-        const currentUserName = employees.find(emp => emp.id === user?.id)?.name || user?.name || 'מערכת';
         const config = statusConfigs.find(c => c.label === newStatus);
         const isNowActiveDeal = config ? config.isActiveDeal : false;
         let newDealStartDate = originalOrder.dealStartDate;
@@ -3671,7 +3675,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
             id: `log_${Date.now()}`,
             timestamp: new Date(),
             content: `שינוי סטטוס`,
-            user: currentUserName,
+            user: loggedInUserName,
             type: 'LOG',
             changes: [
                 { field: 'orderStatus', label: 'סטטוס', oldValue: originalOrder.orderStatus, newValue: newStatus, action: 'UPDATED' }
@@ -3778,6 +3782,14 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
             }
             let deduped = Array.from(byKey.values());
             if (sortBy === 'dueDate') {
+                deduped = deduped.filter(order => {
+                    const config = statusConfigs?.find(c => c.label === order.orderStatus);
+                    if (!config?.isActiveDeal) return false;
+                    const { totalAmount, totalPaid } = calculateOrderTotals(order);
+                    const currentVat = order.vatRate ?? (vatRate ?? 0);
+                    const dueWithVat = totalAmount * (1 + currentVat / 100);
+                    return (dueWithVat - totalPaid) > 0.01;
+                });
                 deduped.sort((a, b) => {
                     const dateA = calculateDueDate(a.dealStartDate || a.date, a.paymentTerms);
                     const dateB = calculateDueDate(b.dealStartDate || b.date, b.paymentTerms);

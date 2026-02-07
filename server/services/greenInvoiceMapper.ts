@@ -3,18 +3,93 @@ import { CreateInvoiceRequest, GreenInvoiceInvoiceItem, CreateClientRequest } fr
 import { calculateOrderTotals, calculateDueDate } from '../utils/calculations.js';
 import { getDateStringIsrael } from '../utils/timezone.js';
 
+/** פירוק כתובת מאוחדת (כשהלקוח נשמר רק עם address) לרחוב, יישוב, מיקוד — כדי לשלוח נכון לחשבונית ירוקה */
+export function parseCombinedAddress(full: string): { street: string; city: string; zip: string } {
+    const s = (full || '').trim();
+    if (!s) return { street: '', city: '', zip: '' };
+    const parts = s.split(',').map(p => p.trim()).filter(Boolean);
+    if (parts.length === 0) return { street: s, city: '', zip: '' };
+    // מיקוד בישראל: 5 או 7 ספרות (לעיתים עם מקף)
+    const last = parts[parts.length - 1];
+    const lastDigits = last.replace(/\D/g, '');
+    const isZip = /^\d{5,7}$/.test(lastDigits);
+    if (isZip && parts.length >= 2) {
+        const zip = lastDigits.length >= 5 ? lastDigits : last;
+        const city = parts.length >= 3 ? parts[parts.length - 2] : '';
+        const street = parts.slice(0, parts.length - (city ? 2 : 1)).join(', ');
+        return { street, city, zip };
+    }
+    if (parts.length >= 2) {
+        return { street: parts[0], city: parts[parts.length - 1], zip: '' };
+    }
+    return { street: s, city: '', zip: '' };
+}
+
 /**
- * Map Customer to GreenInvoice Client format
+ * Map Customer to GreenInvoice Client format for create/update.
+ * Sends: name, contact person, email, phone, address (street), city, zip, taxId (ח.פ), paymentTerms, remarks.
+ * When customer has only combined address, parses it into street/city/zip so GI gets correct fields.
  */
-export function mapCustomerToClient(customer: Customer): CreateClientRequest {
+export function mapCustomerToClient(customer: Customer): CreateClientRequest & {
+    taxId?: string;
+    contactPerson?: string;
+    contact?: string;
+    paymentTerms?: string | number;
+    remarks?: string;
+    city?: string;
+    zip?: string;
+    country?: string;
+} {
     const primaryContact = customer.contacts?.find(c => c.isDefault) || customer.contacts?.[0];
-    
-    return {
-        names: customer.name,
+    const hasSplit = [customer.addressStreet, customer.addressCity, customer.addressZip].some(
+        v => v != null && String(v).trim() !== ''
+    );
+    let address = (customer.addressStreet ?? customer.address) || '';
+    let city: string | undefined;
+    let zip: string | undefined;
+    if (hasSplit) {
+        address = (customer.addressStreet ?? customer.address) || '';
+        city = (customer.addressCity ?? '').trim() || undefined;
+        zip = (customer.addressZip ?? '').toString().trim() || undefined;
+    } else {
+        const combined = (customer.address || '').trim();
+        if (combined) {
+            const parsed = parseCombinedAddress(combined);
+            address = parsed.street;
+            city = parsed.city || undefined;
+            zip = parsed.zip || undefined;
+        }
+    }
+    const payload: CreateClientRequest & {
+        taxId?: string;
+        contactPerson?: string;
+        contact?: string;
+        paymentTerms?: string | number;
+        remarks?: string;
+        city?: string;
+        zip?: string;
+        country?: string;
+    } = {
+        names: customer.name || '',
         email: primaryContact?.email || '',
         phone: primaryContact?.phone || '',
-        address: customer.address || ''
+        address: address || (customer.address || ''),
+        ...(city && { city }),
+        ...(zip && { zip }),
     };
+    const bizId = customer.businessId?.trim();
+    if (bizId) {
+        const digitsOnly = bizId.replace(/\D/g, '');
+        if (digitsOnly.length >= 8 && digitsOnly.length <= 9) payload.taxId = digitsOnly;
+    }
+    const contactName = primaryContact?.name?.trim();
+    if (contactName) {
+        payload.contactPerson = contactName;
+        payload.contact = contactName;
+    }
+    if (customer.paymentTerms?.trim()) payload.paymentTerms = customer.paymentTerms.trim();
+    if (customer.notes?.trim()) payload.remarks = customer.notes.trim().slice(0, 2000);
+    return payload;
 }
 
 /**
@@ -268,14 +343,29 @@ export function mapOrderToDocumentRequest(
         console.log(`[GreenInvoice] Using dueDate: ${dueDate}`);
     }
     
-    // Build client object
+    // Build client object — use same address split as mapCustomerToClient so GI gets רחוב, יישוב, מיקוד
     const primaryContact = customer.contacts?.find(c => c.isDefault) || customer.contacts?.[0];
+    const hasSplit = [customer.addressStreet, customer.addressCity, customer.addressZip].some(
+        v => v != null && String(v).trim() !== ''
+    );
+    let docAddress = (customer.addressStreet ?? customer.address) || '';
+    let docCity: string | undefined;
+    let docZip: string | undefined;
+    if (hasSplit) {
+        docCity = (customer.addressCity ?? '').trim() || undefined;
+        docZip = (customer.addressZip ?? '').toString().trim() || undefined;
+    } else if ((customer.address || '').trim()) {
+        const parsed = parseCombinedAddress(customer.address!);
+        docAddress = parsed.street;
+        docCity = parsed.city || undefined;
+        docZip = parsed.zip || undefined;
+    }
     const client: any = {
         ...(greenInvoiceClientId && { id: greenInvoiceClientId }),
         name: customer.name,
         add: !greenInvoiceClientId, // If no ID, add as new client
         ...(customer.businessId && { taxId: customer.businessId }),
-        ...(customer.address && { address: customer.address }),
+        ...(docAddress ? { address: docAddress, ...(docCity && { city: docCity }), ...(docZip && { zip: docZip }) } : {}),
         ...(primaryContact?.phone && { phone: primaryContact.phone }),
         ...(primaryContact?.email && { emails: [primaryContact.email] })
     };

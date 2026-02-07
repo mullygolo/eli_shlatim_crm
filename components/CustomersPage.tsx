@@ -39,7 +39,9 @@ const findDuplicateCustomer = (customers: Customer[], name: string, hp?: string,
 };
 
 // Visual badges: origin (from GI vs app) and sync status to Green Invoice
-const fromGreenInvoice = (c: Customer) => (c.notes || '').trim().startsWith('יובא מחשבונית ירוקה');
+const fromGreenInvoice = (c: Customer) =>
+    (c.notes || '').trim().startsWith('יובא מחשבונית ירוקה') ||
+    (!!c.greenInvoiceClientId && (c.category || '').trim() === 'לקוח מ-חשבונית ירוקה');
 const syncedToGreenInvoice = (c: Customer) => !!c.greenInvoiceClientId;
 
 const formatCustomerCreatedAt = (d: Date | string | undefined): string => {
@@ -59,8 +61,9 @@ const CustomerSyncBadges: React.FC<{ customer: Customer; compact?: boolean }> = 
     );
     return (
         <div className={`flex flex-wrap gap-1 ${compact ? 'mt-0.5' : 'mt-2'}`}>
-            {fromGI ? badge('סונכרן מחשבונית ירוקה', 'הלקוח יובא/סונכרן מחשבונית ירוקה', 'bg-emerald-100 text-emerald-800') : badge('נוצר בתוכנה', 'הלקוח נוצר במערכת זו', 'bg-indigo-100 text-indigo-800')}
-            {toGI && badge('מסונכרן לחשבונית ירוקה', 'הלקוח מקושר ומופיע בחשבונית ירוקה', 'bg-amber-100 text-amber-800')}
+            {fromGI ? badge('נוצר בחשבונית ירוקה', 'הלקוח נוצר בחשבונית ירוקה וסונכרן לתוכנה', 'bg-emerald-100 text-emerald-800') : badge('נוצר בתוכנה', 'הלקוח נוצר במערכת זו', 'bg-indigo-100 text-indigo-800')}
+            {fromGI && toGI && badge('מסונכרן לתוכנה', 'הלקוח סונכרן ומופיע במערכת', 'bg-emerald-100 text-emerald-800')}
+            {!fromGI && toGI && badge('מסונכרן לחשבונית ירוקה', 'הלקוח מקושר ומופיע בחשבונית ירוקה', 'bg-amber-100 text-amber-800')}
         </div>
     );
 };
@@ -760,6 +763,9 @@ const NewCustomerForm: React.FC<{ onSave: (customer: Partial<Customer>, firstCon
         category: '',
         website: '',
         address: '',
+        addressStreet: '',
+        addressCity: '',
+        addressZip: '',
         notes: '',
         paymentMethod: PaymentMethod.BANK_TRANSFER,
         paymentTerms: 'תשלום מיידי',
@@ -831,8 +837,16 @@ const NewCustomerForm: React.FC<{ onSave: (customer: Partial<Customer>, firstCon
                         </select>
                     </div>
                     <div>
-                        <label className="block text-sm font-medium text-slate-700">כתובת</label>
-                        <input type="text" name="address" value={customerData.address} onChange={handleCustomerChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+                        <label className="block text-sm font-medium text-slate-700">רחוב ומספר</label>
+                        <input type="text" name="addressStreet" value={customerData.addressStreet} onChange={handleCustomerChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" placeholder="רחוב ומספר בית" />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-slate-700">יישוב</label>
+                        <input type="text" name="addressCity" value={customerData.addressCity} onChange={handleCustomerChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" placeholder="עיר / יישוב" />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-slate-700">מיקוד</label>
+                        <input type="text" name="addressZip" value={customerData.addressZip} onChange={handleCustomerChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" placeholder="מיקוד" />
                     </div>
                     <div>
                         <label className="block text-sm font-medium text-slate-700">אתר אינטרנט</label>
@@ -903,7 +917,12 @@ const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, custo
     const [editingContact, setEditingContact] = useState<Contact | null>(null);
 
     useEffect(() => {
-        setEditableCustomer(customer);
+        setEditableCustomer({
+            ...customer,
+            addressStreet: customer.addressStreet ?? customer.address ?? '',
+            addressCity: customer.addressCity ?? '',
+            addressZip: customer.addressZip ?? '',
+        });
     }, [customer]);
 
     const handleCustomerChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
@@ -967,7 +986,7 @@ const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, custo
                         <div className="md:col-span-2 flex items-center gap-2 text-sm text-slate-600 bg-slate-50 rounded-lg px-3 py-2 border border-slate-200">
                             <span className="font-medium text-slate-700">תאריך יצירה:</span>
                             {fromGreenInvoice(editableCustomer) ? (
-                                <span>נוצר בחשבונית ירוקה ב־{formatCustomerCreatedAt(editableCustomer.createdAt)}</span>
+                                <span>נוצר בחשבונית ירוקה ב־{formatCustomerCreatedAt(editableCustomer.greenInvoiceCreatedAt ?? editableCustomer.createdAt)}</span>
                             ) : (
                                 <span>נוצר בתוכנה ב־{formatCustomerCreatedAt(editableCustomer.createdAt)}</span>
                             )}
@@ -985,8 +1004,16 @@ const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, custo
                             <input name="website" value={editableCustomer.website} onChange={handleCustomerChange} className="p-2 border rounded w-full"/>
                         </div>
                         <div>
-                            <label className="block text-sm font-medium text-slate-700 mb-1">כתובת</label>
-                            <input name="address" value={editableCustomer.address} onChange={handleCustomerChange} className="p-2 border rounded w-full"/>
+                            <label className="block text-sm font-medium text-slate-700 mb-1">רחוב ומספר</label>
+                            <input name="addressStreet" value={editableCustomer.addressStreet ?? ''} onChange={handleCustomerChange} className="p-2 border rounded w-full" placeholder="רחוב ומספר בית"/>
+                        </div>
+                        <div>
+                            <label className="block text-sm font-medium text-slate-700 mb-1">יישוב</label>
+                            <input name="addressCity" value={editableCustomer.addressCity ?? ''} onChange={handleCustomerChange} className="p-2 border rounded w-full" placeholder="עיר / יישוב"/>
+                        </div>
+                        <div>
+                            <label className="block text-sm font-medium text-slate-700 mb-1">מיקוד</label>
+                            <input name="addressZip" value={editableCustomer.addressZip ?? ''} onChange={handleCustomerChange} className="p-2 border rounded w-full" placeholder="מיקוד"/>
                         </div>
                         <div>
                              <label className="block text-sm font-medium text-slate-700 mb-1">קטגוריה</label>
@@ -1406,12 +1433,19 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
                 isDefault: true // Default to true for the first contact
             };
 
+            const addrStreet = (customerData as any).addressStreet ?? '';
+            const addrCity = (customerData as any).addressCity ?? '';
+            const addrZip = (customerData as any).addressZip ?? '';
+            const combinedAddress = [addrStreet, addrCity, addrZip].filter(Boolean).join(', ') || (customerData.address || '');
             const newCustomer: Customer = {
                 id: `cust_${Date.now()}`,
                 name: customerData.name || 'לקוח חדש',
                 businessId: customerData.businessId || '',
                 website: customerData.website || '',
-                address: customerData.address || '',
+                address: combinedAddress,
+                addressStreet: addrStreet || undefined,
+                addressCity: addrCity || undefined,
+                addressZip: addrZip || undefined,
                 category: customerData.category || '',
                 notes: customerData.notes || '',
                 isSpecial: !!customerData.isSpecial,
@@ -1508,32 +1542,33 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
     };
 
     const handleSaveCustomerUpdate = async (updatedCustomer: Customer) => {
-        // Find previous state to check for changes
         const originalCustomer = customers.find(c => c.id === updatedCustomer.id);
-        
+        const combinedAddress = [updatedCustomer.addressStreet, updatedCustomer.addressCity, updatedCustomer.addressZip].filter(Boolean).join(', ') || updatedCustomer.address || '';
+        const toSave: Customer = { ...updatedCustomer, address: combinedAddress };
+        let response: Customer & { syncToGI?: 'ok' | 'skipped' | 'error'; syncToGIMessage?: string };
         try {
-            await mongoService.updateCustomer(updatedCustomer);
+            response = await mongoService.updateCustomer(toSave);
         } catch (error) {
             console.error('Error saving customer:', error);
             alert('שגיאה בשמירת הלקוח. אנא נסה שוב.');
             return;
         }
-        
-        setCustomersLocal(prev => prev.map(c => c.id === updatedCustomer.id ? updatedCustomer : c));
-        setPaginatedCustomers(prev => prev.map(c => c.id === updatedCustomer.id ? { ...c, ...updatedCustomer } : c));
-        // No refetch: we already have the server response; saves one round-trip for instant feedback
-        
-        // Automatic cascading update for Payment Terms
-        if (originalCustomer && updatedCustomer.paymentTerms && originalCustomer.paymentTerms !== updatedCustomer.paymentTerms) {
+        const saved = response as Customer;
+        setCustomersLocal(prev => prev.map(c => c.id === saved.id ? saved : c));
+        setPaginatedCustomers(prev => prev.map(c => c.id === saved.id ? { ...c, ...saved } : c));
+
+        if (response.syncToGI === 'error' && response.syncToGIMessage) {
+            alert(`הלקוח נשמר, אך סנכרון לחשבונית ירוקה נכשל:\n${response.syncToGIMessage}\n\nודא ש-GREENINVOICE_SYNC_ENABLED=true ושהלקוח מקושר לחשבונית ירוקה.`);
+        }
+
+        if (originalCustomer && saved.paymentTerms && originalCustomer.paymentTerms !== saved.paymentTerms) {
             setOrders(prevOrders => prevOrders.map(order => {
-                if (order.customerId === updatedCustomer.id) {
-                     return { ...order, paymentTerms: updatedCustomer.paymentTerms! };
-                }
+                if (order.customerId === saved.id) return { ...order, paymentTerms: saved.paymentTerms! };
                 return order;
             }));
-            addActivity(`לקוח עודכן: ${updatedCustomer.name} (עודכנו תנאי תשלום ב-${orders.filter(o => o.customerId === updatedCustomer.id).length} הזמנות)`, { entityType: 'customer', entityId: updatedCustomer.id, action: 'update', metadata: { name: updatedCustomer.name } });
-            } else {
-            addActivity(`לקוח עודכן: ${updatedCustomer.name}`, { entityType: 'customer', entityId: updatedCustomer.id, action: 'update', metadata: { name: updatedCustomer.name } });
+            addActivity(`לקוח עודכן: ${saved.name} (עודכנו תנאי תשלום ב-${orders.filter(o => o.customerId === saved.id).length} הזמנות)${response.syncToGI === 'ok' ? ' • סונכרן לחשבונית ירוקה' : ''}`, { entityType: 'customer', entityId: saved.id, action: 'update', metadata: { name: saved.name } });
+        } else {
+            addActivity(`לקוח עודכן: ${saved.name}${response.syncToGI === 'ok' ? ' • סונכרן לחשבונית ירוקה' : ''}`, { entityType: 'customer', entityId: saved.id, action: 'update', metadata: { name: saved.name } });
         }
 
         setIsDetailModalOpen(false);

@@ -182,6 +182,25 @@ const PnLReport: React.FC<PnLReportProps> = ({
         
         const getMonthKey = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
         const getLabel = (date: Date) => date.toLocaleString('he-IL', { month: 'long', year: 'numeric' });
+        /** Parse schedule dueDate from API (Date, ISO string, or DD.MM.YYYY / DD/MM/YYYY) to local Date for correct month. */
+        const parseScheduleDueDate = (dueDate: Date | string): Date | null => {
+            if (dueDate instanceof Date) {
+                const d = new Date(dueDate.getTime());
+                return isNaN(d.getTime()) ? null : d;
+            }
+            if (typeof dueDate !== 'string') return null;
+            const iso = new Date(dueDate);
+            if (!isNaN(iso.getTime())) return iso;
+            const parts = dueDate.split(/[./]/).map(p => parseInt(p.trim(), 10)).filter(n => !isNaN(n));
+            if (parts.length >= 3) {
+                const day = Math.min(Math.max(1, parts[0]), 31);
+                const month = Math.min(Math.max(0, parts[1] - 1), 11);
+                const year = parts[2] < 100 ? 2000 + parts[2] : parts[2];
+                const local = new Date(year, month, day);
+                return isNaN(local.getTime()) ? null : local;
+            }
+            return null;
+        };
 
         // Initialize range of months based on filters
         const startDate = new Date(startYear, startMonth - 1, 1);
@@ -521,94 +540,94 @@ const PnLReport: React.FC<PnLReportProps> = ({
         loans.forEach(loan => {
             let loanProcessed = false;
             
-            // Handle loans with schedule
+            // Handle loans with schedule — show ALL scheduled payments in their due month (matches Loans page)
             if (loan.schedule && loan.schedule.length > 0) {
-                const today = new Date();
-                today.setHours(0, 0, 0, 0);
-                
                 loan.schedule.forEach(entry => {
-                    const date = entry.dueDate instanceof Date ? entry.dueDate : new Date(entry.dueDate);
-                    const dateClean = new Date(date);
-                    dateClean.setHours(0, 0, 0, 0);
-                    const key = getMonthKey(date);
+                    const parsed = parseScheduleDueDate(entry.dueDate as Date | string);
+                    if (!parsed) return;
+                    const dateClean = new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate());
+                    const key = getMonthKey(dateClean);
                     
-                    // Show payments that are within the selected date range
-                    // Include both paid and unpaid entries if they're in the date range
                     if (!pnlMap[key]) return;
-                    
-                    // Include if: paid OR past due date (always include entries in the selected date range)
-                    const shouldInclude = entry.isPaid || dateClean <= today;
-                    if (!shouldInclude) return;
                     
                     loanProcessed = true;
                     
-                    // Calculate financing expenses: interest + fees
                     const interestAmount = entry.interestAmount || 0;
                     const feesAmount = entry.fees || 0;
                     const totalFinancingCost = interestAmount + feesAmount;
                     
                     pnlMap[key].financingExpenses += totalFinancingCost;
-                    
-                    // Add interest item if exists
                     if (interestAmount > 0) {
-                        pnlMap[key].financingItems.push({ name: `ריבית: ${loan.lenderName}`, amount: interestAmount, date: date });
+                        pnlMap[key].financingItems.push({ name: `ריבית: ${loan.lenderName}`, amount: interestAmount, date: dateClean });
                     }
-                    
-                    // Add fees item if exists
                     if (feesAmount > 0) {
-                        pnlMap[key].financingItems.push({ name: `עמלה: ${loan.lenderName}`, amount: feesAmount, date: date });
+                        pnlMap[key].financingItems.push({ name: `עמלה: ${loan.lenderName}`, amount: feesAmount, date: dateClean });
                     }
-                    
                     pnlMap[key].loanPrincipal += entry.principalAmount || 0;
-                    pnlMap[key].loanPrincipalItems.push({ name: `קרן: ${loan.lenderName}`, amount: entry.principalAmount || 0, date: date });
+                    pnlMap[key].loanPrincipalItems.push({ name: `קרן: ${loan.lenderName}`, amount: entry.principalAmount || 0, date: dateClean });
                 });
             }
             
-            // If loan wasn't processed from schedule, try other methods
-            if (!loanProcessed && loan.startDate && loan.monthlyPayment) {
+            // If loan wasn't processed from schedule, try fallback
+            const hasStartDate = loan.startDate != null && loan.startDate !== undefined;
+            const monthlyPmt = (loan.monthlyPayment != null && loan.monthlyPayment !== undefined) ? loan.monthlyPayment : 0;
+            // Fallback 1: startDate available (include even when monthlyPayment is 0)
+            if (!loanProcessed && hasStartDate) {
                 const startDate = loan.startDate instanceof Date ? loan.startDate : new Date(loan.startDate);
                 const monthlyRate = (loan.interestRate && loan.interestRate > 0) ? (loan.interestRate / 100 / 12) : 0;
                 let remainingPrincipal = loan.principalAmount || 0;
                 
                 // Determine how many payments to calculate
                 let numPayments = 0;
-                if (loan.paymentsMade && loan.paymentsMade > 0) {
-                    // Use paymentsMade if available
+                if (loan.paymentsMade != null && loan.paymentsMade > 0) {
                     numPayments = loan.paymentsMade;
-                } else if (loan.durationMonths && loan.durationMonths > 0) {
-                    // Use durationMonths if available
+                } else if (loan.durationMonths != null && loan.durationMonths > 0) {
                     numPayments = loan.durationMonths;
                 } else {
                     // Calculate from startDate to end of selected period
-                    const endDate = new Date(endYear, endMonth - 1, 1);
-                    const monthsDiff = (endDate.getFullYear() - startDate.getFullYear()) * 12 + (endDate.getMonth() - startDate.getMonth()) + 1;
+                    const periodEnd = new Date(endYear, endMonth - 1, 1);
+                    const monthsDiff = (periodEnd.getFullYear() - startDate.getFullYear()) * 12 + (periodEnd.getMonth() - startDate.getMonth()) + 1;
                     numPayments = Math.max(0, monthsDiff);
                 }
                 
-                // Calculate payments
+                let anyAdded = false;
+                let firstKeyInRange: string | null = null;
                 for (let i = 1; i <= numPayments; i++) {
-                    const dueDate = new Date(startDate);
-                    dueDate.setMonth(startDate.getMonth() + (i - 1));
+                    const dueDate = new Date(startDate.getFullYear(), startDate.getMonth() + (i - 1), 1);
                     const key = getMonthKey(dueDate);
                     if (!pnlMap[key]) continue;
+                    if (firstKeyInRange == null) firstKeyInRange = key;
                     
                     const interestAmount = monthlyRate > 0 ? (remainingPrincipal * monthlyRate) : 0;
-                    const principalAmount = loan.monthlyPayment - interestAmount;
+                    const principalAmount = Math.max(0, monthlyPmt - interestAmount);
                     remainingPrincipal = Math.max(0, remainingPrincipal - principalAmount);
                     
-                    pnlMap[key].financingExpenses += Math.round(interestAmount * 100) / 100;
-                    pnlMap[key].financingItems.push({ 
-                        name: `ריבית: ${loan.lenderName}`, 
-                        amount: Math.round(interestAmount * 100) / 100, 
-                        date: dueDate 
-                    });
-                    
-                    pnlMap[key].loanPrincipal += Math.round(principalAmount * 100) / 100;
-                    pnlMap[key].loanPrincipalItems.push({ 
-                        name: `קרן: ${loan.lenderName}`, 
-                        amount: Math.round(principalAmount * 100) / 100, 
-                        date: dueDate 
-                    });
+                    const interestRounded = Math.round(interestAmount * 100) / 100;
+                    const principalRounded = Math.round(principalAmount * 100) / 100;
+                    if (interestRounded > 0) {
+                        pnlMap[key].financingExpenses += interestRounded;
+                        pnlMap[key].financingItems.push({ 
+                            name: `ריבית: ${loan.lenderName}`, 
+                            amount: interestRounded, 
+                            date: dueDate 
+                        });
+                        anyAdded = true;
+                    }
+                    if (principalRounded > 0) {
+                        pnlMap[key].loanPrincipal += principalRounded;
+                        pnlMap[key].loanPrincipalItems.push({ 
+                            name: `קרן: ${loan.lenderName}`, 
+                            amount: principalRounded, 
+                            date: dueDate 
+                        });
+                        anyAdded = true;
+                    }
+                }
+                // So loan appears in report even when all amounts are 0 (e.g. 0% loan or no payments in period)
+                if (!anyAdded && firstKeyInRange) {
+                    const dueDate = new Date(startDate.getFullYear(), startDate.getMonth(), 1);
+                    pnlMap[firstKeyInRange].financingItems.push({ name: `ריבית: ${loan.lenderName}`, amount: 0, date: dueDate });
+                    pnlMap[firstKeyInRange].loanPrincipalItems.push({ name: `קרן: ${loan.lenderName}`, amount: 0, date: dueDate });
                 }
             }
         });

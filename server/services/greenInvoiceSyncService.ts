@@ -18,6 +18,22 @@ export function giClientPhone(c: { phone?: string; mobile?: string }): string {
     return c.phone || c.mobile || '';
 }
 
+/** Parse GI created_at (ms number/string or ISO string) to Date for greenInvoiceCreatedAt. */
+function parseGiCreatedAt(v: unknown): Date | undefined {
+    if (v == null || v === '') return undefined;
+    if (typeof v === 'number' && !Number.isNaN(v)) {
+        const d = new Date(v);
+        return isNaN(d.getTime()) ? undefined : d;
+    }
+    if (typeof v === 'string') {
+        const trimmed = v.trim();
+        if (!trimmed) return undefined;
+        if (/^\d+$/.test(trimmed)) return parseGiCreatedAt(Number(trimmed));
+        const d = new Date(trimmed);
+        return isNaN(d.getTime()) ? undefined : d;
+    }
+    return undefined;
+}
 export type ApplyClientResult = { created?: Customer; updated?: Customer };
 
 /**
@@ -90,15 +106,20 @@ export async function applyGreenInvoiceClientToCustomer(
             }
         }
 
+        const giCreatedAt = parseGiCreatedAt((giClient as any).created_at ?? (giClient as any).createdAt);
         const updatedCustomerData: Customer = {
             ...existingCustomer,
             name: displayName,
             businessId: businessId || existingCustomer.businessId || '',
             address: fullAddress || giClient.address || existingCustomer.address || '',
+            addressStreet: giClient.address ?? existingCustomer.addressStreet ?? '',
+            addressCity: giClient.city ?? existingCustomer.addressCity ?? '',
+            addressZip: giClient.zip != null ? String(giClient.zip) : (existingCustomer.addressZip ?? ''),
             category: typeof giClient.category === 'string' ? giClient.category : (giClient.category ? String(giClient.category) : existingCustomer.category),
             notes: fullNotes,
             paymentTerms,
             greenInvoiceClientId: giClient.id,
+            ...(giCreatedAt && { greenInvoiceCreatedAt: giCreatedAt }),
         };
 
         if (giClient.contactPerson || giClientEmail(giClient) || giClientPhone(giClient)) {
@@ -149,12 +170,16 @@ export async function applyGreenInvoiceClientToCustomer(
         }
     }
 
+    const giCreatedAt = parseGiCreatedAt((giClient as any).created_at ?? (giClient as any).createdAt);
     const newCustomer: Customer = {
         id: `cust_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
         name: displayName,
         businessId: businessId,
         website: '',
         address: fullAddress || giClient.address || '',
+        addressStreet: giClient.address ?? '',
+        addressCity: giClient.city ?? '',
+        addressZip: giClient.zip != null ? String(giClient.zip) : '',
         category: typeof giClient.category === 'string' ? giClient.category : (giClient.category ? String(giClient.category) : 'לקוח מ-חשבונית ירוקה'),
         notes: fullNotes,
         isSpecial: false,
@@ -167,10 +192,11 @@ export async function applyGreenInvoiceClientToCustomer(
             isBillingContact: true,
             isDefault: true,
         }],
-        createdAt: giClient.created_at ? new Date(giClient.created_at) : new Date(),
+        createdAt: giCreatedAt ?? new Date(),
         paymentMethod: 'העברה בנקאית' as any,
         paymentTerms,
         greenInvoiceClientId: giClient.id,
+        ...(giCreatedAt && { greenInvoiceCreatedAt: giCreatedAt }),
     };
     const created = await createCustomer(newCustomer);
     return { created };

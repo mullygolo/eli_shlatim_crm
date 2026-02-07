@@ -438,23 +438,33 @@ const StrongNumberCard: React.FC<{
     const isEmployee = roleType === 'EMPLOYEE';
     const [lostDealsPeriod, setLostDealsPeriod] = useState<LostDealsPeriod>('THIS_MONTH');
     const [lostDealsModalOpen, setLostDealsModalOpen] = useState(false);
+    const [dailyModalOpen, setDailyModalOpen] = useState(false);
+    const [monthlyModalOpen, setMonthlyModalOpen] = useState(false);
+    const [yearlyModalOpen, setYearlyModalOpen] = useState(false);
+    const [collectionModalOpen, setCollectionModalOpen] = useState(false);
+    const [leadsModalOpen, setLeadsModalOpen] = useState(false);
+    const [quotesModalOpen, setQuotesModalOpen] = useState(false);
     useEffect(() => {
         if (!lostDealsModalOpen) return;
         const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setLostDealsModalOpen(false); };
         window.addEventListener('keydown', onKey);
         return () => window.removeEventListener('keydown', onKey);
     }, [lostDealsModalOpen]);
-    // Helper to calculate metrics for a filtered list of orders
+    // Helper to calculate metrics for a filtered list of orders (same logic as Orders page: profit % = רווח מהעלות)
     const calculateMetrics = (filteredOrders: Order[]): FinancialMetric => {
         const result = filteredOrders.reduce((acc, order) => {
-            const { totalAmount, profit } = calculateOrderTotals(order);
+            const { totalAmount, profit, totalCost } = calculateOrderTotals(order);
             acc.revenueExclVat += totalAmount;
             acc.profit += profit;
+            acc.totalCost += totalCost;
             return acc;
-        }, { revenueExclVat: 0, profit: 0 });
+        }, { revenueExclVat: 0, profit: 0, totalCost: 0 });
 
         const revenueInclVat = result.revenueExclVat * (1 + vatRate / 100);
-        const margin = result.revenueExclVat > 0 ? (result.profit / result.revenueExclVat) * 100 : 0;
+        // אחוז רווח מהעלות (כמו בעמוד הזמנות): (רווח / עלות) × 100
+        const margin = result.totalCost > 0
+            ? (result.profit / result.totalCost) * 100
+            : (result.revenueExclVat > 0 ? 100 : 0);
 
         return {
             revenueExclVat: result.revenueExclVat,
@@ -587,11 +597,30 @@ const StrongNumberCard: React.FC<{
         const lostDealsList = dedupeByOrderNumber(lostRaw);
         const lostDealsPreviousList = dedupeByOrderNumber(lostPrevRaw);
 
-        // Collection Stats Logic
+        // Collection: use deduplicated active deals (one per order number, like Today/Month/Year) so modal and counts match Orders page
+        const collectionDealsByNumber = new Map<string, Order>();
+        for (const order of activeDeals) {
+            const raw = (order.orderNumber != null && order.orderNumber !== '') ? String(order.orderNumber).trim() : '';
+            const key = raw !== '' ? raw.toUpperCase() : (order.id || '');
+            if (!key) continue;
+            const existing = collectionDealsByNumber.get(key);
+            if (!existing) {
+                collectionDealsByNumber.set(key, order);
+            } else {
+                const dNew = dateKeyForDedup(order) ? new Date(dateKeyForDedup(order) as string | Date).getTime() : 0;
+                const dOld = dateKeyForDedup(existing) ? new Date(dateKeyForDedup(existing) as string | Date).getTime() : 0;
+                if (dNew >= dOld) collectionDealsByNumber.set(key, order);
+            }
+        }
+        const collectionDeals = Array.from(collectionDealsByNumber.values());
+
+        // Collection Stats Logic (with order lists for modal drill-down)
         let collectionOverdue = { count: 0, amountInclVat: 0 };
         let collectionMonth = { count: 0, amountInclVat: 0 };
-        
-        activeDeals.forEach(order => {
+        const collectionOverdueOrders: Order[] = [];
+        const collectionThisMonthOrders: Order[] = [];
+
+        collectionDeals.forEach(order => {
             if (order.paymentStatus === PaymentStatus.PAID) return;
 
             // Logic for "Upon Completion"
@@ -601,13 +630,16 @@ const StrongNumberCard: React.FC<{
                 if (!config?.isCompleted) return;
             }
 
-            const { totalAmount } = calculateOrderTotals(order);
-            const totalInclVat = totalAmount * (1 + vatRate / 100);
-            
+            const { totalAmount, totalPaid } = calculateOrderTotals(order);
+            const orderVat = order.vatRate ?? vatRate;
+            const totalInclVat = totalAmount * (1 + orderVat / 100);
+            const balanceInclVat = Math.max(0, totalInclVat - totalPaid);
+            if (balanceInclVat < 0.01) return;
+
             // LOGIC CHANGE: Use dealStartDate for payment calculation if available
             const calculationBaseDate = order.dealStartDate || order.date;
             const dueDate = calculateDueDate(calculationBaseDate, order.paymentTerms);
-            
+
             // Normalize dates to midnight for comparison
             const dueDateClean = new Date(dueDate);
             dueDateClean.setHours(0,0,0,0);
@@ -616,12 +648,14 @@ const StrongNumberCard: React.FC<{
 
             if (dueDateClean < todayClean) {
                 collectionOverdue.count++;
-                collectionOverdue.amountInclVat += totalInclVat;
+                collectionOverdue.amountInclVat += balanceInclVat;
+                collectionOverdueOrders.push(order);
             } else {
                 // Check if due date is in current month/year
                 if (dueDateClean.getMonth() === todayClean.getMonth() && dueDateClean.getFullYear() === todayClean.getFullYear()) {
                     collectionMonth.count++;
-                    collectionMonth.amountInclVat += totalInclVat;
+                    collectionMonth.amountInclVat += balanceInclVat;
+                    collectionThisMonthOrders.push(order);
                 }
             }
         });
@@ -630,51 +664,64 @@ const StrongNumberCard: React.FC<{
             daily: calculateMetrics(dailyDeals),
             monthly: calculateMetrics(monthlyDeals),
             yearly: calculateMetrics(yearlyDeals),
+            dailyDealsList: dailyDeals,
+            monthlyDealsList: monthlyDeals,
+            yearlyDealsList: yearlyDeals,
             lost: calculateMetrics(lostDealsList),
             lostPrevious: calculateMetrics(lostDealsPreviousList),
             lostDealsList,
             lostPeriodLabel: lostDealsPeriod === 'THIS_MONTH' ? 'החודש' : lostDealsPeriod === 'LAST_MONTH' ? 'חודש שעבר' : '3 חודשים אחרונים',
             leads: untouchedLeads.length,
+            untouchedLeadsList: untouchedLeads,
             quotes: {
                 count: openQuotes.length,
-                ...calculateMetrics(openQuotes)
+                ...calculateMetrics(openQuotes),
+                list: openQuotes
             },
             collection: {
                 overdue: collectionOverdue,
-                thisMonth: collectionMonth
+                thisMonth: collectionMonth,
+                overdueOrders: collectionOverdueOrders,
+                thisMonthOrders: collectionThisMonthOrders
             }
         };
     }, [orders, statusConfigs, vatRate, lostDealsPeriod]);
 
     const formatCurrency = (val: number) => val.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 0, maximumFractionDigits: 0 });
     
-    const TimeFrameBlock = ({ title, data, colorClass, bgClass, hideProfitAndMargin }: { title: string, data: FinancialMetric, colorClass: string, bgClass: string; hideProfitAndMargin?: boolean }) => (
-        <div className={`p-4 rounded-xl border border-slate-100 flex flex-col justify-between min-h-[130px] hover:shadow-md transition-all ${bgClass}`}>
-            <div className="flex justify-between items-start mb-2">
-                <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider">{title}</h4>
-                <span className="text-xs bg-white/50 px-2 py-0.5 rounded-full text-slate-600 font-medium">{data.count} עסקאות</span>
-            </div>
-            
-            <div className="flex-grow flex flex-col justify-center mb-2">
-                <div className={`text-2xl font-black ${colorClass}`}>
-                    {formatCurrency(data.revenueExclVat)}
+    const TimeFrameBlock = ({ title, data, colorClass, bgClass, hideProfitAndMargin, onCardClick }: { title: string, data: FinancialMetric, colorClass: string, bgClass: string; hideProfitAndMargin?: boolean; onCardClick?: () => void }) => (
+            <div
+                className={`p-4 rounded-xl border border-slate-100 flex flex-col justify-between min-h-[130px] hover:shadow-md transition-all ${bgClass} ${onCardClick ? 'cursor-pointer focus:outline-none focus:ring-2 focus:ring-offset-1 focus:ring-indigo-300' : ''}`}
+                {...(onCardClick && {
+                    role: 'button',
+                    tabIndex: 0,
+                    onClick: onCardClick,
+                    onKeyDown: (e: React.KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onCardClick(); } },
+                })}
+            >
+                <div className="flex justify-between items-start mb-2">
+                    <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider">{title}</h4>
+                    <span className="text-xs bg-white/50 px-2 py-0.5 rounded-full text-slate-600 font-medium">{data.count} עסקאות</span>
                 </div>
-                <div className="text-[10px] text-slate-400 font-medium">לא כולל מע"מ</div>
-            </div>
-            
-            {!hideProfitAndMargin && (
-                <div className="space-y-1 pt-2 border-t border-slate-200/50">
-                    <div className="flex justify-between text-xs items-center">
-                        <span className="text-slate-500">רווח:</span>
-                        <span className="font-bold text-emerald-600">{formatCurrency(data.profit)}</span>
+                <div className="flex-grow flex flex-col justify-center mb-2">
+                    <div className={`text-2xl font-black ${colorClass}`}>
+                        {formatCurrency(data.revenueExclVat)}
                     </div>
-                    <div className="flex justify-between text-xs items-center">
-                        <span className="text-slate-500">אחוז:</span>
-                        <span className="font-medium text-slate-700 bg-white px-1.5 rounded">{data.margin.toFixed(1)}%</span>
-                    </div>
+                    <div className="text-[10px] text-slate-400 font-medium">לא כולל מע"מ</div>
                 </div>
-            )}
-        </div>
+                {!hideProfitAndMargin && (
+                    <div className="space-y-1 pt-2 border-t border-slate-200/50">
+                        <div className="flex justify-between text-xs items-center">
+                            <span className="text-slate-500">רווח:</span>
+                            <span className="font-bold text-emerald-600">{formatCurrency(data.profit)}</span>
+                        </div>
+                        <div className="flex justify-between text-xs items-center">
+                            <span className="text-slate-500">אחוז (רווח מהעלות):</span>
+                            <span className="font-medium text-slate-700 bg-white px-1.5 rounded">{data.margin.toFixed(1)}%</span>
+                        </div>
+                    </div>
+                )}
+            </div>
     );
 
     return (
@@ -694,12 +741,18 @@ const StrongNumberCard: React.FC<{
             </div>
             
             <div className="p-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-4 bg-white">
-                <TimeFrameBlock title="היום" data={stats.daily} colorClass="text-indigo-600" bgClass="bg-indigo-50/30" hideProfitAndMargin={isEmployee} />
-                <TimeFrameBlock title="החודש" data={stats.monthly} colorClass="text-blue-600" bgClass="bg-blue-50/30" hideProfitAndMargin={isEmployee} />
-                {!isEmployee && <TimeFrameBlock title="השנה" data={stats.yearly} colorClass="text-sky-700" bgClass="bg-sky-50/30" />}
+                <TimeFrameBlock title="היום" data={stats.daily} colorClass="text-indigo-600" bgClass="bg-indigo-50/30" hideProfitAndMargin={isEmployee} onCardClick={() => setDailyModalOpen(true)} />
+                <TimeFrameBlock title="החודש" data={stats.monthly} colorClass="text-blue-600" bgClass="bg-blue-50/30" hideProfitAndMargin={isEmployee} onCardClick={() => setMonthlyModalOpen(true)} />
+                {!isEmployee && <TimeFrameBlock title="השנה" data={stats.yearly} colorClass="text-sky-700" bgClass="bg-sky-50/30" onCardClick={() => setYearlyModalOpen(true)} />}
 
-                {/* Collection Stats (New) */}
-                <div className="bg-rose-50/40 border border-rose-100 p-4 rounded-xl flex flex-col justify-between min-h-[130px] hover:shadow-md transition-all">
+                {/* Collection Stats (New) - click opens modal */}
+                <div
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => setCollectionModalOpen(true)}
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setCollectionModalOpen(true); } }}
+                    className="bg-rose-50/40 border border-rose-100 p-4 rounded-xl flex flex-col justify-between min-h-[130px] hover:shadow-md transition-all cursor-pointer focus:outline-none focus:ring-2 focus:ring-rose-300 focus:ring-offset-1"
+                >
                     <div className="flex justify-between items-start mb-1">
                         <h4 className="text-xs font-bold text-rose-700 uppercase tracking-wider flex items-center gap-1">
                             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3">
@@ -721,8 +774,14 @@ const StrongNumberCard: React.FC<{
                     <div className="text-[9px] text-rose-400 text-center pt-1 mt-1 border-t border-rose-100">כולל מע"מ</div>
                 </div>
 
-                {/* Untouched Leads */}
-                <div className="bg-orange-50/40 border border-orange-100 p-4 rounded-xl flex flex-col justify-center items-center text-center min-h-[130px] hover:shadow-md transition-all group">
+                {/* Untouched Leads - click opens modal */}
+                <div
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => setLeadsModalOpen(true)}
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setLeadsModalOpen(true); } }}
+                    className="bg-orange-50/40 border border-orange-100 p-4 rounded-xl flex flex-col justify-center items-center text-center min-h-[130px] hover:shadow-md transition-all group cursor-pointer focus:outline-none focus:ring-2 focus:ring-orange-300 focus:ring-offset-1"
+                >
                     <div className="w-10 h-10 rounded-full bg-orange-100 text-orange-600 flex items-center justify-center mb-2 group-hover:scale-110 transition-transform">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6">
                             <path strokeLinecap="round" strokeLinejoin="round" d="M18 18.72a9.094 9.094 0 003.741-.479 3 3 0 00-4.682-2.72m.94 3.198l.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0112 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 016 18.719m12 0a5.971 5.971 0 00-.941-3.197m0 0A5.995 5.995 0 0012 12.75a5.995 5.995 0 00-5.058 2.772m0 0a3 3 0 00-4.681 2.72 8.986 8.986 0 003.74.477m.94-3.197a5.971 5.971 0 00-.94 3.197M15 6.75a3 3 0 11-6 0 3 3 0 016 0zm6 3a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0zm-13.5 0a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0z" />
@@ -733,8 +792,14 @@ const StrongNumberCard: React.FC<{
                     <div className="text-[10px] text-slate-400 mt-1">ממתינים לטיפול</div>
                 </div>
 
-                {/* Open Quotes */}
-                <div className="bg-purple-50/40 border border-purple-100 p-4 rounded-xl flex flex-col justify-between min-h-[130px] hover:shadow-md transition-all">
+                {/* Open Quotes - click opens modal */}
+                <div
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => setQuotesModalOpen(true)}
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setQuotesModalOpen(true); } }}
+                    className="bg-purple-50/40 border border-purple-100 p-4 rounded-xl flex flex-col justify-between min-h-[130px] hover:shadow-md transition-all cursor-pointer focus:outline-none focus:ring-2 focus:ring-purple-300 focus:ring-offset-1"
+                >
                     <div className="flex justify-between items-start">
                         <div>
                             <div className="text-3xl font-black text-purple-600">{stats.quotes.count}</div>
@@ -859,6 +924,258 @@ const StrongNumberCard: React.FC<{
                                     </tbody>
                                 </table>
                             </div>
+                        </div>
+                    </Modal>
+                )}
+
+                {/* Today's deals modal */}
+                {dailyModalOpen && (
+                    <Modal title="עסקאות שאושרו היום" onClose={() => setDailyModalOpen(false)}>
+                        <div className="overflow-x-auto max-h-[60vh] border border-slate-200 rounded-lg">
+                            <table className="min-w-full text-sm text-right">
+                                <thead className="bg-slate-50 text-slate-600 font-bold sticky top-0">
+                                    <tr>
+                                        <th className="px-3 py-2">הזמנה</th>
+                                        <th className="px-3 py-2">תיאור</th>
+                                        <th className="px-3 py-2">הכנסה</th>
+                                        <th className="px-3 py-2">רווח</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100">
+                                    {stats.dailyDealsList.length === 0 ? (
+                                        <tr><td colSpan={4} className="px-3 py-4 text-slate-500 text-center">אין עסקאות היום</td></tr>
+                                    ) : (
+                                        stats.dailyDealsList.map((order) => {
+                                            const { totalAmount, profit } = calculateOrderTotals(order);
+                                            return (
+                                                <tr key={order.id} className="hover:bg-indigo-50/50 cursor-pointer" onClick={() => { onNavigateToOrder?.(order.id); setDailyModalOpen(false); }}>
+                                                    <td className="px-3 py-2 font-medium text-primary">{order.orderNumber}</td>
+                                                    <td className="px-3 py-2 text-slate-700 max-w-[200px] truncate" title={order.description}>{order.description || '—'}</td>
+                                                    <td className="px-3 py-2 font-medium">{formatCurrency(totalAmount)}</td>
+                                                    <td className="px-3 py-2">{formatCurrency(profit)}</td>
+                                                </tr>
+                                            );
+                                        })
+                                    )}
+                                </tbody>
+                            </table>
+                        </div>
+                    </Modal>
+                )}
+
+                {/* Month deals modal */}
+                {monthlyModalOpen && (
+                    <Modal title="עסקאות החודש" onClose={() => setMonthlyModalOpen(false)}>
+                        <div className="overflow-x-auto max-h-[60vh] border border-slate-200 rounded-lg">
+                            <table className="min-w-full text-sm text-right">
+                                <thead className="bg-slate-50 text-slate-600 font-bold sticky top-0">
+                                    <tr>
+                                        <th className="px-3 py-2">הזמנה</th>
+                                        <th className="px-3 py-2">תיאור</th>
+                                        <th className="px-3 py-2">הכנסה</th>
+                                        <th className="px-3 py-2">רווח</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100">
+                                    {stats.monthlyDealsList.length === 0 ? (
+                                        <tr><td colSpan={4} className="px-3 py-4 text-slate-500 text-center">אין עסקאות בחודש</td></tr>
+                                    ) : (
+                                        stats.monthlyDealsList.map((order) => {
+                                            const { totalAmount, profit } = calculateOrderTotals(order);
+                                            return (
+                                                <tr key={order.id} className="hover:bg-blue-50/50 cursor-pointer" onClick={() => { onNavigateToOrder?.(order.id); setMonthlyModalOpen(false); }}>
+                                                    <td className="px-3 py-2 font-medium text-primary">{order.orderNumber}</td>
+                                                    <td className="px-3 py-2 text-slate-700 max-w-[200px] truncate" title={order.description}>{order.description || '—'}</td>
+                                                    <td className="px-3 py-2 font-medium">{formatCurrency(totalAmount)}</td>
+                                                    <td className="px-3 py-2">{formatCurrency(profit)}</td>
+                                                </tr>
+                                            );
+                                        })
+                                    )}
+                                </tbody>
+                            </table>
+                        </div>
+                    </Modal>
+                )}
+
+                {/* Year deals modal */}
+                {yearlyModalOpen && (
+                    <Modal title="עסקאות השנה" onClose={() => setYearlyModalOpen(false)}>
+                        <div className="overflow-x-auto max-h-[60vh] border border-slate-200 rounded-lg">
+                            <table className="min-w-full text-sm text-right">
+                                <thead className="bg-slate-50 text-slate-600 font-bold sticky top-0">
+                                    <tr>
+                                        <th className="px-3 py-2">הזמנה</th>
+                                        <th className="px-3 py-2">תיאור</th>
+                                        <th className="px-3 py-2">הכנסה</th>
+                                        <th className="px-3 py-2">רווח</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100">
+                                    {stats.yearlyDealsList.length === 0 ? (
+                                        <tr><td colSpan={4} className="px-3 py-4 text-slate-500 text-center">אין עסקאות השנה</td></tr>
+                                    ) : (
+                                        stats.yearlyDealsList.map((order) => {
+                                            const { totalAmount, profit } = calculateOrderTotals(order);
+                                            return (
+                                                <tr key={order.id} className="hover:bg-sky-50/50 cursor-pointer" onClick={() => { onNavigateToOrder?.(order.id); setYearlyModalOpen(false); }}>
+                                                    <td className="px-3 py-2 font-medium text-primary">{order.orderNumber}</td>
+                                                    <td className="px-3 py-2 text-slate-700 max-w-[200px] truncate" title={order.description}>{order.description || '—'}</td>
+                                                    <td className="px-3 py-2 font-medium">{formatCurrency(totalAmount)}</td>
+                                                    <td className="px-3 py-2">{formatCurrency(profit)}</td>
+                                                </tr>
+                                            );
+                                        })
+                                    )}
+                                </tbody>
+                            </table>
+                        </div>
+                    </Modal>
+                )}
+
+                {/* Collection modal - overdue + this month */}
+                {collectionModalOpen && (
+                    <Modal title="גבייה" onClose={() => setCollectionModalOpen(false)}>
+                        <div className="space-y-4">
+                            <section>
+                                <h4 className="text-sm font-bold text-rose-700 mb-2">בחריגה ({stats.collection.overdueOrders.length})</h4>
+                                <div className="overflow-x-auto max-h-[40vh] border border-slate-200 rounded-lg">
+                                    <table className="min-w-full text-sm text-right">
+                                        <thead className="bg-slate-50 text-slate-600 font-bold sticky top-0">
+                                            <tr>
+                                                <th className="px-3 py-2">הזמנה</th>
+                                                <th className="px-3 py-2">תיאור</th>
+                                                <th className="px-3 py-2">יתרה לתשלום</th>
+                                                <th className="px-3 py-2">מועד תשלום</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-slate-100">
+                                            {stats.collection.overdueOrders.length === 0 ? (
+                                                <tr><td colSpan={4} className="px-3 py-4 text-slate-500 text-center">אין חריגות</td></tr>
+                                            ) : (
+                                                stats.collection.overdueOrders.map((order) => {
+                                                    const { totalAmount, totalPaid } = calculateOrderTotals(order);
+                                                    const orderVat = order.vatRate ?? vatRate;
+                                                    const dueWithVat = totalAmount * (1 + orderVat / 100);
+                                                    const balanceInclVat = Math.max(0, dueWithVat - totalPaid);
+                                                    const baseDate = order.dealStartDate || order.date;
+                                                    const dueDate = calculateDueDate(baseDate, order.paymentTerms);
+                                                    return (
+                                                        <tr key={order.id} className="hover:bg-rose-50/50 cursor-pointer" onClick={() => { onNavigateToOrder?.(order.id); setCollectionModalOpen(false); }}>
+                                                            <td className="px-3 py-2 font-medium text-primary">{order.orderNumber}</td>
+                                                            <td className="px-3 py-2 text-slate-700 max-w-[200px] truncate" title={order.description}>{order.description || '—'}</td>
+                                                            <td className="px-3 py-2 font-medium">{formatCurrency(balanceInclVat)}</td>
+                                                            <td className="px-3 py-2">{new Date(dueDate).toLocaleDateString('he-IL')}</td>
+                                                        </tr>
+                                                    );
+                                                })
+                                            )}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </section>
+                            <section>
+                                <h4 className="text-sm font-bold text-slate-700 mb-2">החודש ({stats.collection.thisMonthOrders.length})</h4>
+                                <div className="overflow-x-auto max-h-[40vh] border border-slate-200 rounded-lg">
+                                    <table className="min-w-full text-sm text-right">
+                                        <thead className="bg-slate-50 text-slate-600 font-bold sticky top-0">
+                                            <tr>
+                                                <th className="px-3 py-2">הזמנה</th>
+                                                <th className="px-3 py-2">תיאור</th>
+                                                <th className="px-3 py-2">יתרה לתשלום</th>
+                                                <th className="px-3 py-2">מועד תשלום</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-slate-100">
+                                            {stats.collection.thisMonthOrders.length === 0 ? (
+                                                <tr><td colSpan={4} className="px-3 py-4 text-slate-500 text-center">אין תשלומים החודש</td></tr>
+                                            ) : (
+                                                stats.collection.thisMonthOrders.map((order) => {
+                                                    const { totalAmount, totalPaid } = calculateOrderTotals(order);
+                                                    const orderVat = order.vatRate ?? vatRate;
+                                                    const dueWithVat = totalAmount * (1 + orderVat / 100);
+                                                    const balanceInclVat = Math.max(0, dueWithVat - totalPaid);
+                                                    const baseDate = order.dealStartDate || order.date;
+                                                    const dueDate = calculateDueDate(baseDate, order.paymentTerms);
+                                                    return (
+                                                        <tr key={order.id} className="hover:bg-slate-50 cursor-pointer" onClick={() => { onNavigateToOrder?.(order.id); setCollectionModalOpen(false); }}>
+                                                            <td className="px-3 py-2 font-medium text-primary">{order.orderNumber}</td>
+                                                            <td className="px-3 py-2 text-slate-700 max-w-[200px] truncate" title={order.description}>{order.description || '—'}</td>
+                                                            <td className="px-3 py-2 font-medium">{formatCurrency(balanceInclVat)}</td>
+                                                            <td className="px-3 py-2">{new Date(dueDate).toLocaleDateString('he-IL')}</td>
+                                                        </tr>
+                                                    );
+                                                })
+                                            )}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </section>
+                        </div>
+                    </Modal>
+                )}
+
+                {/* Leads modal */}
+                {leadsModalOpen && (
+                    <Modal title="לידים חדשים – ממתינים לטיפול" onClose={() => setLeadsModalOpen(false)}>
+                        <div className="overflow-x-auto max-h-[60vh] border border-slate-200 rounded-lg">
+                            <table className="min-w-full text-sm text-right">
+                                <thead className="bg-slate-50 text-slate-600 font-bold sticky top-0">
+                                    <tr>
+                                        <th className="px-3 py-2">הזמנה</th>
+                                        <th className="px-3 py-2">תיאור</th>
+                                        <th className="px-3 py-2">סטטוס</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100">
+                                    {stats.untouchedLeadsList.length === 0 ? (
+                                        <tr><td colSpan={3} className="px-3 py-4 text-slate-500 text-center">אין לידים ממתינים</td></tr>
+                                    ) : (
+                                        stats.untouchedLeadsList.map((order) => (
+                                            <tr key={order.id} className="hover:bg-orange-50/50 cursor-pointer" onClick={() => { onNavigateToOrder?.(order.id); setLeadsModalOpen(false); }}>
+                                                <td className="px-3 py-2 font-medium text-primary">{order.orderNumber}</td>
+                                                <td className="px-3 py-2 text-slate-700 max-w-[200px] truncate" title={order.description}>{order.description || '—'}</td>
+                                                <td className="px-3 py-2">{order.orderStatus || '—'}</td>
+                                            </tr>
+                                        ))
+                                    )}
+                                </tbody>
+                            </table>
+                        </div>
+                    </Modal>
+                )}
+
+                {/* Quotes modal */}
+                {quotesModalOpen && (
+                    <Modal title="הצעות מחיר" onClose={() => setQuotesModalOpen(false)}>
+                        <div className="overflow-x-auto max-h-[60vh] border border-slate-200 rounded-lg">
+                            <table className="min-w-full text-sm text-right">
+                                <thead className="bg-slate-50 text-slate-600 font-bold sticky top-0">
+                                    <tr>
+                                        <th className="px-3 py-2">הזמנה</th>
+                                        <th className="px-3 py-2">תיאור</th>
+                                        <th className="px-3 py-2">פוטנציאל</th>
+                                        <th className="px-3 py-2">רווח צפוי</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100">
+                                    {stats.quotes.list.length === 0 ? (
+                                        <tr><td colSpan={4} className="px-3 py-4 text-slate-500 text-center">אין הצעות מחיר פתוחות</td></tr>
+                                    ) : (
+                                        stats.quotes.list.map((order) => {
+                                            const { totalAmount, profit } = calculateOrderTotals(order);
+                                            return (
+                                                <tr key={order.id} className="hover:bg-purple-50/50 cursor-pointer" onClick={() => { onNavigateToOrder?.(order.id); setQuotesModalOpen(false); }}>
+                                                    <td className="px-3 py-2 font-medium text-primary">{order.orderNumber}</td>
+                                                    <td className="px-3 py-2 text-slate-700 max-w-[200px] truncate" title={order.description}>{order.description || '—'}</td>
+                                                    <td className="px-3 py-2 font-medium">{formatCurrency(totalAmount)}</td>
+                                                    <td className="px-3 py-2">{formatCurrency(profit)}</td>
+                                                </tr>
+                                            );
+                                        })
+                                    )}
+                                </tbody>
+                            </table>
                         </div>
                     </Modal>
                 )}

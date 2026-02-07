@@ -103,7 +103,7 @@ export function deserializeDates(obj: any): any {
     if (typeof obj === 'object') {
         const deserialized: any = {};
         for (const key in obj) {
-            if (key.includes('Date') || key.includes('date') || key === 'timestamp' || key === 'createdAt' || key === 'updatedAt' || key === 'uploadedAt' || key === 'completedAt' || key === 'startDate' || key === 'endDate' || key === 'dueDate' || key === 'repaymentDate' || key === 'effectiveDate' || key === 'expectedCloseDate' || key === 'clockIn' || key === 'clockOut' || key === 'requestedClockIn' || key === 'requestedClockOut' || key === 'changedAt') {
+            if (key.includes('Date') || key.includes('date') || key === 'timestamp' || key === 'createdAt' || key === 'updatedAt' || key === 'uploadedAt' || key === 'completedAt' || key === 'startDate' || key === 'endDate' || key === 'dueDate' || key === 'repaymentDate' || key === 'effectiveDate' || key === 'expectedCloseDate' || key === 'clockIn' || key === 'clockOut' || key === 'requestedClockIn' || key === 'requestedClockOut' || key === 'changedAt' || key === 'greenInvoiceCreatedAt') {
                 deserialized[key] = obj[key] ? new Date(obj[key]) : undefined;
             } else {
                 deserialized[key] = deserializeDates(obj[key]);
@@ -471,16 +471,42 @@ export async function createOrder(order: Order): Promise<Order> {
     }
 }
 
+/** Stable JSON stringify (sorted keys) so object comparison is order-independent. */
+function stableStringify(obj: any): string {
+    if (obj === null || typeof obj !== 'object') return JSON.stringify(obj);
+    if (Array.isArray(obj)) return '[' + obj.map(stableStringify).join(',') + ']';
+    const keys = Object.keys(obj).sort();
+    return '{' + keys.map(k => JSON.stringify(k) + ':' + stableStringify(obj[k])).join(',') + '}';
+}
+
+/** Compare two orders for equality (omit updatedAt/_id, serialize dates). No real change => do not bump updatedAt. */
+function orderContentEquals(existing: any, incoming: Order): boolean {
+    const omit = (o: any, keys: string[]) => {
+        const r = { ...o };
+        keys.forEach(k => delete r[k]);
+        return r;
+    };
+    const a = stableStringify(serializeDates(omit(existing, ['updatedAt', '_id'])));
+    const b = stableStringify(serializeDates(omit(incoming, ['updatedAt'])));
+    return a === b;
+}
+
 export async function updateOrder(order: Order): Promise<Order> {
     try {
+        const existing = await getOrderById(order.id);
+        if (!existing) {
+            console.error('updateOrder: order not found', order.id);
+            throw new Error('Order not found');
+        }
+        if (orderContentEquals(existing, order)) {
+            return existing;
+        }
         const database = await getDb();
         const collection = database.collection<Order>('orders');
         const withUpdatedAt = { ...order, updatedAt: new Date() };
         const serialized = serializeDates(withUpdatedAt);
 
-        // Remove _id from serialized object to avoid MongoDB immutable field error
         const { _id, ...serializedWithoutId } = serialized as any;
-
         await collection.replaceOne({ id: order.id }, serializedWithoutId);
         return deserializeDates(serialized) as Order;
     } catch (error) {
@@ -792,18 +818,32 @@ export async function getOrdersPaginated(filters: any, page: number = 1, limit: 
         const collection = database.collection<Order>('orders');
         const [statusConfigs, customers] = await Promise.all([getStatusConfigs(), getCustomers()]);
 
-        const sortBy = filters.sortBy === 'dueDate' || filters.sortBy === 'updatedAt' ? filters.sortBy : 'date';
+const sortBy = filters.sortBy === 'dueDate' || filters.sortBy === 'updatedAt' ? filters.sortBy : 'date';
         const { orders: allMatchingOrders, allMatchingDocs } = await getFilteredOrderSet(collection, filters, statusConfigs, customers);
+
+        // When sorting by due date, show only orders with balance due (יתרה לתשלום > 0)
+        let ordersToUse = allMatchingOrders;
+        if (sortBy === 'dueDate') {
+            ordersToUse = allMatchingOrders.filter(order => {
+                const config = statusConfigs.find(c => c.label === order.orderStatus);
+                if (!config?.isActiveDeal) return false;
+                const { totalAmount, totalPaid } = calculateOrderTotals(order);
+                const currentVat = order.vatRate ?? vatRate;
+                const dueWithVat = totalAmount * (1 + currentVat / 100);
+                return (dueWithVat - totalPaid) > 0.01;
+            });
+        }
+
         const dateFilterType = filters.dateFilterType || 'ORDER_DATE';
         const dateFieldForSort = dateFilterType === 'DEAL_DATE' ? 'dealStartDate' : 'date';
 
-        // Calculate summary totals: when we hit the load limit, stream ALL matching orders so totals match "תשלום לספקים"
+        // Calculate summary totals from the set we will display (ordersToUse)
         let summaryTotals: { totalAmount: number; totalProfit: number; totalBalance: number; totalCost: number; totalAmountInclVat: number; totalBalanceInclVat: number };
-        if (allMatchingDocs.length >= ORDERS_PAGINATED_LOAD_LIMIT && !filters.searchTerm) {
+        if (allMatchingDocs.length >= ORDERS_PAGINATED_LOAD_LIMIT && !filters.searchTerm && sortBy !== 'dueDate') {
             const { query } = buildOrdersQuery(filters, customers);
             summaryTotals = await streamOrdersSummaryTotals(collection, query, dateFieldForSort, dateFilterType, filters, statusConfigs, vatRate);
         } else {
-            summaryTotals = allMatchingOrders.reduce((acc, order) => {
+            summaryTotals = ordersToUse.reduce((acc, order) => {
                 const { totalAmount, profit, totalCost, totalPaid } = calculateOrderTotals(order);
                 const currentOrderVat = order.vatRate ?? vatRate;
                 acc.totalAmount += totalAmount;
@@ -823,30 +863,30 @@ export async function getOrdersPaginated(filters: any, page: number = 1, limit: 
 
         // Sort orders: single pass by sortBy
         if (sortBy === 'dueDate') {
-            allMatchingOrders.sort((a, b) => {
+            ordersToUse.sort((a, b) => {
                 const dateA = calculateDueDate(a.dealStartDate || a.date, a.paymentTerms);
                 const dateB = calculateDueDate(b.dealStartDate || b.date, b.paymentTerms);
                 return dateA.getTime() - dateB.getTime();
             });
         } else if (sortBy === 'updatedAt') {
-            allMatchingOrders.sort((a, b) => {
+            ordersToUse.sort((a, b) => {
                 const uA = a.updatedAt ? new Date(a.updatedAt).getTime() : (a.createdAt ? new Date(a.createdAt).getTime() : 0);
                 const uB = b.updatedAt ? new Date(b.updatedAt).getTime() : (b.createdAt ? new Date(b.createdAt).getTime() : 0);
                 return uB - uA;
             });
         } else {
             const dateKey = dateFilterType === 'ORDER_DATE' ? 'date' : 'dealStartDate';
-            allMatchingOrders.sort((a, b) => {
+            ordersToUse.sort((a, b) => {
                 const dA = a[dateKey] ? new Date(a[dateKey]!).getTime() : 0;
                 const dB = b[dateKey] ? new Date(b[dateKey]!).getTime() : 0;
                 return dB - dA;
             });
         }
-        
+
         // Paginate
-        const totalCount = allMatchingOrders.length;
+        const totalCount = ordersToUse.length;
         const skip = (page - 1) * limit;
-        const paginatedOrders = allMatchingOrders.slice(skip, skip + limit);
+        const paginatedOrders = ordersToUse.slice(skip, skip + limit);
         return {
             orders: paginatedOrders,
             totalCount,

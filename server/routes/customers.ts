@@ -186,9 +186,17 @@ router.post('/sync-from-greeninvoice', async (req, res) => {
             }
         }
 
-        const activeGiIds = new Set(greenInvoiceClients.map((c: { id: string }) => c.id));
+        // Only active GI clients count; merged/deactivated clients are excluded so we detect orphans
+        const activeGiIds = new Set(
+            greenInvoiceClients
+                .filter((c: { id: string; active?: boolean }) => (c as any).active !== false)
+                .map((c: { id: string }) => c.id)
+        );
         const afterSyncCustomers = await getCustomers();
         const orphans = afterSyncCustomers.filter((c: Customer) => c.greenInvoiceClientId && !activeGiIds.has(c.greenInvoiceClientId));
+        if (orphans.length > 0) {
+            console.log(`GreenInvoice sync: ${orphans.length} orphan(s) (GI client merged/deactivated):`, orphans.map((c: Customer) => ({ name: c.name, giId: c.greenInvoiceClientId })));
+        }
         const mergedFromSync: string[] = [];
         const unlinkedFromSync: string[] = [];
         for (const orphan of orphans) {

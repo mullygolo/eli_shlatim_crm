@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { verifyToken, AuthRequest } from '../middleware/auth.js';
 import {
     createClient,
     getClient,
@@ -611,7 +612,7 @@ router.post('/orders/generate-draft-url', async (req, res) => {
 });
 
 // Create document from order
-router.post('/orders/create-document', async (req, res) => {
+router.post('/orders/create-document', verifyToken, async (req: AuthRequest, res) => {
     try {
         console.log('Received request to create document:', { body: req.body, path: req.path });
         const { orderId, documentType, customerId, draft, paymentsOverride, sourceDocumentId }: {
@@ -622,6 +623,11 @@ router.post('/orders/create-document', async (req, res) => {
         
         if (!orderId || !documentType || !customerId) {
             return res.status(400).json({ error: 'Missing required fields: orderId, documentType, or customerId' });
+        }
+
+        // משתמש שאינו מנהל מערכת — מותר רק הצעת מחיר וחשבונית מס
+        if (req.user && req.user.roleType !== 'ADMIN' && documentType !== 'estimate' && documentType !== 'invoice') {
+            return res.status(403).json({ error: 'הנפקת סוג מסמך זה מותרת למנהל מערכת בלבד. ניתן להנפיק רק הצעת מחיר וחשבונית מס.' });
         }
 
         // חשבונית ירוקה 2443: נא למלא את פרטי הצ'ק — ולידציה לפני שליחה

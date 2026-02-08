@@ -81,15 +81,20 @@ export async function getDb(): Promise<Db> {
     }
 }
 
-// Helper function to serialize dates for MongoDB
+// Helper function to serialize dates for MongoDB (omit undefined so BSON accepts the doc)
 function serializeDates(obj: any): any {
-    if (obj === null || obj === undefined) return obj;
+    if (obj === undefined) return undefined;
+    if (obj === null) return null;
     if (obj instanceof Date) return obj.toISOString();
-    if (Array.isArray(obj)) return obj.map(serializeDates);
+    if (Array.isArray(obj)) {
+        const arr = obj.map(serializeDates).filter((x: any) => x !== undefined);
+        return arr;
+    }
     if (typeof obj === 'object') {
         const serialized: any = {};
         for (const key in obj) {
-            serialized[key] = serializeDates(obj[key]);
+            const val = serializeDates(obj[key]);
+            if (val !== undefined) serialized[key] = val;
         }
         return serialized;
     }

@@ -177,8 +177,10 @@ router.put('/:id', verifyToken, async (req: AuthRequest, res) => {
         }
         const order = await updateOrder(req.body);
         res.json(order);
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to update order' });
+    } catch (error: any) {
+        const message = error?.message || 'Failed to update order';
+        console.error('PUT /orders/:id error:', message, error);
+        res.status(500).json({ error: 'Failed to update order', detail: message });
     }
 });
 

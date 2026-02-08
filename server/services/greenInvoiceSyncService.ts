@@ -204,7 +204,7 @@ export async function applyGreenInvoiceClientToCustomer(
 
 /**
  * Find a CRM customer that can serve as merge target (veteran) for an "orphan" whose GI client was merged/deactivated.
- * Returns a customer with same name or businessId that has greenInvoiceClientId in the active set (the survivor in GI).
+ * Tries: same businessId, same name, name contains, then single active-GI fallback.
  */
 export function findSiblingForMerge(
     orphan: Customer,
@@ -213,11 +213,22 @@ export function findSiblingForMerge(
 ): Customer | null {
     const nameNorm = (orphan.name || '').trim().toLowerCase();
     const businessIdNorm = (orphan.businessId || '').trim();
-    return allCustomers.find(c => {
-        if (c.id === orphan.id) return false;
-        if (!c.greenInvoiceClientId || !activeGiIds.has(c.greenInvoiceClientId)) return false;
-        const sameName = (c.name || '').trim().toLowerCase() === nameNorm;
-        const sameBiz = businessIdNorm && (c.businessId || '').trim() === businessIdNorm;
-        return sameName || sameBiz;
-    }) || null;
+    const withActiveGi = allCustomers.filter(
+        c => c.id !== orphan.id && c.greenInvoiceClientId && activeGiIds.has(c.greenInvoiceClientId)
+    );
+    if (withActiveGi.length === 0) return null;
+
+    if (businessIdNorm) {
+        const sameBiz = withActiveGi.filter(c => (c.businessId || '').trim() === businessIdNorm);
+        if (sameBiz.length >= 1) return sameBiz[0];
+    }
+    const exactName = withActiveGi.find(c => (c.name || '').trim().toLowerCase() === nameNorm);
+    if (exactName) return exactName;
+    const nameContains = withActiveGi.filter(c => {
+        const cName = (c.name || '').trim().toLowerCase();
+        return nameNorm && cName && (cName.includes(nameNorm) || nameNorm.includes(cName));
+    });
+    if (nameContains.length === 1) return nameContains[0];
+    if (withActiveGi.length === 1) return withActiveGi[0];
+    return null;
 }

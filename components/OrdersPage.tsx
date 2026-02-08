@@ -2314,7 +2314,7 @@ const OrderForm: React.FC<{
     };
     
     const currentStatusConfig = statusConfigs.find(c => c.label === formData.orderStatus);
-    const isActiveDeal = currentStatusConfig ? currentStatusConfig.isActiveDeal : false;
+    const isActiveDeal = currentStatusConfig ? (currentStatusConfig.isActiveDeal || currentStatusConfig.isCompleted) : false;
     const hasDealDate = !!formData.dealStartDate;
     const iDealActiveAndDated = isActiveDeal && hasDealDate;
 
@@ -2411,6 +2411,7 @@ const OrderForm: React.FC<{
                     balanceDue={balanceDue}
                     balanceToIssue={Math.max(0, totalDueWithVat - (invoiceSummary?.netInvoiced ?? 0))}
                     isActiveDeal={isActiveDeal}
+                    allowOnlyEstimateAndInvoice={!isAdmin}
                     mode={createDocumentModalMode}
                     fromDocumentType={createDocumentModalFromType}
                     sourceDocumentId={createDocumentModalSourceId}
@@ -3540,6 +3541,8 @@ function getOrdersViewFromStorage(): Partial<{
 const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLocal, customers, setCustomers, suppliers, setSuppliers, employees, addActivity, initialOpenOrderId, onOrderOpened, openNewOrderRequest, onClearedOpenNewOrderRequest, statusConfigs, getNextOrderNumber, vatRate }) => {
     const { user } = useAuth();
     const isAdmin = user?.roleType === 'ADMIN';
+    /** שם המשתמש המחובר — לכתיבה ביומן (שינוי סטטוס מהטבלה וכו') */
+    const loggedInUserName = (user && employees.find(e => e.id === user.id)?.name) || user?.name || 'מערכת';
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [isImportModalOpen, setIsImportModalOpen] = useState(false);
     const [editingOrder, setEditingOrder] = useState<Order | null>(null);
@@ -3549,6 +3552,8 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
     const [searchTerm, setSearchTerm] = useState(() => savedView.searchTerm ?? '');
     const [debouncedSearchTerm, setDebouncedSearchTerm] = useState(() => savedView.searchTerm ?? '');
     const abortControllerRef = useRef<AbortController | null>(null);
+    /** Order IDs with in-flight status change; refetch result must not overwrite these. */
+    const pendingStatusUpdateIdsRef = useRef<Set<string>>(new Set());
     const [customerFilter, setCustomerFilter] = useState<string[]>(() => Array.isArray(savedView.customerFilter) ? savedView.customerFilter : []);
     const [customerIsImportPlaceholderOnly, setCustomerIsImportPlaceholderOnly] = useState(() => savedView.customerIsImportPlaceholderOnly ?? false);
     const [supplierFilter, setSupplierFilter] = useState<string[]>(() => Array.isArray(savedView.supplierFilter) ? savedView.supplierFilter : []);
@@ -3569,7 +3574,10 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
     const [loading, setLoading] = useState(false);
     const [paginatedOrders, setPaginatedOrders] = useState<Order[]>([]);
     const [summaryTotals, setSummaryTotals] = useState({ totalAmount: 0, totalProfit: 0, totalBalance: 0, totalCost: 0, totalAmountInclVat: 0, totalBalanceInclVat: 0 });
-    const [exportingExcel, setExportingExcel] = useState(false); 
+    const [exportingExcel, setExportingExcel] = useState(false);
+    /** When set, show confirm modal for status change; on confirm run update (like Save order). */
+    const [pendingStatusChange, setPendingStatusChange] = useState<{ orderId: string; order: Order; newStatus: string } | null>(null);
+    const [statusChangeSaving, setStatusChangeSaving] = useState(false);
 
     const customerOptions = useMemo(() => customers.map(c => ({ value: c.id, label: c.name })), [customers]);
     const supplierOptions = useMemo(() => suppliers.map(s => ({ value: s.id, label: s.name })), [suppliers]);
@@ -3662,9 +3670,10 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
         setCurrentPage(1); // Reset to first page
     };
 
-    const handleStatusChange = async (orderId: string, newStatus: string) => {
-        const originalOrder = paginatedOrders.find(o => o.id === orderId) || orders.find(o => o.id === orderId);
+    const handleStatusChange = async (orderId: string, newStatus: string, orderSnapshot?: Order) => {
+        const originalOrder = orderSnapshot ?? paginatedOrders.find(o => o.id === orderId) ?? orders.find(o => o.id === orderId);
         if (!originalOrder || originalOrder.orderStatus === newStatus) return;
+        pendingStatusUpdateIdsRef.current.add(orderId);
         const config = statusConfigs.find(c => c.label === newStatus);
         const isNowActiveDeal = config ? config.isActiveDeal : false;
         let newDealStartDate = originalOrder.dealStartDate;
@@ -3702,18 +3711,23 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
         addActivity(`סטטוס הזמנה ${originalOrder.orderNumber} שונה ל: ${newStatus}`, { entityType: 'order', entityId: orderId, action: 'status_change', metadata: { orderNumber: originalOrder.orderNumber, oldStatus: originalOrder.orderStatus, newStatus } });
         setPaginatedOrders(prev => prev.map(o => o.id === orderId ? updatedOrder : o));
         
-        mongoService.updateOrder(updatedOrder)
+        const updatePromise = mongoService.updateOrder(updatedOrder)
             .then((savedOrder) => {
-                // Use server response as source of truth (e.g. normalized dates)
                 setOrdersLocal(prev => prev.map(o => o.id === orderId ? savedOrder : o));
                 setPaginatedOrders(prev => prev.map(o => o.id === orderId ? savedOrder : o));
+                return savedOrder;
             })
             .catch((error) => {
                 console.error('Error updating order status:', error);
                 alert('שגיאה בעדכון סטטוס הזמנה');
                 setOrdersLocal(prev => prev.map(o => o.id === orderId ? originalOrder : o));
                 setPaginatedOrders(prev => prev.map(o => o.id === orderId ? originalOrder : o));
+                throw error;
+            })
+            .finally(() => {
+                pendingStatusUpdateIdsRef.current.delete(orderId);
             });
+        return updatePromise;
     };
 
     const handleDraftCreate = (draftOrder: Order) => {
@@ -3745,7 +3759,17 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
             };
             const result = await mongoService.getOrdersPaginated(filters, currentPage, pageSize, { signal });
             if (signal.aborted) return;
-            setPaginatedOrders(result.orders);
+            const pending = pendingStatusUpdateIdsRef.current;
+            setPaginatedOrders(prev => {
+                if (pending.size === 0) return result.orders;
+                return result.orders.map(o => {
+                    if (pending.has(o.id)) {
+                        const cur = prev.find(x => x.id === o.id);
+                        return cur ?? o;
+                    }
+                    return o;
+                });
+            });
             setTotalCount(result.totalCount);
             setSummaryTotals(result.summaryTotals || { totalAmount: 0, totalProfit: 0, totalBalance: 0, totalCost: 0, totalAmountInclVat: 0, totalBalanceInclVat: 0 });
         } catch (error: any) {
@@ -3784,7 +3808,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
             if (sortBy === 'dueDate') {
                 deduped = deduped.filter(order => {
                     const config = statusConfigs?.find(c => c.label === order.orderStatus);
-                    if (!config?.isActiveDeal) return false;
+                    if (!config?.isActiveDeal && !config?.isCompleted) return false;
                     const { totalAmount, totalPaid } = calculateOrderTotals(order);
                     const currentVat = order.vatRate ?? (vatRate ?? 0);
                     const dueWithVat = totalAmount * (1 + currentVat / 100);
@@ -3819,7 +3843,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                     acc.totalCost += t.totalCost;
                     acc.totalProfit += t.profit;
                     const config = statusConfigs?.find(c => c.label === order.orderStatus);
-                    const isActiveDeal = config ? config.isActiveDeal : true;
+                    const isActiveDeal = config ? (config.isActiveDeal || config.isCompleted) : false;
                     if (isActiveDeal) {
                         const dueWithVat = t.totalAmount * (1 + (vatRate || 0) / 100);
                         acc.totalBalance += Math.max(0, t.totalAmount - t.totalPaid);
@@ -3843,7 +3867,8 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
         } else {
             refetchOrders();
         }
-    }, [orders, currentPage, pageSize, customerFilter, supplierFilter, employeeFilter, orderStatusFilter, paymentStatusFilter, monthFilter, yearFilter, startDateFilter, endDateFilter, dateFilterType, debouncedSearchTerm, sortBy, customerIsImportPlaceholderOnly, statusConfigs, vatRate]);
+    // Intentionally omit `orders` from deps: refetch only when filters/pagination change. Status change updates paginatedOrders optimistically; including orders would trigger refetch and overwrite the update before the API responds.
+    }, [currentPage, pageSize, customerFilter, supplierFilter, employeeFilter, orderStatusFilter, paymentStatusFilter, monthFilter, yearFilter, startDateFilter, endDateFilter, dateFilterType, debouncedSearchTerm, sortBy, customerIsImportPlaceholderOnly, statusConfigs, vatRate]);
 
     useEffect(() => {
         if (initialOpenOrderId) {
@@ -4039,7 +4064,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
     const buildOrderRow = (order: Order): (string | number)[] => {
         const { totalAmount, profit, totalCost, totalPaid } = calculateOrderTotals(order);
         const statusConfig = statusConfigs.find(c => c.label === order.orderStatus);
-        const isActiveDeal = statusConfig ? statusConfig.isActiveDeal : true;
+        const isActiveDeal = statusConfig ? (statusConfig.isActiveDeal || statusConfig.isCompleted) : false;
         const currentOrderVat = order.vatRate ?? vatRate;
         const totalDueWithVat = totalAmount * (1 + currentOrderVat / 100);
         const balanceDue = isActiveDeal ? Math.max(0, totalDueWithVat - totalPaid) : 0;
@@ -4108,7 +4133,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                 (acc, order) => {
                     const { totalAmount, profit, totalCost, totalPaid } = calculateOrderTotals(order);
                     const statusConfig = statusConfigs.find(c => c.label === order.orderStatus);
-                    const isActiveDeal = statusConfig ? statusConfig.isActiveDeal : true;
+                    const isActiveDeal = statusConfig ? (statusConfig.isActiveDeal || statusConfig.isCompleted) : false;
                     const currentOrderVat = order.vatRate ?? vatRate;
                     const totalDueWithVat = totalAmount * (1 + currentOrderVat / 100);
                     const balanceDue = isActiveDeal ? Math.max(0, totalDueWithVat - totalPaid) : 0;
@@ -4301,7 +4326,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                             const customer = customers.find(c => c.id === order.customerId);
                             const primaryContact = customer?.contacts.find(c => c.isBillingContact) || customer?.contacts[0];
                             const statusConfig = statusConfigs.find(c => c.label === order.orderStatus);
-                            const isActiveDeal = statusConfig ? statusConfig.isActiveDeal : true;
+                            const isActiveDeal = statusConfig ? (statusConfig.isActiveDeal || statusConfig.isCompleted) : false;
                             
                             const currentOrderVat = order.vatRate ?? vatRate;
                             const totalDueWithVat = totalAmount * (1 + currentOrderVat / 100);
@@ -4354,9 +4379,9 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                                     <td className={`px-4 py-4 whitespace-nowrap text-sm ${dateFilterType === 'DEAL_DATE' ? 'font-bold text-indigo-700 bg-indigo-50/20' : 'text-slate-500'}`}>
                                         {displayDate ? new Date(displayDate).toLocaleDateString('he-IL') : '—'}
                                     </td>
-                                    <td className="px-4 py-4 whitespace-nowrap text-sm">
+                                    <td className="px-4 py-4 whitespace-nowrap text-sm" onClick={e => e.stopPropagation()}>
                                         <div className="relative">
-                                            <select value={order.orderStatus} onChange={(e) => handleStatusChange(order.id, e.target.value)} className={`appearance-none w-full cursor-pointer px-2 py-1 text-xs leading-5 font-semibold rounded-full focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary text-center ${getStatusBadge(order.orderStatus)}`} aria-label={`שנה סטטוס עבור הזמנה ${order.orderNumber}`}>
+                                            <select value={order.orderStatus} onChange={(e) => { const v = e.target.value; if (v !== order.orderStatus) setPendingStatusChange({ orderId: order.id, order, newStatus: v }); }} className={`appearance-none w-full cursor-pointer px-2 py-1 text-xs leading-5 font-semibold rounded-full focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary text-center ${getStatusBadge(order.orderStatus)}`} aria-label={`שנה סטטוס עבור הזמנה ${order.orderNumber}`}>
                                                 {statusConfigs.sort((a,b) => a.orderIndex - b.orderIndex).map(config => (
                                                     <option key={config.id} value={config.label}>{config.label}</option>
                                                 ))}
@@ -4590,6 +4615,43 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                         readOnly={!!orderLockedByOther}
                         lockedByUserName={orderLockedByOther?.userName}
                     />
+                </Modal>
+            )}
+            {pendingStatusChange && (
+                <Modal title="שינוי סטטוס הזמנה" onClose={() => !statusChangeSaving && setPendingStatusChange(null)} size="lg">
+                    <p className="text-slate-700 mb-4">
+                        האם לשנות את סטטוס ההזמנה <strong>{pendingStatusChange.order.orderNumber}</strong> ל־<strong>{pendingStatusChange.newStatus}</strong>?
+                    </p>
+                    <div className="flex gap-3 justify-end">
+                        <button
+                            type="button"
+                            onClick={() => setPendingStatusChange(null)}
+                            disabled={statusChangeSaving}
+                            className="px-4 py-2 rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                        >
+                            ביטול
+                        </button>
+                        <button
+                            type="button"
+                            onClick={async () => {
+                                setStatusChangeSaving(true);
+                                try {
+                                    await handleStatusChange(pendingStatusChange.orderId, pendingStatusChange.newStatus, pendingStatusChange.order);
+                                    setPendingStatusChange(null);
+                                } catch (err: any) {
+                                    console.error('Status change failed:', err);
+                                    const msg = err?.message || 'שגיאה בשמירת שינוי הסטטוס. נסה שוב.';
+                                    alert(msg);
+                                } finally {
+                                    setStatusChangeSaving(false);
+                                }
+                            }}
+                            disabled={statusChangeSaving}
+                            className="px-4 py-2 rounded-lg bg-primary text-white hover:bg-primary/90 disabled:opacity-50"
+                        >
+                            {statusChangeSaving ? 'שומר...' : 'אישור'}
+                        </button>
+                    </div>
                 </Modal>
             )}
             {isImportModalOpen && (

@@ -33,6 +33,8 @@ interface CreateDocumentModalProps {
     isLoading?: boolean;
     /** האם ההזמנה בסטטוס עסקה פעילה; כאשר false — חשבונית מס/חשבונית מס+קבלה מושבתות עם הודעה */
     isActiveDeal?: boolean;
+    /** כאשר true — הצעת מחיר וחשבונית מס לחיצים; שאר הסוגים מוצגים אך מושבתים עם הודעה לבצע דרך חשבונית ירוקה */
+    allowOnlyEstimateAndInvoice?: boolean;
 }
 
 // + הראשי — אין קבלה מתוך חשבונית (רק מתוך + של חשבונית קיימת)
@@ -59,7 +61,7 @@ const FROM_ESTIMATE_TYPES: { value: GreenInvoiceDocumentType; label: string; des
     { value: 'receipt', label: 'קבלה', description: 'הנפקת קבלה' }
 ];
 
-const CreateDocumentModal: React.FC<CreateDocumentModalProps> = ({ order, customer, onClose, onCreate, mode = 'full', fromDocumentType, sourceDocumentId, balanceDue = 0, balanceToIssue, isLoading = false, isActiveDeal = true }) => {
+const CreateDocumentModal: React.FC<CreateDocumentModalProps> = ({ order, customer, onClose, onCreate, mode = 'full', fromDocumentType, sourceDocumentId, balanceDue = 0, balanceToIssue, isLoading = false, isActiveDeal = true, allowOnlyEstimateAndInvoice = false }) => {
     const [selectedType, setSelectedType] = useState<GreenInvoiceDocumentType | ''>('');
     const [selectedMethod, setSelectedMethod] = useState<'api' | 'window'>('api');
     const [receiptPayments, setReceiptPayments] = useState<ReceiptPaymentItem[]>([]);
@@ -69,7 +71,7 @@ const CreateDocumentModal: React.FC<CreateDocumentModalProps> = ({ order, custom
     const documentTypes = mode === 'from-document'
         ? (fromEstimate ? FROM_ESTIMATE_TYPES : FROM_DOCUMENT_TYPES)
         : FULL_TYPES;
-    const resolvedTypes = documentTypes.map((t) => {
+    let resolvedTypes = documentTypes.map((t) => {
         let disabled = t.disabled ?? (t.value === 'credit_invoice' ? !order.greenInvoiceId : false);
         if (!disabled && (t.value === 'invoice' || t.value === 'invoice_receipt') && fullyInvoiced) {
             disabled = true;
@@ -81,6 +83,13 @@ const CreateDocumentModal: React.FC<CreateDocumentModalProps> = ({ order, custom
         if (fromEstimate) return { ...t, disabled: disabled };
         return { ...t, disabled };
     });
+    if (allowOnlyEstimateAndInvoice) {
+        resolvedTypes = resolvedTypes.map((t) => ({
+            ...t,
+            disabled: t.value === 'estimate' || t.value === 'invoice' ? t.disabled : true
+        }));
+    }
+    const isRestrictedByRole = (value: string) => allowOnlyEstimateAndInvoice && value !== 'estimate' && value !== 'invoice';
 
     const isReceiptOrInvoiceReceipt = selectedType === 'receipt' || selectedType === 'invoice_receipt';
     // קבלה מתוך חשבונית או חשבונית מס/קבלה מהכפתור הראשי — מציגים טופס פרטי תקבול
@@ -174,7 +183,11 @@ const CreateDocumentModal: React.FC<CreateDocumentModalProps> = ({ order, custom
                                 <div className="flex-1">
                                     <div className="font-medium text-slate-800">{type.label}</div>
                                     <div className="text-sm text-slate-500 mt-1">{type.description}</div>
-                                    {type.disabled && !isActiveDeal && (type.value === 'invoice' || type.value === 'invoice_receipt') ? (
+                                    {type.disabled && isRestrictedByRole(type.value) ? (
+                                        <div className="text-xs text-amber-600 mt-1">
+                                            להנפקה זמנית — נא לבצע דרך חשבונית ירוקה
+                                        </div>
+                                    ) : type.disabled && !isActiveDeal && (type.value === 'invoice' || type.value === 'invoice_receipt') ? (
                                         <div className="text-xs text-slate-600 mt-1">
                                             עסקה לא פעילה – אין להנפיק חשבונית/קבלה
                                         </div>

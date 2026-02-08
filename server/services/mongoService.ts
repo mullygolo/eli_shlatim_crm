@@ -1608,7 +1608,15 @@ export async function getStatusConfigs(): Promise<OrderStatusConfiguration[]> {
         const database = await getDb();
         const collection = database.collection<OrderStatusConfiguration>('statusConfigs');
         const docs = await collection.find({}).sort({ orderIndex: 1 }).toArray();
-        return docs.map(deserializeDates) as OrderStatusConfiguration[];
+        const result: OrderStatusConfiguration[] = [];
+        for (const doc of docs) {
+            try {
+                result.push(deserializeDates(doc) as OrderStatusConfiguration);
+            } catch (e) {
+                console.warn('getStatusConfigs: skip invalid doc', doc?.id ?? doc?._id, e);
+            }
+        }
+        return result;
     } catch (error) {
         console.error('Error fetching status configs:', error);
         throw error;

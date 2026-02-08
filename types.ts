@@ -474,6 +474,8 @@ export interface Debt {
     isPaid?: boolean;
     includesVat?: boolean; // NEW
     isVatExempt?: boolean; // NEW
+    attachment?: Attachment;
+    attachments?: Attachment[];
 }
 
 export interface ReceivablePayment {
@@ -499,6 +501,7 @@ export interface Receivable {
     isPaid?: boolean;
     includesVat?: boolean;
     isVatExempt?: boolean;
+    attachments?: Attachment[];
 }
 
 export interface EquityInvestment {
@@ -569,11 +572,13 @@ export interface AttendanceRecord {
     note?: string;
     certificate?: Attachment; // Added: Optional medical certificate
     correctionRequest?: {
-        requestedClockIn: Date;
-        requestedClockOut: Date;
+        requestedClockIn?: Date;
+        requestedClockOut?: Date;
+        /** אחד או כמה זוגות כניסה–יציאה באותה בקשה. אם קיים, יש להשתמש בו במקום requestedClockIn/Out */
+        segments?: Array<{ requestedClockIn: Date; requestedClockOut: Date }>;
         requestedStatus: AttendanceStatus;
         reason: string;
-        certificate?: Attachment; // Added: Optional certificate during request
+        certificate?: Attachment;
     }
 }
 

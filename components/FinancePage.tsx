@@ -6,6 +6,7 @@ import Modal from './Modal';
 import PnLReport from './PnLReport';
 import * as mongoService from '../services/mongoService';
 import { useAsyncAction } from '../hooks/useAsyncAction';
+import { useAuth } from '../contexts/AuthContext';
 
 // Error Boundary Component
 class ErrorBoundary extends Component<
@@ -881,8 +882,10 @@ const CheckCenter: React.FC<{
     receivables: Receivable[];
     setReceivables: React.Dispatch<React.SetStateAction<Receivable[]>>;
     addActivity: (description: string, options?: import('../types').AddActivityOptions) => void;
-}> = ({ orders, setOrders, fixedExpenses, setFixedExpenses, variableExpenses, setVariableExpenses, debts, setDebts, receivables, setReceivables, addActivity }) => {
-    const [tab, setTab] = useState<'INCOMING' | 'OUTGOING'>('INCOMING');
+    /** When true, show only incoming checks (for MANAGER/EMPLOYEE). */
+    incomingOnly?: boolean;
+}> = ({ orders, setOrders, fixedExpenses, setFixedExpenses, variableExpenses, setVariableExpenses, debts, setDebts, receivables, setReceivables, addActivity, incomingOnly = false }) => {
+    const [tab, setTab] = useState<'INCOMING' | 'OUTGOING'>(incomingOnly ? 'INCOMING' : 'INCOMING');
     // SMART FILTER: Active (Actionable), Urgent (Overdue/Bounced), Archive (History), All
     const [smartFilter, setSmartFilter] = useState<'ACTIVE' | 'URGENT' | 'ARCHIVE' | 'ALL'>('ACTIVE');
     const [searchQuery, setSearchQuery] = useState('');
@@ -901,7 +904,8 @@ const CheckCenter: React.FC<{
         try {
             setLoadingChecks(true);
             const filters: any = {};
-            if (tab) filters.tab = tab;
+            if (incomingOnly) filters.tab = 'INCOMING';
+            else if (tab) filters.tab = tab;
             if (smartFilter) filters.smartFilter = smartFilter;
             if (searchQuery) filters.searchQuery = searchQuery;
             
@@ -922,7 +926,7 @@ const CheckCenter: React.FC<{
         } finally {
             setLoadingChecks(false);
         }
-    }, [tab, smartFilter, searchQuery, checksCurrentPage, checksPageSize]);
+    }, [tab, smartFilter, searchQuery, checksCurrentPage, checksPageSize, incomingOnly]);
     
     // Load paginated checks when filters or pagination change
     useEffect(() => {
@@ -1222,10 +1226,12 @@ const CheckCenter: React.FC<{
             </div>
 
             <div className="bg-white rounded-lg shadow-sm border border-slate-200 overflow-hidden">
+                {!incomingOnly && (
                 <div className="flex border-b border-slate-200 px-4 pt-2 bg-slate-50/50">
                     <button onClick={() => { setTab('INCOMING'); setChecksCurrentPage(1); }} className={`px-4 py-3 font-black text-sm border-b-2 transition-colors ${tab === 'INCOMING' ? 'border-green-500 text-green-700' : 'border-transparent text-slate-500'}`}>צ'קים נכנסים</button>
                     <button onClick={() => { setTab('OUTGOING'); setChecksCurrentPage(1); }} className={`px-4 py-3 font-black text-sm border-b-2 transition-colors ${tab === 'OUTGOING' ? 'border-red-500 text-red-700' : 'border-transparent text-slate-500'}`}>צ'קים יוצאים</button>
                 </div>
+                )}
                 
                 {/* SMART LIFECYCLE FILTERS */}
                 <div className="p-4 border-b border-slate-200 bg-white grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -1458,6 +1464,9 @@ const CheckSeriesGenerator: React.FC<{
 const FinancePage: React.FC<FinancePageProps> = ({ 
     fixedExpenses, setFixedExpenses, variableExpenses, setVariableExpenses, loans, setLoans, debts, setDebts, receivables, setReceivables, equity, setEquity, addActivity, vatRate, orders, setOrders, employees, attendanceRecords, statusConfigs, payrollOverrides, onNavigateToOrder
 }) => {
+    const { user } = useAuth();
+    const isChecksOnlyUser = user?.roleType === 'MANAGER' || user?.roleType === 'EMPLOYEE';
+
     const [activeTab, setActiveTab] = useState<'FIXED' | 'VARIABLE' | 'LOANS' | 'DEBTS' | 'RECEIVABLES' | 'EQUITY' | 'CHECKS' | 'PNL'>('PNL');
     const [pnlOrders, setPnlOrders] = useState<Order[] | null>(null);
     const [isModalOpen, setIsModalOpen] = useState(false);
@@ -1469,6 +1478,8 @@ const FinancePage: React.FC<FinancePageProps> = ({
     const [selectedLoanForAmortization, setSelectedLoanForAmortization] = useState<Loan | null>(null);
     const [selectedCheckForDebt, setSelectedCheckForDebt] = useState<{check: AggregatedCheck, viewOnly: boolean} | null>(null);
     const [viewingLoanDoc, setViewingLoanDoc] = useState<Attachment | null>(null);
+    const [viewingAttachmentList, setViewingAttachmentList] = useState<Attachment[] | null>(null);
+    const [viewingAttachmentIndex, setViewingAttachmentIndex] = useState(0);
     
     // Preview state for manual loan calculation
     const [showLoanPreview, setShowLoanPreview] = useState(false);
@@ -2000,8 +2011,8 @@ const FinancePage: React.FC<FinancePageProps> = ({
              setLoanForm({ lenderName: '', principalAmount: 0, interestRate: 0, monthlyPayment: 0, durationMonths: 12, paymentsMade: 0, startDate: new Date(), schedule: [] });
              setShowLoanPreview(false);
         }
-        else if (type === 'DEBTS') setDebtForm({ name: '', amount: 0, createdAt: new Date(), dueDate: new Date(), description: '', payments: [], includesVat: true, isVatExempt: false });
-        else if (type === 'RECEIVABLES') setReceivableForm({ name: '', amount: 0, createdAt: new Date(), dueDate: new Date(), description: '', payments: [], includesVat: true, isVatExempt: false });
+        else if (type === 'DEBTS') setDebtForm({ name: '', amount: 0, createdAt: new Date(), dueDate: new Date(), description: '', payments: [], includesVat: true, isVatExempt: false, attachments: [] });
+        else if (type === 'RECEIVABLES') setReceivableForm({ name: '', amount: 0, createdAt: new Date(), dueDate: new Date(), description: '', payments: [], includesVat: true, isVatExempt: false, attachments: [] });
         else if (type === 'EQUITY') {
             setEquityForm({ investorName: '', amount: 0, type: 'הון בעלים', date: new Date(), transactionType: 'DEPOSIT' });
             setIsNewInvestor(uniqueInvestorNames.length === 0);
@@ -2054,10 +2065,13 @@ const FinancePage: React.FC<FinancePageProps> = ({
 
     const handleEditDebt = (debt: Debt) => {
         setEditingId(debt.id);
+        const attachments = debt.attachments ?? (debt.attachment ? [debt.attachment] : []);
         setDebtForm({
             ...debt,
             createdAt: new Date(debt.createdAt),
             dueDate: new Date(debt.dueDate),
+            attachments,
+            attachment: undefined,
         });
         setIsModalOpen(true);
     };
@@ -2068,6 +2082,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
             ...receivable,
             createdAt: new Date(receivable.createdAt),
             dueDate: new Date(receivable.dueDate),
+            attachments: receivable.attachments ?? [],
         });
         setIsModalOpen(true);
     };
@@ -2386,6 +2401,54 @@ const FinancePage: React.FC<FinancePageProps> = ({
         }
     };
 
+    const readFileAsAttachment = (file: File): Promise<Attachment> => {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                if (event.target?.result) {
+                    resolve({
+                        id: `att_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
+                        fileName: file.name,
+                        dataUrl: event.target.result as string,
+                        type: file.type,
+                    });
+                } else reject(new Error('Failed to read file'));
+            };
+            reader.onerror = () => reject(reader.error);
+            reader.readAsDataURL(file);
+        });
+    };
+
+    const handleDebtFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const files = e.target.files;
+        if (!files || files.length === 0) return;
+        const current = debtForm.attachments ?? (debtForm.attachment ? [debtForm.attachment] : []);
+        const newAttachments: Attachment[] = [];
+        for (let i = 0; i < files.length; i++) {
+            try {
+                const att = await readFileAsAttachment(files[i]);
+                newAttachments.push(att);
+            } catch (_) { /* skip failed */ }
+        }
+        setDebtForm(prev => ({ ...prev, attachments: [...current, ...newAttachments], attachment: undefined }));
+        e.target.value = '';
+    };
+
+    const handleReceivableFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const files = e.target.files;
+        if (!files || files.length === 0) return;
+        const current = receivableForm.attachments ?? [];
+        const newAttachments: Attachment[] = [];
+        for (let i = 0; i < files.length; i++) {
+            try {
+                const att = await readFileAsAttachment(files[i]);
+                newAttachments.push(att);
+            } catch (_) { /* skip failed */ }
+        }
+        setReceivableForm(prev => ({ ...prev, attachments: [...current, ...newAttachments] }));
+        e.target.value = '';
+    };
+
     const handleUpdateFixedFormCheck = (index: number, field: string, value: any) => {
         const updatedChecks = [...(fixedForm.checks || [])];
         const check = { ...updatedChecks[index] };
@@ -2489,6 +2552,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
                 setLoans(prev => [...prev, saved]);
             }
         } else if (activeTab === 'DEBTS') {
+            const attachments = debtForm.attachments ?? (debtForm.attachment ? [debtForm.attachment] : []);
             const newItem = { 
                 ...debtForm, 
                 id: editingId || `db_${Date.now()}`, 
@@ -2496,7 +2560,9 @@ const FinancePage: React.FC<FinancePageProps> = ({
                 dueDate: new Date(debtForm.dueDate || new Date()), 
                 payments: debtForm.payments || [], 
                 includesVat: debtForm.includesVat ?? true, 
-                isVatExempt: debtForm.isVatExempt ?? false 
+                isVatExempt: debtForm.isVatExempt ?? false,
+                attachments,
+                attachment: undefined,
             } as Debt;
             if (editingId) {
                 const saved = await mongoService.updateDebt(newItem);
@@ -2616,12 +2682,20 @@ const FinancePage: React.FC<FinancePageProps> = ({
         </div>
     );
 
-    const renderFilePreview = (file: Attachment) => {
+    const closeViewer = () => {
+        setViewingLoanDoc(null);
+        setViewingAttachmentList(null);
+    };
+
+    const renderFilePreview = (file: Attachment, list?: Attachment[] | null, index?: number) => {
         const isImage = file.type.startsWith('image/');
         const isPdf = file.type === 'application/pdf' || file.fileName.toLowerCase().endsWith('.pdf');
+        const hasMultiple = list && list.length > 1 && index !== undefined;
+        const currentNum = (index ?? 0) + 1;
+        const totalNum = list?.length ?? 1;
 
         return (
-            <Modal title={`צפייה במסמך: ${file.fileName}`} onClose={() => setViewingLoanDoc(null)} size="5xl">
+            <Modal title={`צפייה במסמך: ${file.fileName}`} onClose={closeViewer} size="5xl">
                 <div className="flex flex-col h-[75vh]">
                     <div className="flex-1 bg-slate-100 rounded overflow-hidden flex items-center justify-center p-0 relative">
                         {isImage ? (
@@ -2642,23 +2716,49 @@ const FinancePage: React.FC<FinancePageProps> = ({
                             </div>
                         )}
                     </div>
-                    {(isImage || isPdf) && (
-                        <div className="mt-4 flex justify-between items-center p-2 bg-slate-50 border rounded border-slate-200">
-                            <span className="text-sm font-medium text-slate-500">{file.fileName}</span>
-                            <a href={file.dataUrl} download={file.fileName} className="text-primary font-bold hover:underline flex items-center gap-1">
-                                <DownloadIcon className="w-4 h-4"/>
-                                הורד קובץ
-                            </a>
+                    <div className="mt-4 flex flex-wrap justify-between items-center gap-2 p-2 bg-slate-50 border rounded border-slate-200">
+                        <div className="flex items-center gap-3">
+                            {hasMultiple && (
+                                <div className="flex items-center gap-2">
+                                    <button type="button" onClick={() => setViewingAttachmentIndex(Math.max(0, index! - 1))} disabled={index === 0} className="px-3 py-1 rounded bg-white border border-slate-300 text-sm font-bold disabled:opacity-50 disabled:cursor-not-allowed">← קודם</button>
+                                    <span className="text-sm font-medium text-slate-600">קובץ {currentNum} מתוך {totalNum}</span>
+                                    <button type="button" onClick={() => setViewingAttachmentIndex(Math.min(list!.length - 1, index! + 1))} disabled={index === list!.length - 1} className="px-3 py-1 rounded bg-white border border-slate-300 text-sm font-bold disabled:opacity-50 disabled:cursor-not-allowed">הבא →</button>
+                                </div>
+                            )}
+                            {(isImage || isPdf) && <span className="text-sm font-medium text-slate-500">{file.fileName}</span>}
                         </div>
-                    )}
+                        <a href={file.dataUrl} download={file.fileName} className="text-primary font-bold hover:underline flex items-center gap-1">
+                            <DownloadIcon className="w-4 h-4"/>
+                            הורד קובץ
+                        </a>
+                    </div>
                 </div>
             </Modal>
         );
     };
 
+    const currentViewingFile = viewingAttachmentList ? viewingAttachmentList[viewingAttachmentIndex] : viewingLoanDoc;
+
+    if (isChecksOnlyUser) {
+        return (
+            <div className="space-y-6 pb-12">
+                {currentViewingFile && renderFilePreview(currentViewingFile, viewingAttachmentList, viewingAttachmentList ? viewingAttachmentIndex : undefined)}
+                <div className="bg-white rounded-lg shadow-md border border-slate-200 overflow-hidden">
+                    <div className="px-6 py-4 border-b border-slate-200 bg-slate-50/50">
+                        <h2 className="text-lg font-black text-slate-800">ניהול צ'קים נכנסים</h2>
+                        <p className="text-sm text-slate-500 mt-0.5">צפייה ועדכון סטטוס לצ'קים שנכנסו מלקוחות וחייבים</p>
+                    </div>
+                    <div className="p-6 min-h-[400px]">
+                        <CheckCenter orders={orders} setOrders={setOrders} fixedExpenses={fixedExpenses} setFixedExpenses={setFixedExpenses} variableExpenses={variableExpenses} setVariableExpenses={setVariableExpenses} debts={debts} setDebts={setDebts} receivables={receivables} setReceivables={setReceivables} addActivity={addActivity} incomingOnly={true} />
+                    </div>
+                </div>
+            </div>
+        );
+    }
+
     return (
         <div className="space-y-6 pb-12">
-            {viewingLoanDoc && renderFilePreview(viewingLoanDoc)}
+            {currentViewingFile && renderFilePreview(currentViewingFile, viewingAttachmentList, viewingAttachmentList ? viewingAttachmentIndex : undefined)}
             <div className="grid grid-cols-2 lg:grid-cols-6 gap-4">
                 <div className="bg-white p-4 rounded-lg shadow-sm border-t-4 border-blue-500">
                     <h3 className="text-xs font-black text-slate-500 uppercase tracking-tighter">קבועות (ברוטו)</h3>
@@ -3181,7 +3281,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                                         <td className="px-6 py-5 text-slate-400 font-mono text-center">₪{(debt.gross - net).toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
                                                         <td className="px-6 py-5 font-black text-slate-900 bg-purple-50/10 text-center">₪{debt.gross.toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
                                                         <td className="px-6 py-5 text-center">{debt.isFullyPaid ? <span className="text-green-600 font-black bg-green-50 px-3 py-1 rounded-full border border-green-100 text-xs">שולם</span> : <div className="flex flex-col items-center"><span className="text-red-600 font-black text-lg leading-none">₪{debt.remaining.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>{debt.paid > 0.1 && <span className="text-[10px] text-blue-600 font-bold mt-1">שולם חלקית (₪{debt.paid.toLocaleString()})</span>}</div>}</td>
-                                                        <td className="px-6 py-5 text-left"><div className="flex gap-3 justify-end items-center">{!debt.isFullyPaid && <button onClick={() => { setSelectedDebtForPayment(debt); setIsPaymentModalOpen(true); }} className="text-white bg-purple-600 px-4 py-1.5 rounded-lg font-black text-xs shadow-lg hover:bg-purple-700 transition-all">בצע החזר</button>}<button onClick={() => handleEditDebt(debt)} className="text-slate-300 hover:text-blue-500"><EditIcon className="w-5 h-5"/></button></div></td>
+                                                        <td className="px-6 py-5 text-left"><div className="flex gap-3 justify-end items-center">{!debt.isFullyPaid && <button onClick={() => { setSelectedDebtForPayment(debt); setIsPaymentModalOpen(true); }} className="text-white bg-purple-600 px-4 py-1.5 rounded-lg font-black text-xs shadow-lg hover:bg-purple-700 transition-all">בצע החזר</button>}{((): boolean => { const list = debt.attachments ?? (debt.attachment ? [debt.attachment] : []); return list.length > 0; })() && (() => { const list = debt.attachments ?? (debt.attachment ? [debt.attachment] : []); return (<span className="relative inline-flex"><button onClick={(e) => { e.stopPropagation(); setViewingAttachmentList(list); setViewingAttachmentIndex(0); setViewingLoanDoc(list[0]); }} className="p-2 bg-purple-50 text-purple-600 rounded-lg hover:bg-purple-100 transition-colors" title={list.length > 1 ? `צפה במסמכים (${list.length})` : 'צפה במסמך'}><svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg></button>{list.length > 1 && <span className="absolute -top-0.5 -right-0.5 bg-purple-600 text-white text-[10px] font-black rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1">{list.length}</span>}</span>); })()}<button onClick={() => handleEditDebt(debt)} className="text-slate-300 hover:text-blue-500"><EditIcon className="w-5 h-5"/></button></div></td>
                                                     </tr>
                                                     {isExpanded && debt.payments && debt.payments.length > 0 && (
                                                         <tr className="bg-slate-50/30"><td colSpan={9} className="px-6 py-4"><div className="bg-white rounded border border-slate-200 shadow-inner overflow-hidden"><table className="min-w-full text-xs text-right"><thead className="bg-slate-50 text-slate-500 font-bold uppercase"><tr><th className="px-4 py-2">תאריך</th><th className="px-4 py-2">סכום</th><th className="px-4 py-2">שיטה</th><th className="px-4 py-2">אסמכתא</th><th className="px-4 py-2">סטטוס</th><th className="px-4 py-2">הערה</th><th className="px-4 py-2"></th></tr></thead><tbody className="divide-y divide-slate-100">{debt.payments.map(p => (<tr key={p.id} className="hover:bg-slate-50 group"><td className="px-4 py-2">{new Date(p.date).toLocaleDateString('he-IL')}</td><td className="px-4 py-2 font-bold text-green-700">₪{p.amount.toLocaleString()}</td><td className="px-4 py-2">{p.method}</td><td className="px-4 py-2 font-mono">{p.reference || '-'}</td><td className="px-4 py-2"><button onClick={() => {const agCheck: AggregatedCheck = { uniqueId: p.id, type: 'OUTGOING', date: new Date(p.date), repaymentDate: p.repaymentDate ? new Date(p.repaymentDate) : new Date(p.date), amount: p.amount, reference: p.reference || '-', entityName: `חוב: ${debt.name}`, status: p.status || 'CLEARED', statusHistory: p.statusHistory || [], sources: [{ orderId: 'DEBT', orderNumber: 'DEBT', paymentId: p.id, sourceType: 'debt', debtId: debt.id, amount: p.amount }] }; setSelectedCheckForDebt({ check: agCheck, viewOnly: false });}} className={`px-2 py-0.5 rounded text-[10px] font-bold shadow-sm ${['BOUNCED', 'CANCELED', 'RETURNED'].includes(p.status || '') ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>{p.status === 'CLEARED' ? 'נפרע' : p.status === 'PENDING' ? 'ממתין' : p.status || 'שולם'}</button></td><td className="px-4 py-2 text-slate-500 max-w-xs truncate">{p.note || '-'}</td><td className="px-4 py-2 text-left"><button onClick={() => handleDeleteDebtPayment(debt.id, p.id)} className="text-red-300 hover:text-red-500 p-1 opacity-0 group-hover:opacity-100 transition-opacity"><DeleteIcon className="w-3.5 h-3.5"/></button></td></tr>))}</tbody></table></div></td></tr>
@@ -3309,7 +3409,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                                         <td className="px-6 py-5 text-slate-500 font-medium text-center"><span className={rec.isOverdue ? 'text-red-600 font-bold' : ''}>{new Date(rec.dueDate).toLocaleDateString('he-IL')}</span></td>
                                                         <td className="px-6 py-5 font-black text-slate-900 text-center">₪{rec.gross.toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
                                                         <td className="px-6 py-5 text-center">{rec.isFullyPaid ? <span className="text-green-600 font-black bg-green-50 px-3 py-1 rounded-full border border-green-100 text-xs">נגבה במלואו</span> : <div className="flex flex-col items-center"><span className="text-indigo-600 font-black text-lg leading-none">₪{rec.remaining.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>{rec.collected > 0.1 && <span className="text-[10px] text-green-600 font-bold mt-1">נגבה חלקית (₪{rec.collected.toLocaleString()})</span>}</div>}</td>
-                                                        <td className="px-6 py-5 text-left"><div className="flex gap-3 justify-end items-center">{!rec.isFullyPaid && <button onClick={() => { setSelectedReceivableForCollection(rec); setIsPaymentModalOpen(true); }} className="text-white bg-indigo-600 px-4 py-1.5 rounded-lg font-black text-xs shadow-lg hover:bg-indigo-700 transition-all">דווח גבייה</button>}<button onClick={() => handleEditReceivable(rec)} className="text-slate-300 hover:text-blue-500"><EditIcon className="w-5 h-5"/></button></div></td>
+                                                        <td className="px-6 py-5 text-left"><div className="flex gap-3 justify-end items-center">{!rec.isFullyPaid && <button onClick={() => { setSelectedReceivableForCollection(rec); setIsPaymentModalOpen(true); }} className="text-white bg-indigo-600 px-4 py-1.5 rounded-lg font-black text-xs shadow-lg hover:bg-indigo-700 transition-all">דווח גבייה</button>}{(rec.attachments?.length ?? 0) > 0 && (() => { const list = rec.attachments ?? []; return (<span className="relative inline-flex"><button onClick={(e) => { e.stopPropagation(); setViewingAttachmentList(list); setViewingAttachmentIndex(0); setViewingLoanDoc(list[0]); }} className="p-2 bg-indigo-50 text-indigo-600 rounded-lg hover:bg-indigo-100 transition-colors" title={list.length > 1 ? `צפה במסמכים (${list.length})` : 'צפה במסמך'}><svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg></button>{list.length > 1 && <span className="absolute -top-0.5 -right-0.5 bg-indigo-600 text-white text-[10px] font-black rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1">{list.length}</span>}</span>); })()}<button onClick={() => handleEditReceivable(rec)} className="text-slate-300 hover:text-blue-500"><EditIcon className="w-5 h-5"/></button></div></td>
                                                     </tr>
                                                     {isExpanded && rec.payments && rec.payments.length > 0 && (
                                                         <tr className="bg-slate-50/30"><td colSpan={7} className="px-6 py-4"><div className="bg-white rounded border border-slate-200 shadow-inner overflow-hidden"><table className="min-w-full text-xs text-right"><thead className="bg-slate-50 text-slate-500 font-bold uppercase"><tr><th className="px-4 py-2">תאריך קבלה</th><th className="px-4 py-2">סכום</th><th className="px-4 py-2">שיטה</th><th className="px-4 py-2">אסמכתא</th><th className="px-4 py-2">סטטוס</th><th className="px-4 py-2"></th></tr></thead><tbody className="divide-y divide-slate-100">{rec.payments.map(p => (<tr key={p.id} className="hover:bg-slate-50 group"><td className="px-4 py-2">{new Date(p.date).toLocaleDateString('he-IL')}</td><td className="px-4 py-2 font-bold text-green-700">₪{p.amount.toLocaleString()}</td><td className="px-4 py-2">{p.method}</td><td className="px-4 py-2 font-mono">{p.reference || '-'}</td><td className="px-4 py-2"><span className={`px-2 py-0.5 rounded text-[10px] font-bold shadow-sm ${['BOUNCED', 'CANCELED', 'RETURNED'].includes(p.status || '') ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>{p.status === 'CLEARED' ? 'תקין' : p.status === 'PENDING' ? 'ממתין' : p.status || 'נגבה'}</span></td><td className="px-4 py-2 text-left"><button onClick={() => handleDeleteReceivablePayment(rec.id, p.id)} className="text-red-300 hover:text-red-500 p-1 opacity-0 group-hover:opacity-100 transition-opacity"><DeleteIcon className="w-3.5 h-3.5"/></button></td></tr>))}</tbody></table></div></td></tr>
@@ -3604,6 +3704,28 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                 <div><label className="block text-sm font-bold text-slate-700 mb-1">סכום הקרן (נטו)</label><input type="number" value={debtForm.amount || ''} onChange={e => setDebtForm({...debtForm, amount: parseFloat(e.target.value)})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
                                 <div className="grid grid-cols-2 gap-2 mt-4"><label className="flex items-center gap-2 cursor-pointer bg-slate-50 p-2 rounded border border-slate-200"><input type="checkbox" checked={debtForm.includesVat ?? true} onChange={e => setDebtForm({...debtForm, includesVat: e.target.checked})} className="h-4 w-4 text-primary border-gray-300 rounded focus:ring-primary" disabled={debtForm.isVatExempt} /><span className={`text-sm font-bold ${debtForm.isVatExempt ? 'text-slate-400' : 'text-slate-700'}`}>הסכום שהוזן כולל מע"מ</span></label><label className="flex items-center gap-2 cursor-pointer bg-amber-50 p-2 rounded border border-amber-200"><input type="checkbox" checked={debtForm.isVatExempt} onChange={e => setDebtForm({...debtForm, isVatExempt: e.target.checked})} className="h-4 w-4 text-amber-600 border-amber-300 rounded focus:ring-amber-500" /><span className="text-sm font-bold text-amber-800">הוצאה פטורה ממע"מ</span></label></div>
                                 <div className="md:col-span-2"><label className="block text-sm font-bold text-slate-700 mb-1">תיאור / הערות</label><textarea value={debtForm.description || ''} onChange={e => setDebtForm({...debtForm, description: e.target.value})} rows={2} className="block w-full border-slate-300 rounded-md shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
+                                <div className="md:col-span-2">
+                                    <label className="block text-sm font-bold text-slate-700 mb-1">תמונות / קבצים מצורפים לחוב</label>
+                                    <input type="file" multiple onChange={handleDebtFileChange} accept="image/*,.pdf,.doc,.docx,.xls,.xlsx" className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-purple-50 file:text-purple-700 hover:file:bg-purple-100" />
+                                    <p className="text-[10px] text-slate-400 mt-1">ניתן לבחור מספר קבצים. תמונות, PDF וקבצי Office</p>
+                                    {((debtForm.attachments?.length ?? 0) + (debtForm.attachment ? 1 : 0)) > 0 && (
+                                        <ul className="mt-2 space-y-1.5 max-h-40 overflow-y-auto">
+                                            {(debtForm.attachments ?? (debtForm.attachment ? [debtForm.attachment] : [])).map((att, idx) => (
+                                                <li key={att.id} className="flex items-center justify-between p-2 bg-purple-50 border border-purple-200 rounded-lg">
+                                                    <span className="text-xs font-bold text-purple-700 truncate flex-1 min-w-0">{att.fileName}</span>
+                                                    <div className="flex gap-2 shrink-0">
+                                                        <button type="button" onClick={() => { setViewingLoanDoc(att); setViewingAttachmentList(null); }} className="text-[10px] bg-white border border-purple-200 px-2 py-1 rounded font-bold text-purple-600 hover:bg-purple-100">צפה</button>
+                                                        <button type="button" onClick={() => {
+                                                            const list = debtForm.attachments ?? (debtForm.attachment ? [debtForm.attachment] : []);
+                                                            const next = list.filter((_, i) => i !== idx);
+                                                            setDebtForm({ ...debtForm, attachments: next, attachment: undefined });
+                                                        }} className="text-[10px] text-red-500 font-bold px-2 py-1 hover:bg-red-50 rounded">הסר</button>
+                                                    </div>
+                                                </li>
+                                            ))}
+                                        </ul>
+                                    )}
+                                </div>
                             </div>
                         )}
                         {activeTab === 'RECEIVABLES' && (
@@ -3614,6 +3736,27 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                 <div><label className="block text-sm font-bold text-slate-700 mb-1">סכום החוב (נטו)</label><input type="number" value={receivableForm.amount || ''} onChange={e => setReceivableForm({...receivableForm, amount: parseFloat(e.target.value)})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
                                 <div className="grid grid-cols-2 gap-2 mt-4"><label className="flex items-center gap-2 cursor-pointer bg-slate-50 p-2 rounded border border-slate-200"><input type="checkbox" checked={receivableForm.includesVat ?? true} onChange={e => setReceivableForm({...receivableForm, includesVat: e.target.checked})} className="h-4 w-4 text-primary border-gray-300 rounded focus:ring-primary" disabled={receivableForm.isVatExempt} /><span className={`text-sm font-bold ${receivableForm.isVatExempt ? 'text-slate-400' : 'text-slate-700'}`}>הסכום שהוזן כולל מע"מ</span></label><label className="flex items-center gap-2 cursor-pointer bg-amber-50 p-2 rounded border border-amber-200"><input type="checkbox" checked={receivableForm.isVatExempt} onChange={e => setReceivableForm({...receivableForm, isVatExempt: e.target.checked})} className="h-4 w-4 text-amber-600 border-amber-300 rounded focus:ring-amber-500" /><span className="text-sm font-bold text-amber-800">החזר פטור ממע"מ</span></label></div>
                                 <div className="md:col-span-2"><label className="block text-sm font-bold text-slate-700 mb-1">תיאור / הערות</label><textarea value={receivableForm.description || ''} onChange={e => setReceivableForm({...receivableForm, description: e.target.value})} rows={2} className="block w-full border-slate-300 rounded-md shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
+                                <div className="md:col-span-2">
+                                    <label className="block text-sm font-bold text-slate-700 mb-1">תמונות / קבצים מצורפים לחייב</label>
+                                    <input type="file" multiple onChange={handleReceivableFileChange} accept="image/*,.pdf,.doc,.docx,.xls,.xlsx" className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100" />
+                                    <p className="text-[10px] text-slate-400 mt-1">ניתן לבחור מספר קבצים. תמונות, PDF וקבצי Office</p>
+                                    {(receivableForm.attachments?.length ?? 0) > 0 && (
+                                        <ul className="mt-2 space-y-1.5 max-h-40 overflow-y-auto">
+                                            {(receivableForm.attachments ?? []).map((att, idx) => (
+                                                <li key={att.id} className="flex items-center justify-between p-2 bg-indigo-50 border border-indigo-200 rounded-lg">
+                                                    <span className="text-xs font-bold text-indigo-700 truncate flex-1 min-w-0">{att.fileName}</span>
+                                                    <div className="flex gap-2 shrink-0">
+                                                        <button type="button" onClick={() => { setViewingLoanDoc(att); setViewingAttachmentList(null); }} className="text-[10px] bg-white border border-indigo-200 px-2 py-1 rounded font-bold text-indigo-600 hover:bg-indigo-100">צפה</button>
+                                                        <button type="button" onClick={() => {
+                                                            const next = (receivableForm.attachments ?? []).filter((_, i) => i !== idx);
+                                                            setReceivableForm({ ...receivableForm, attachments: next });
+                                                        }} className="text-[10px] text-red-500 font-bold px-2 py-1 hover:bg-red-50 rounded">הסר</button>
+                                                    </div>
+                                                </li>
+                                            ))}
+                                        </ul>
+                                    )}
+                                </div>
                             </div>
                         )}
                         {activeTab === 'EQUITY' && (

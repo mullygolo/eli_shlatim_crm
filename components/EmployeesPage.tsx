@@ -3,6 +3,7 @@ import { Employee, AttendanceRecord, EmployeeRole, EmployeeStatus, EmploymentPer
 import { PlusIcon, EditIcon, DeleteIcon, IdIcon, ClockIcon, LogIcon, NoteIcon, DownloadIcon, CashIcon, EyeIcon, EyeSlashIcon, CheckCircleIcon } from './icons';
 import Modal from './Modal';
 import { useAuth } from '../contexts/AuthContext';
+import * as mongoService from '../services/mongoService';
 
 interface EmployeesPageProps {
     employees: Employee[];
@@ -775,39 +776,84 @@ const EmployeesPage: React.FC<EmployeesPageProps> = ({ employees, setEmployees, 
         setIsModalOpen(false); setEditingEmployee(null);
     };
 
-    const handleApproveRequest = (recordId: string, approve: boolean) => {
-        setAttendanceRecords(prev => prev.map(record => {
-            if (record.id !== recordId || !record.correctionRequest) return record;
+    const handleApproveRequest = async (recordId: string, approve: boolean) => {
+        const record = attendanceRecords.find(r => r.id === recordId && r.correctionRequest);
+        if (!record) return;
 
-            if (approve) {
-                const start = record.correctionRequest.requestedClockIn;
-                const end = record.correctionRequest.requestedClockOut;
-                const reqStatus = record.correctionRequest.requestedStatus;
-                
-                const isLeave = reqStatus === 'VACATION' || reqStatus === 'SICK';
+        const segs = record.correctionRequest!.segments?.length
+            ? record.correctionRequest!.segments!
+            : (record.correctionRequest!.requestedClockIn && record.correctionRequest!.requestedClockOut
+                ? [{ requestedClockIn: record.correctionRequest!.requestedClockIn!, requestedClockOut: record.correctionRequest!.requestedClockOut! }]
+                : []);
+
+        if (!approve) {
+            const updatedRecord: AttendanceRecord = {
+                ...record,
+                status: 'REJECTED',
+                note: `${record.note ? record.note + ' | ' : ''}בקשת תיקון נדחתה`,
+                correctionRequest: undefined
+            };
+            try {
+                await mongoService.updateAttendanceRecord(updatedRecord);
+                setAttendanceRecords(prev => prev.map(r => r.id === recordId ? updatedRecord : r));
+                addActivity('נדחתה בקשת תיקון שעות/היעדרות');
+            } catch (err: any) {
+                console.error('Failed to save rejection:', err);
+                alert(err?.message || 'שגיאה בשמירת הדחייה. נסה שוב.');
+            }
+            return;
+        }
+
+        const reqStatus = record.correctionRequest!.requestedStatus;
+        const isLeave = reqStatus === 'VACATION' || reqStatus === 'SICK';
+        const statusLabel = reqStatus === 'VACATION' ? 'חופשה' : reqStatus === 'SICK' ? 'מחלה' : reqStatus === 'WFH' ? 'עבודה מהבית' : 'תיקון שעות';
+
+        const recordDate = record.date instanceof Date ? record.date : new Date(record.date);
+        try {
+            if (segs.length > 1) {
+                for (const seg of segs) {
+                    const segIn = seg.requestedClockIn instanceof Date ? seg.requestedClockIn : new Date(seg.requestedClockIn);
+                    const segOut = seg.requestedClockOut instanceof Date ? seg.requestedClockOut : new Date(seg.requestedClockOut);
+                    const totalHours = isLeave ? 0 : (segOut.getTime() - segIn.getTime()) / (1000 * 60 * 60);
+                    await mongoService.createAttendanceRecord({
+                        id: `att_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
+                        employeeId: record.employeeId,
+                        employeeName: record.employeeName,
+                        employeeUsername: record.employeeUsername,
+                        date: recordDate,
+                        clockIn: isLeave ? undefined : segIn,
+                        clockOut: isLeave ? undefined : segOut,
+                        totalHours: Math.max(0, totalHours),
+                        status: reqStatus || 'PRESENT',
+                        note: `אושר ${statusLabel}: ${record.correctionRequest!.reason}`,
+                        certificate: record.correctionRequest!.certificate || record.certificate
+                    });
+                }
+                await mongoService.deleteAttendanceRecord(record.id);
+                setAttendanceRecords(prev => prev.filter(r => r.id !== recordId));
+            } else if (segs.length === 1) {
+                const start = segs[0].requestedClockIn instanceof Date ? segs[0].requestedClockIn : new Date(segs[0].requestedClockIn);
+                const end = segs[0].requestedClockOut instanceof Date ? segs[0].requestedClockOut : new Date(segs[0].requestedClockOut);
                 const totalHours = isLeave ? 0 : (end.getTime() - start.getTime()) / (1000 * 60 * 60);
-
-                const statusLabel = reqStatus === 'VACATION' ? 'חופשה' : reqStatus === 'SICK' ? 'מחלה' : reqStatus === 'WFH' ? 'עבודה מהבית' : 'תיקון שעות';
-
-                return {
+                const updatedRecord: AttendanceRecord = {
                     ...record,
-                    clockIn: isLeave ? undefined : start, 
-                    clockOut: isLeave ? undefined : end, 
+                    date: recordDate,
+                    clockIn: isLeave ? undefined : start,
+                    clockOut: isLeave ? undefined : end,
                     totalHours: Math.max(0, totalHours),
                     status: reqStatus || 'PRESENT',
-                    certificate: record.correctionRequest.certificate || record.certificate,
-                    note: `${record.note ? record.note + ' | ' : ''}אושר ${statusLabel}: ${record.correctionRequest.reason}`,
+                    certificate: record.correctionRequest!.certificate || record.certificate,
+                    note: `${record.note ? record.note + ' | ' : ''}אושר ${statusLabel}: ${record.correctionRequest!.reason}`,
                     correctionRequest: undefined
                 };
-            } else {
-                return {
-                    ...record,
-                    status: 'REJECTED',
-                    note: `${record.note ? record.note + ' | ' : ''}בקשת תיקון נדחתה`
-                };
+                await mongoService.updateAttendanceRecord(updatedRecord);
+                setAttendanceRecords(prev => prev.map(r => r.id === recordId ? updatedRecord : r));
             }
-        }));
-        addActivity(approve ? 'אושרה בקשת תיקון שעות/היעדרות' : 'נדחתה בקשת תיקון שעות/היעדרות');
+            addActivity(approve ? 'אושרה בקשת תיקון שעות/היעדרות' : 'נדחתה בקשת תיקון שעות/היעדרות');
+        } catch (err: any) {
+            console.error('Failed to save approval/rejection:', err);
+            alert(err?.message || 'שגיאה בשמירת האישור/דחייה. נסה שוב.');
+        }
     };
 
     return (
@@ -866,30 +912,47 @@ const EmployeesPage: React.FC<EmployeesPageProps> = ({ employees, setEmployees, 
                                 const isLeave = reqType === 'VACATION' || reqType === 'SICK';
                                 const isWfh = reqType === 'WFH';
                                 const requestCertificate = req.correctionRequest.certificate;
+                                const segs = req.correctionRequest.segments?.length
+                                    ? req.correctionRequest.segments
+                                    : (req.correctionRequest.requestedClockIn && req.correctionRequest.requestedClockOut
+                                        ? [{ requestedClockIn: req.correctionRequest.requestedClockIn, requestedClockOut: req.correctionRequest.requestedClockOut }]
+                                        : []);
                                 
-                                const originalStart = req.clockIn ? req.clockIn.toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : '-';
-                                const originalEnd = req.clockOut ? req.clockOut.toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : '-';
-                                const newStart = req.correctionRequest.requestedClockIn.toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'});
-                                const newEnd = req.correctionRequest.requestedClockOut.toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'});
+                                const reqDate = req.date instanceof Date ? req.date : new Date(req.date);
+                                const originalStart = req.clockIn ? new Date(req.clockIn).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : '-';
+                                const originalEnd = req.clockOut ? new Date(req.clockOut).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : '-';
                                 
                                 return (
                                     <div key={req.id} className="p-4 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
                                         <div className="flex-1">
                                             <div className="flex items-center gap-2">
                                                 <span className="font-bold text-slate-800">{emp?.name}</span>
-                                                <span className="text-sm text-slate-500">{req.date.toLocaleDateString('he-IL')}</span>
+                                                <span className="text-sm text-slate-500">{reqDate.toLocaleDateString('he-IL')}</span>
                                                 <span className={`text-[10px] px-2 py-0.5 rounded font-bold ${reqType === 'VACATION' ? 'bg-amber-100 text-amber-800' : reqType === 'SICK' ? 'bg-rose-100 text-rose-800' : isWfh ? 'bg-indigo-100 text-indigo-800' : 'bg-blue-100 text-blue-800'}`}>
-                                                    {reqType === 'VACATION' ? 'בקשת חופשה' : reqType === 'SICK' ? 'בקשת מחלה' : isWfh ? 'עבודה מהבית' : 'תיקון שעות'}
+                                                    {reqType === 'VACATION' ? 'בקשת חופשה' : reqType === 'SICK' ? 'בקשת מחלה' : isWfh ? 'עבודה מהבית' : segs.length > 1 ? `תיקון שעות (${segs.length} זמנים)` : 'תיקון שעות'}
                                                 </span>
                                             </div>
                                             <p className="text-sm text-slate-600 mt-1"><span className="font-medium">סיבה:</span> {req.correctionRequest.reason}</p>
                                             <div className="flex items-center gap-4 mt-2 text-sm bg-slate-50 p-2 rounded border border-slate-200">
                                                 {!isLeave ? (
                                                     <>
-                                                        <div><span className="block text-xs text-slate-400">מקור</span><span className="line-through text-slate-500">{originalStart} - {originalEnd}</span></div>
-                                                        <div className="text-slate-400">➔</div>
-                                                        <div><span className="block text-xs text-green-600 font-bold">מבוקש</span><span className="font-bold text-slate-800">{newStart} - {newEnd}</span></div>
-                                                        {isWfh && <div className="border-r border-slate-300 pr-4 mr-2"><span className="block text-xs text-indigo-500 font-bold">מיקום</span><span className="font-bold text-indigo-700">🏠 מהבית</span></div>}
+                                                        {segs.length > 0 && (
+                                                            <>
+                                                                {req.clockIn != null && (
+                                                                    <>
+                                                                        <div><span className="block text-xs text-slate-400">מקור</span><span className="line-through text-slate-500">{originalStart} - {originalEnd}</span></div>
+                                                                        <div className="text-slate-400">➔</div>
+                                                                    </>
+                                                                )}
+                                                                <div>
+                                                                    <span className="block text-xs text-green-600 font-bold">מבוקש</span>
+                                                                    <span className="font-bold text-slate-800">
+                                                                        {segs.map((s, i) => `${new Date(s.requestedClockIn).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'})} – ${new Date(s.requestedClockOut).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'})}`).join(' · ')}
+                                                                    </span>
+                                                                </div>
+                                                                {isWfh && <div className="border-r border-slate-300 pr-4 mr-2"><span className="block text-xs text-indigo-500 font-bold">מיקום</span><span className="font-bold text-indigo-700">🏠 מהבית</span></div>}
+                                                            </>
+                                                        )}
                                                     </>
                                                 ) : (
                                                     <div className="flex items-center gap-4 flex-1">

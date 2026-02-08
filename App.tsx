@@ -99,10 +99,10 @@ const App: React.FC = () => {
     // Auth context
     const { logout, isAuthenticated } = useAuth();
     
-    // Redirect EMPLOYEE away from restricted pages
+    // Redirect EMPLOYEE away from restricted pages (Finance allows "ניהול צ'קים נכנסים" only)
     useEffect(() => {
         if (user?.roleType === 'EMPLOYEE') {
-            if (currentPage === 'Finance' || currentPage === 'Settings') {
+            if (currentPage === 'Settings') {
                 setCurrentPage('Dashboard');
             }
         }

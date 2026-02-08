@@ -10,10 +10,10 @@ router.get('/', async (req, res) => {
     } catch (error) {
         console.error('GET /api/status-configs failed:', error);
         const detail = error instanceof Error ? error.message : String(error);
-        const isDbError = /mongo|connection|MONGO_URI/i.test(detail);
+        const isDbError = /mongo|connection|MONGO_URI|ECONNREFUSED|network/i.test(detail);
         res.status(isDbError ? 503 : 500).json({
             error: isDbError ? 'מסד הנתונים לא זמין' : 'Failed to fetch status configs',
-            detail
+            detail: process.env.NODE_ENV !== 'production' ? detail : undefined
         });
     }
 });

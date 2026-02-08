@@ -232,6 +232,7 @@ router.get('/documents/invoice-summary/:orderNumber', async (req, res) => {
                             if (seen.has(key)) continue;
                             seen.add(key);
                             const repaymentDateStr = p.repaymentDate || (p.method === 'Cheque' ? p.date : undefined);
+                            const isCheque = p.method === 'Cheque';
                             orderPayments.push({
                                 id: `gi_pay_${Date.now()}_${docId.slice(0, 6)}_${added}`,
                                 amount: p.amount,
@@ -239,7 +240,7 @@ router.get('/documents/invoice-summary/:orderNumber', async (req, res) => {
                                 method: (methodMap[p.method || ''] || 'העברה בנקאית') as any,
                                 reference: p.reference || '',
                                 repaymentDate: repaymentDateStr ? new Date(repaymentDateStr) : undefined,
-                                status: 'CLEARED',
+                                status: isCheque ? 'PENDING' : 'CLEARED',
                                 notes: 'סונכרן מחשבונית ירוקה (שיוך אוטומטי)'
                             });
                             added++;
@@ -341,6 +342,7 @@ router.post('/orders/:orderId/link-document', async (req, res) => {
             if (seen.has(key)) continue;
             seen.add(key);
             const repaymentDateStr = p.repaymentDate || (p.method === 'Cheque' ? p.date : undefined);
+            const isCheque = p.method === 'Cheque';
             orderPayments.push({
                 id: `gi_pay_${Date.now()}_${added}`,
                 amount: p.amount,
@@ -348,7 +350,7 @@ router.post('/orders/:orderId/link-document', async (req, res) => {
                 method: (methodMap[p.method || ''] || 'העברה בנקאית') as any,
                 reference: p.reference || '',
                 repaymentDate: repaymentDateStr ? new Date(repaymentDateStr) : undefined,
-                status: 'CLEARED',
+                status: isCheque ? 'PENDING' : 'CLEARED',
                 notes: 'סונכרן מחשבונית ירוקה'
             });
             added++;
@@ -429,6 +431,7 @@ router.post('/documents/link-orders', async (req, res) => {
                 if (seen.has(key)) continue;
                 seen.add(key);
                 const repaymentDateStr = p.repaymentDate || (p.method === 'Cheque' ? p.date : undefined);
+                const isCheque = p.method === 'Cheque';
                 orderPayments.push({
                     id: `gi_pay_${Date.now()}_${orderId}_${added}`,
                     amount: allocAmt,
@@ -436,7 +439,7 @@ router.post('/documents/link-orders', async (req, res) => {
                     method: (methodMap[p.method || ''] || 'העברה בנקאית') as any,
                     reference: p.reference || '',
                     repaymentDate: repaymentDateStr ? new Date(repaymentDateStr) : undefined,
-                    status: 'CLEARED',
+                    status: isCheque ? 'PENDING' : 'CLEARED',
                     notes: 'סונכרן מחשבונית ירוקה'
                 });
                 added++;

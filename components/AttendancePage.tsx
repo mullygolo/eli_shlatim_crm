@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Employee, AttendanceRecord, Order, OrderStatusConfiguration, AttendanceStatus, PaymentMethod, Attachment, PayrollOverrideMap } from '../types';
-import { ClockIcon, EditIcon, PlusIcon, ImportIcon, DownloadIcon } from './icons';
+import { ClockIcon, EditIcon, PlusIcon, ImportIcon, DownloadIcon, DeleteIcon } from './icons';
 import Modal from './Modal';
 import { calculateOrderTotals, getEmployeeSalaryAtDate } from '../utils/calculations';
 import { getJewishHoliday } from '../utils/holidays';
@@ -169,7 +169,7 @@ const CertificateViewer: React.FC<{
     );
 };
 
-// Correction Request Modal
+// Correction Request Modal — תומך בבקשה עם זוג כניסה–יציאה אחד או כמה
 const CorrectionRequestModal: React.FC<{ 
     date: Date;
     record?: AttendanceRecord; 
@@ -181,11 +181,29 @@ const CorrectionRequestModal: React.FC<{
         isFuture ? 'VACATION' : 'PRESENT'
     );
     const [isWFH, setIsWFH] = useState(record?.status === 'WFH');
-    const [start, setStart] = useState(record?.clockIn ? new Date(record.clockIn).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : '09:00');
-    const [end, setEnd] = useState(record?.clockOut ? new Date(record.clockOut).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : '17:00');
+    const defaultStart = record?.clockIn ? new Date(record.clockIn).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : '09:00';
+    const defaultEnd = record?.clockOut ? new Date(record.clockOut).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : '17:00';
+    const [segments, setSegments] = useState<Array<{ start: string; end: string }>>(() => {
+        if (record?.correctionRequest?.segments?.length) {
+            return record.correctionRequest.segments.map(s => ({
+                start: new Date(s.requestedClockIn).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}),
+                end: new Date(s.requestedClockOut).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'})
+            }));
+        }
+        return [{ start: defaultStart, end: defaultEnd }];
+    });
     const [reason, setReason] = useState('');
     const [certificate, setCertificate] = useState<Attachment | undefined>(record?.certificate);
     const [error, setError] = useState('');
+
+    const addSegment = () => setSegments(prev => [...prev, { start: '09:00', end: '17:00' }]);
+    const removeSegment = (idx: number) => {
+        if (segments.length <= 1) return;
+        setSegments(prev => prev.filter((_, i) => i !== idx));
+    };
+    const updateSegment = (idx: number, field: 'start' | 'end', value: string) => {
+        setSegments(prev => prev.map((s, i) => i === idx ? { ...s, [field]: value } : s));
+    };
 
     const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         if (e.target.files && e.target.files[0]) {
@@ -211,7 +229,8 @@ const CorrectionRequestModal: React.FC<{
             return; 
         }
         const finalStatus = reportType === 'PRESENT' && isWFH ? 'WFH' : reportType;
-        onSubmit({ start, end, reason, reportType: finalStatus, certificate });
+        const segs = reportType === 'PRESENT' ? segments : [{ start: '00:00', end: '23:59' }];
+        onSubmit({ segments: segs, reason, reportType: finalStatus, certificate });
     };
 
     return (
@@ -265,14 +284,23 @@ const CorrectionRequestModal: React.FC<{
                             </label>
                         </div>
 
-                        <div className="grid grid-cols-2 gap-4">
-                            <div>
-                                <label className="block text-sm font-medium text-slate-700">שעת כניסה</label>
-                                <input type="time" value={start} onChange={e => setStart(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary" />
+                        <div>
+                            <div className="flex items-center justify-between mb-2">
+                                <label className="block text-sm font-bold text-slate-700">כניסות ויציאות</label>
+                                <button type="button" onClick={addSegment} className="text-xs font-bold text-primary hover:bg-indigo-50 px-2 py-1 rounded">+ הוסף זמנים</button>
                             </div>
-                            <div>
-                                <label className="block text-sm font-medium text-slate-700">שעת יציאה</label>
-                                <input type="time" value={end} onChange={e => setEnd(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary" />
+                            <div className="space-y-3">
+                                {segments.map((seg, idx) => (
+                                    <div key={idx} className="flex items-center gap-2 flex-wrap">
+                                        <span className="text-slate-500 text-sm w-6">{idx + 1}.</span>
+                                        <input type="time" value={seg.start} onChange={e => updateSegment(idx, 'start', e.target.value)} className="rounded-md border-slate-300 shadow-sm text-sm w-28" aria-label="כניסה" />
+                                        <span className="text-slate-400">–</span>
+                                        <input type="time" value={seg.end} onChange={e => updateSegment(idx, 'end', e.target.value)} className="rounded-md border-slate-300 shadow-sm text-sm w-28" aria-label="יציאה" />
+                                        {segments.length > 1 && (
+                                            <button type="button" onClick={() => removeSegment(idx)} className="text-red-600 hover:bg-red-50 p-1 rounded text-xs font-bold" title="הסר">✕</button>
+                                        )}
+                                    </div>
+                                ))}
                             </div>
                         </div>
                     </div>
@@ -329,6 +357,7 @@ const CorrectionRequestModal: React.FC<{
 const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, setRecords, orders, statusConfigs, payrollOverrides, setPayrollOverrides, onAttendanceMutationBusy }) => {
     const { user } = useAuth();
     const isUserManager = user?.roleType === 'ADMIN' || user?.roleType === 'MANAGER';
+    const isAdmin = user?.roleType === 'ADMIN';
     
     // עובד רגיל יכול לראות רק את עצמו, מנהל יכול לבחור כל עובד
     const [currentEmployeeId, setCurrentEmployeeId] = useState<string>(() => {
@@ -834,55 +863,117 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
         setCorrectionModalOpen(true);
     };
 
-    const handleCorrectionSubmit = (data: any) => {
+    const handleDeleteRecord = async (record: AttendanceRecord) => {
+        const dateStr = record.date instanceof Date ? new Date(record.date).toLocaleDateString('he-IL') : new Date(record.date).toLocaleDateString('he-IL');
+        const hoursStr = formatDecimalHoursToTime(record.totalHours);
+        const msg = `האם למחוק את רשומת השעות?\nתאריך: ${dateStr}\nשעות: ${hoursStr}\nפעולה זו לא ניתנת לביטול.`;
+        if (!window.confirm(msg)) return;
+        try {
+            await mongoService.deleteAttendanceRecord(record.id);
+            setRecords(prev => prev.filter(r => r.id !== record.id));
+            await refetchRecords();
+        } catch (err: any) {
+            console.error('Failed to delete attendance record:', err);
+            alert(err?.message || 'שגיאה במחיקת הרשומה. נסה שוב.');
+        }
+    };
+
+    const handleCorrectionSubmit = async (data: any) => {
         if (!selectedDateForCorrection) return;
 
-        const [startH, startM] = data.start.split(':');
-        const [endH, endM] = data.end.split(':');
-        const reqIn = new Date(selectedDateForCorrection); 
-        reqIn.setHours(parseInt(startH), parseInt(startM), 0, 0);
-        const reqOut = new Date(selectedDateForCorrection); 
-        reqOut.setHours(parseInt(endH), parseInt(endM), 0, 0);
+        const rawSegments = Array.isArray(data.segments) && data.segments.length > 0
+            ? data.segments
+            : [{ start: data.start || '09:00', end: data.end || '17:00' }];
 
+        const toDate = (start: string, end: string) => {
+            const [sh, sm] = start.split(':');
+            const [eh, em] = end.split(':');
+            const reqIn = new Date(selectedDateForCorrection);
+            reqIn.setHours(parseInt(sh, 10), parseInt(sm, 10), 0, 0);
+            const reqOut = new Date(selectedDateForCorrection);
+            reqOut.setHours(parseInt(eh, 10), parseInt(em, 10), 0, 0);
+            return { requestedClockIn: reqIn, requestedClockOut: reqOut };
+        };
+
+        const segmentsAsDates = rawSegments.map((s: { start: string; end: string }) => toDate(s.start, s.end));
         const recordStatus: AttendanceStatus = 'PENDING_APPROVAL';
         const isPresence = data.reportType === 'PRESENT' || data.reportType === 'WFH';
+        const reasonText = `${data.reportType === 'VACATION' ? 'חופשה' : data.reportType === 'SICK' ? 'מחלה' : data.reportType === 'WFH' ? 'עבודה מהבית' : 'נוכחות'}: ${data.reason}`;
 
-        if (recordForCorrection) {
-            const updatedRecord: AttendanceRecord = {
-                ...recordForCorrection,
-                status: recordStatus,
-                correctionRequest: {
-                    requestedClockIn: reqIn,
-                    requestedClockOut: reqOut,
-                    requestedStatus: data.reportType,
-                    reason: `${data.reportType === 'VACATION' ? 'חופשה' : data.reportType === 'SICK' ? 'מחלה' : data.reportType === 'WFH' ? 'עבודה מהבית' : 'נוכחות'}: ${data.reason}`,
-                    certificate: data.certificate
-                }
-            };
-            setRecords(prev => prev.map(r => r.id === recordForCorrection.id ? updatedRecord : r));
-        } else {
-            const newRecord: AttendanceRecord = {
-                id: `att_req_${Date.now()}`,
+        let recordToSave: AttendanceRecord;
+        const multiSegment = segmentsAsDates.length > 1;
+
+        if (multiSegment) {
+            recordToSave = {
+                id: `att_req_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
                 employeeId: currentEmployeeId,
                 date: selectedDateForCorrection,
-                clockIn: isPresence ? reqIn : undefined,
-                clockOut: isPresence ? reqOut : undefined,
                 totalHours: 0,
                 status: recordStatus,
-                note: `בקשת ${data.reportType === 'VACATION' ? 'חופשה' : data.reportType === 'SICK' ? 'מחלה' : data.reportType === 'WFH' ? 'עבודה מהבית' : 'נוכחות'}`,
+                note: `בקשת נוכחות (${segmentsAsDates.length} זמנים)`,
                 correctionRequest: {
-                    requestedClockIn: reqIn,
-                    requestedClockOut: reqOut,
+                    segments: segmentsAsDates,
                     requestedStatus: data.reportType,
-                    reason: `${data.reportType === 'VACATION' ? 'חופשה' : data.reportType === 'SICK' ? 'מחלה' : data.reportType === 'WFH' ? 'עבודה מהבית' : 'נוכחות'} : ${data.reason}`,
+                    reason: reasonText,
                     certificate: data.certificate
                 }
             };
-            setRecords(prev => [...prev, newRecord]);
+        } else {
+            const first = segmentsAsDates[0];
+            const reqIn = first.requestedClockIn;
+            const reqOut = first.requestedClockOut;
+            if (recordForCorrection) {
+                recordToSave = {
+                    ...recordForCorrection,
+                    status: recordStatus,
+                    correctionRequest: {
+                        requestedClockIn: reqIn,
+                        requestedClockOut: reqOut,
+                        requestedStatus: data.reportType,
+                        reason: reasonText,
+                        certificate: data.certificate
+                    }
+                };
+            } else {
+                recordToSave = {
+                    id: `att_req_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
+                    employeeId: currentEmployeeId,
+                    date: selectedDateForCorrection,
+                    clockIn: isPresence ? reqIn : undefined,
+                    clockOut: isPresence ? reqOut : undefined,
+                    totalHours: 0,
+                    status: recordStatus,
+                    note: `בקשת ${data.reportType === 'VACATION' ? 'חופשה' : data.reportType === 'SICK' ? 'מחלה' : data.reportType === 'WFH' ? 'עבודה מהבית' : 'נוכחות'}`,
+                    correctionRequest: {
+                        requestedClockIn: reqIn,
+                        requestedClockOut: reqOut,
+                        requestedStatus: data.reportType,
+                        reason: reasonText,
+                        certificate: data.certificate
+                    }
+                };
+            }
         }
-        // Refresh paginated records after correction
-        refetchRecords();
+
         setCorrectionModalOpen(false);
+        try {
+            if (recordForCorrection && multiSegment) {
+                // בקשת תיקון עם כמה מקטעים — מוחקים את הרשומה הישנה כדי שלא יישארו שעות כפולות אחרי האישור
+                await mongoService.deleteAttendanceRecord(recordForCorrection.id);
+            }
+            if (recordForCorrection && !multiSegment) {
+                await mongoService.updateAttendanceRecord(recordToSave);
+            } else {
+                await mongoService.createAttendanceRecord(recordToSave);
+            }
+            const allRecords = await mongoService.getAttendanceRecords();
+            setRecords(allRecords);
+            await refetchRecords();
+        } catch (err: any) {
+            console.error('Failed to save correction request:', err);
+            setCorrectionModalOpen(true);
+            alert(err?.message || 'שגיאה בשמירת בקשת התיקון. נסה שוב.');
+        }
     };
 
     const getMonthlyStats = (empId: string, month: number, year: number) => {
@@ -1410,8 +1501,11 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
                                         const isWfh = record.status === 'WFH';
                                         const isPresence = record.status === 'PRESENT' || isWfh;
                                         const hasCertificate = !!record.certificate || !!record.correctionRequest?.certificate;
+                                        const segs = record.correctionRequest?.segments;
+                                        const displayIn = record.clockIn ?? segs?.[0]?.requestedClockIn ?? record.correctionRequest?.requestedClockIn;
+                                        const displayOut = record.clockOut ?? segs?.[0]?.requestedClockOut ?? record.correctionRequest?.requestedClockOut;
+                                        const multiSegmentLabel = segs && segs.length > 1 ? ` (${segs.length} זמנים)` : '';
                                         
-                                        // Check if this record is from today (to show "פעיל..." only for today's records)
                                         const todayStr = getDateStringIsrael();
                                         const recordDateStr = getDateStringForComparison(record.date);
                                         const isToday = recordDateStr === todayStr;
@@ -1428,12 +1522,16 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
                                                     )}
                                                 </td>
                                                 <td className="px-6 py-4 text-slate-500 font-medium">{idx === 0 && date.toLocaleDateString('he-IL', { weekday: 'long' })}</td>
-                                                <td className={`px-6 py-4 font-mono font-bold ${record.status === 'PENDING_APPROVAL' ? 'text-slate-400 italic' : 'text-slate-700'}`}>{record.clockIn ? new Date(record.clockIn).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : (record.correctionRequest?.requestedClockIn ? new Date(record.correctionRequest.requestedClockIn).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : '-')}</td>
-                                                <td className={`px-6 py-4 font-mono font-bold ${record.status === 'PENDING_APPROVAL' ? 'text-slate-400 italic' : 'text-slate-700'}`}>{record.clockOut ? new Date(record.clockOut).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : (record.correctionRequest?.requestedClockOut ? new Date(record.correctionRequest.requestedClockOut).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : (isPresence && isToday ? 'פעיל...' : (isPresence && !isToday ? 'לא הושלם' : '-')))}
-                                                </td>
+                                                <td className={`px-6 py-4 font-mono font-bold ${record.status === 'PENDING_APPROVAL' ? 'text-slate-400 italic' : 'text-slate-700'}`}>{displayIn ? new Date(displayIn).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : '-'}{multiSegmentLabel}</td>
+                                                <td className={`px-6 py-4 font-mono font-bold ${record.status === 'PENDING_APPROVAL' ? 'text-slate-400 italic' : 'text-slate-700'}`}>{displayOut ? new Date(displayOut).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : (isPresence && isToday ? 'פעיל...' : (isPresence && !isToday ? 'לא הושלם' : '-'))}</td>
                                                 <td className={`px-6 py-4 font-black ${isLeave ? 'text-slate-400 font-medium italic' : 'text-slate-800'}`}>{isPresence ? formatDecimalHoursToTime(record.totalHours) : (isLeave ? 'ללא שעות' : '0:00')}</td>
                                                 <td className="px-6 py-4"><div className="flex flex-col gap-1">{record.status === 'PENDING_APPROVAL' ? (<span className="text-[10px] bg-orange-100 text-orange-800 px-2 py-1 rounded-full font-black w-fit uppercase tracking-tight">ממתין לאישור</span>) : isRejected ? (<span className="text-[10px] bg-red-100 text-red-800 px-2 py-1 rounded-full font-black w-fit uppercase tracking-tight">נדחה</span>) : record.status === 'VACATION' ? (<span className="text-[10px] bg-amber-100 text-amber-800 px-2 py-1 rounded-full font-black w-fit uppercase tracking-tight">חופשה</span>) : record.status === 'SICK' ? (<button onClick={() => hasCertificate && setViewingCertificate(record.certificate || record.correctionRequest?.certificate || null)} className={`text-[10px] bg-rose-100 text-rose-800 px-2 py-1 rounded-full font-black w-fit flex items-center gap-1 uppercase tracking-tight ${hasCertificate ? 'hover:bg-rose-200 cursor-pointer shadow-sm' : 'cursor-default'}`} title={hasCertificate ? "לחץ לצפייה באישור" : "מחלה"}>מחלה {hasCertificate && <span>📄</span>}</button>) : record.status === 'WFH' ? (<span className="text-[10px] bg-indigo-100 text-indigo-800 px-2.5 py-1 rounded-full font-black w-fit flex items-center gap-1 uppercase tracking-tight shadow-sm ring-1 ring-indigo-200">🏠 מהבית</span>) : (<span className="text-[10px] bg-green-100 text-green-800 px-2.5 py-1 rounded-full font-black w-fit uppercase tracking-tight shadow-sm ring-1 ring-green-200">נוכח</span>)}{record.note && <span className="text-[9px] text-slate-400 font-bold max-w-[120px] truncate" title={record.note}>{record.note}</span>}</div></td>
-                                                <td className="px-6 py-4">{(record.status !== 'PENDING_APPROVAL' && !isRejected) && (<button onClick={() => openCorrectionModal(date, record)} className="text-primary hover:bg-indigo-100 p-2 rounded-full transition-all" title="בקש תיקון"><EditIcon className="w-4 h-4"/></button>)}</td>
+                                                <td className="px-6 py-4">
+                                                    <div className="flex items-center gap-1">
+                                                        {(record.status !== 'PENDING_APPROVAL' && !isRejected) && (<button onClick={() => openCorrectionModal(date, record)} className="text-primary hover:bg-indigo-100 p-2 rounded-full transition-all" title="בקש תיקון"><EditIcon className="w-4 h-4"/></button>)}
+                                                        {isAdmin && (<button onClick={() => handleDeleteRecord(record)} className="text-rose-600 hover:bg-rose-100 p-2 rounded-full transition-all" title="מחיקת שעות (מנהל מערכת)"><DeleteIcon className="w-4 h-4"/></button>)}
+                                                    </div>
+                                                </td>
                                             </tr>
                                         );
                                     });

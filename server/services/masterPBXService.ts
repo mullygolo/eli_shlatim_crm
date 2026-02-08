@@ -30,8 +30,8 @@ export async function fetchCallLogsFromMasterPBX(
     endDate: string, // YYYY-MM-DD
     number?: string // Optional: extension or external number
 ): Promise<MasterPBXCallLog[]> {
-    if (!MASTERPBX_TOKEN_ID) {
-        throw new Error('MASTERPBX_TOKEN_ID not configured in environment variables');
+    if (!MASTERPBX_TOKEN_ID || !MASTERPBX_TOKEN_ID.trim()) {
+        throw new Error('סנכרון היסטוריה דורש הגדרת MASTERPBX_TOKEN_ID בקובץ .env של השרת. קבל את ה-Token ממערכת המרכזיה (הגדרות API).');
     }
 
     const url = `${MASTERPBX_API_BASE}/api/info/${startDate}/${endDate}/TENANT/callLog`;

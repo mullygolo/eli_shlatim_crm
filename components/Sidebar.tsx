@@ -23,7 +23,7 @@ const Sidebar: React.FC<SidebarProps> = ({ currentPage, setCurrentPage }) => {
         { page: 'PriceList', icon: <PriceListIcon className="h-6 w-6" /> },
         { page: 'Reports', icon: <ReportsIcon className="h-6 w-6" />, label: 'תשלום לספקים' },
         ...(isAdmin ? [{ page: 'Performance' as Page, icon: <ReportsIcon className="h-6 w-6" />, label: 'דוח ביצועים' }] : []),
-        ...(isEmployee ? [] : [{ page: 'Finance' as Page, icon: <FinanceIcon className="h-6 w-6" />, label: 'דוחות כספיים' }]),
+        { page: 'Finance' as Page, icon: <FinanceIcon className="h-6 w-6" />, label: isAdmin ? 'דוחות כספיים' : 'ניהול צ\'קים נכנסים' },
         { page: 'Attendance', icon: <ClockIcon className="h-6 w-6" />, label: 'נוכחות ושכר' },
         { page: 'CallCenter', icon: <PhoneIcon className="h-6 w-6" />, label: 'מרכזייה' },
         { page: 'ImprovementSuggestions' as Page, icon: <LightbulbIcon className="h-6 w-6" />, label: 'הצעות ייעול' },

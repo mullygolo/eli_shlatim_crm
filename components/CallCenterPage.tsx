@@ -283,8 +283,11 @@ const CallCenterPage: React.FC = () => {
                     size="lg"
                 >
                     <div className="space-y-4 text-start">
-                        <p className="text-sm text-slate-600 mb-4">
+                        <p className="text-sm text-slate-600">
                             בחר טווח תאריכים לסנכרון שיחות מהמרכזיה. השיחות יישמרו במערכת ויופיעו בטבלה.
+                        </p>
+                        <p className="text-xs text-slate-500">
+                            נדרש להגדיר במערכת השרת: MASTERPBX_TOKEN_ID (קבל את ה-Token ממערכת המרכזיה → הגדרות API).
                         </p>
 
                         <div className="grid grid-cols-2 gap-4">

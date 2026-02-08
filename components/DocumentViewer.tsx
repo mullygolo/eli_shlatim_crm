@@ -23,7 +23,14 @@ interface DocumentInfo {
     label: string;
     status?: 'opened' | 'closed' | 'canceled' | 'draft' | 'unavailable';
     statusLabel?: string;
+    /** תאריך בלבד (תאריך המסמך) — תאימות לאחור */
     date?: string;
+    /** timestamp במילישניות למיון לפי תאריך ושעת יצירה */
+    createdAtTimestamp?: number;
+    /** תאריך המסמך (להצגה) */
+    documentDateDisplay?: string;
+    /** הופק ב־ תאריך + שעה (להצגה) */
+    issuedAtDisplay?: string;
     amount?: number;
     currency?: string;
     number?: string;
@@ -67,6 +74,31 @@ function chequeDetailsFromRaw(raw: any): { reference?: string; repaymentDate?: s
     const reference = p.chequeNum ? String(p.chequeNum).trim() : undefined;
     const repaymentDate = (p.dueDate || p.date) ? String(p.dueDate || p.date).slice(0, 10) : undefined;
     return { reference, repaymentDate };
+}
+
+/** מחזיר timestamp למיון + מחרוזות להצגה: תאריך המסמך, הופק ב־ (תאריך + שעה) */
+function parseDocumentDates(raw: any): { createdAtTimestamp: number; dateStr: string; documentDateDisplay?: string; issuedAtDisplay?: string } {
+    const creationDate = raw?.creationDate ?? raw?.documentDate;
+    const documentDate = raw?.documentDate ?? raw?.creationDate;
+    const toMs = (v: unknown): number => {
+        if (v == null) return 0;
+        if (typeof v === 'number') return v < 1e12 ? v * 1000 : v;
+        const d = new Date(String(v));
+        return isNaN(d.getTime()) ? 0 : d.getTime();
+    };
+    const createdAtTimestamp = toMs(creationDate) || toMs(documentDate);
+    const dateOpts: Intl.DateTimeFormatOptions = { day: '2-digit', month: '2-digit', year: 'numeric' };
+    const dateTimeOpts: Intl.DateTimeFormatOptions = { ...dateOpts, hour: '2-digit', minute: '2-digit' };
+    const dateStr = createdAtTimestamp
+        ? new Date(createdAtTimestamp).toLocaleDateString('he-IL', dateOpts)
+        : '';
+    const documentDateDisplay = documentDate
+        ? new Date(toMs(documentDate)).toLocaleDateString('he-IL', dateOpts)
+        : dateStr;
+    const issuedAtDisplay = createdAtTimestamp
+        ? new Date(createdAtTimestamp).toLocaleString('he-IL', dateTimeOpts)
+        : undefined;
+    return { createdAtTimestamp, dateStr, documentDateDisplay: documentDateDisplay || undefined, issuedAtDisplay };
 }
 
 const DocumentViewer: React.FC<DocumentViewerProps> = ({ 
@@ -147,12 +179,7 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({
                                               status === 2 ? 'סגור ידנית' : 
                                               status === 3 ? 'מבטל מסמך אחר' : 
                                               status === 4 ? 'מבוטל' : 'לא ידוע';
-                            const creationDate = rawDoc.creationDate ?? rawDoc.documentDate;
-                            const dateStr = typeof creationDate === 'number'
-                                ? new Date(creationDate * 1000).toLocaleDateString('he-IL')
-                                : creationDate
-                                    ? new Date(creationDate).toLocaleDateString('he-IL')
-                                    : undefined;
+                            const dates = parseDocumentDates(rawDoc);
                             const payMethod = paymentMethodFromRaw(rawDoc);
                             const chequeDetails = chequeDetailsFromRaw(rawDoc);
                             // Infer type & label from raw doc (305=invoice, 320=invoice_receipt, 400=receipt, 330=credit, 10=estimate)
@@ -165,7 +192,10 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({
                                 label: inferredLabel,
                                 status: status === 0 ? 'opened' : status === 1 || status === 2 ? 'closed' : status === 4 ? 'canceled' : 'draft',
                                 statusLabel,
-                                date: dateStr,
+                                date: dates.dateStr,
+                                createdAtTimestamp: dates.createdAtTimestamp,
+                                documentDateDisplay: dates.documentDateDisplay,
+                                issuedAtDisplay: dates.issuedAtDisplay,
                                 amount: rawDoc.amount ?? rawDoc.total,
                                 currency: rawDoc.currency || 'ILS',
                                 number: rawDoc.number?.toString() || rawDoc.short_code,
@@ -187,6 +217,7 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({
                                 statusLabel: 'לא נטען',
                                 number: undefined,
                                 date: undefined,
+                                createdAtTimestamp: 0,
                                 description: undefined,
                                 amount: undefined,
                                 paymentMethod: undefined
@@ -203,6 +234,7 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({
                             statusLabel: 'לא נטען',
                             number: undefined,
                             date: undefined,
+                            createdAtTimestamp: 0,
                             description: undefined,
                             amount: undefined,
                             paymentMethod: undefined
@@ -257,12 +289,7 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({
                                                   status === 3 ? 'מבטל מסמך אחר' : 
                                                   status === 4 ? 'מבוטל' : 'לא ידוע';
                                 
-                                const creationDate = foundDoc.creationDate ?? foundDoc.documentDate;
-                                const dateStr = typeof creationDate === 'number'
-                                    ? new Date(creationDate * 1000).toLocaleDateString('he-IL')
-                                    : creationDate
-                                        ? new Date(creationDate).toLocaleDateString('he-IL')
-                                        : undefined;
+                                const dates = parseDocumentDates(foundDoc);
                                 const payMethod = paymentMethodFromRaw(foundDoc);
                                 const chequeDetails = chequeDetailsFromRaw(foundDoc);
                                 docs.push({
@@ -271,7 +298,10 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({
                                     label: docLabel,
                                     status: status === 0 ? 'opened' : status === 1 || status === 2 ? 'closed' : status === 4 ? 'canceled' : 'draft',
                                     statusLabel,
-                                    date: dateStr,
+                                    date: dates.dateStr,
+                                    createdAtTimestamp: dates.createdAtTimestamp,
+                                    documentDateDisplay: dates.documentDateDisplay,
+                                    issuedAtDisplay: dates.issuedAtDisplay,
                                     amount: foundDoc.amount ?? foundDoc.total,
                                     currency: foundDoc.currency || 'ILS',
                                     number: foundDoc.number?.toString() || foundDoc.short_code,
@@ -297,6 +327,8 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({
                 setLoading(false);
             }
 
+            // מיון מהחדש לישן לפי תאריך ושעת יצירה/הנפקה
+            docs.sort((a, b) => (b.createdAtTimestamp ?? 0) - (a.createdAtTimestamp ?? 0));
             setDocuments(docs);
         };
 
@@ -621,8 +653,11 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({
                                 {doc.number != null && doc.number !== '' && (
                                     <div><span className="font-medium text-slate-500">מספר מסמך:</span> {doc.number}</div>
                                 )}
-                                {doc.date != null && doc.date !== '' && (
-                                    <div><span className="font-medium text-slate-500">תאריך יצירה:</span> {doc.date}</div>
+                                {(doc.documentDateDisplay ?? doc.date) != null && (doc.documentDateDisplay ?? doc.date) !== '' && (
+                                    <div><span className="font-medium text-slate-500">תאריך המסמך:</span> {doc.documentDateDisplay ?? doc.date}</div>
+                                )}
+                                {doc.issuedAtDisplay != null && doc.issuedAtDisplay !== '' && (
+                                    <div><span className="font-medium text-slate-500">הופק ב־</span> {doc.issuedAtDisplay}</div>
                                 )}
                                 {doc.description != null && doc.description !== '' && (
                                     <div className="col-span-2"><span className="font-medium text-slate-500">כותרת:</span> {doc.description}</div>

@@ -101,7 +101,7 @@ function serializeDates(obj: any): any {
     return obj;
 }
 
-// Helper function to deserialize dates from MongoDB
+// Helper function to deserialize dates from MongoDB (safe: invalid dates don't throw)
 export function deserializeDates(obj: any): any {
     if (obj === null || obj === undefined) return obj;
     if (Array.isArray(obj)) return obj.map(deserializeDates);
@@ -109,7 +109,12 @@ export function deserializeDates(obj: any): any {
         const deserialized: any = {};
         for (const key in obj) {
             if (key.includes('Date') || key.includes('date') || key === 'timestamp' || key === 'createdAt' || key === 'updatedAt' || key === 'uploadedAt' || key === 'completedAt' || key === 'startDate' || key === 'endDate' || key === 'dueDate' || key === 'repaymentDate' || key === 'effectiveDate' || key === 'expectedCloseDate' || key === 'clockIn' || key === 'clockOut' || key === 'requestedClockIn' || key === 'requestedClockOut' || key === 'changedAt' || key === 'greenInvoiceCreatedAt') {
-                deserialized[key] = obj[key] ? new Date(obj[key]) : undefined;
+                try {
+                    deserialized[key] = obj[key] ? new Date(obj[key]) : undefined;
+                    if (deserialized[key] instanceof Date && isNaN(deserialized[key].getTime())) deserialized[key] = obj[key];
+                } catch {
+                    deserialized[key] = obj[key];
+                }
             } else {
                 deserialized[key] = deserializeDates(obj[key]);
             }

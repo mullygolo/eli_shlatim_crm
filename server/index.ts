@@ -123,7 +123,7 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
 (async () => {
     console.log('Starting server initialization...');
     
-    // Test MongoDB connection first
+    // MongoDB connection is required — do not start server without it
     try {
         console.log('Testing MongoDB connection...');
         await getDb();
@@ -132,10 +132,10 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
         const errorMsg = error instanceof Error ? error.message : String(error);
         console.error('✗ MongoDB connection failed:', errorMsg);
         console.error('Please check:');
-        console.error('  1. MONGO_URI in server/.env is correct');
-        console.error('  2. MongoDB Atlas (or your DB) is accessible');
-        console.error('  3. Network/firewall allows connection');
-        console.error('Server will start but API calls will fail until MongoDB is connected.');
+        console.error('  1. MONGO_URI in server/.env is set and correct (or use default in code)');
+        console.error('  2. MongoDB Atlas / local MongoDB is running and accessible');
+        console.error('  3. Network/firewall allows connection (e.g. allow list in Atlas)');
+        process.exit(1);
     }
     
     try {

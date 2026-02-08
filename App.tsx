@@ -262,7 +262,11 @@ const App: React.FC = () => {
                 const msg = failed.map((f) => f.label).join(', ');
                 const detail = failed[0].err instanceof Error ? failed[0].err.message : String(failed[0].err);
                 console.error('Error loading critical data:', failed);
-                setError(`שגיאה בטעינת הנתונים. אנא רענן את הדף.\n\nנכשל: ${msg}\n\nפרטים: ${detail}`);
+                const isDbUnavailable = /500|503|mongo|connection|מסד הנתונים לא זמין/i.test(detail);
+                const hint = isDbUnavailable
+                    ? '\n\nוודא שהשרת רץ (למשל start.bat או npm run dev:all) וש־MongoDB מחובר (MONGO_URI ב־server/.env או Atlas נגיש).'
+                    : '';
+                setError(`שגיאה בטעינת הנתונים. אנא רענן את הדף.\n\nנכשל: ${msg}\n\nפרטים: ${detail}${hint}`);
                 setIsLoading(false);
                 return;
             }

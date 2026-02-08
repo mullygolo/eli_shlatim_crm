@@ -2867,7 +2867,7 @@ export async function deleteAttendanceRecord(recordId: string): Promise<void> {
 }
 
 // Initialize index for attendance records (query performance).
-// One active clock-in per employee per day: partial unique index on (employeeId, dateString) where clockOut doesn't exist.
+// One active clock-in per employee per day: partial unique index on (employeeId, dateString) where active === true.
 export async function initializeAttendanceIndexes(): Promise<void> {
     try {
         const database = await getDb();
@@ -2888,7 +2888,7 @@ export async function initializeAttendanceIndexes(): Promise<void> {
                 { employeeId: 1, dateString: 1 },
                 {
                     unique: true,
-                    partialFilterExpression: { clockOut: { $exists: false } },
+                    partialFilterExpression: { active: true },
                     name: 'attendance_one_active_per_employee_day'
                 }
             );
@@ -2944,6 +2944,7 @@ export async function clockInAttendance(employeeId: string, isWFH: boolean = fal
             clockIn: now,
             totalHours: 0,
             status: isWFH ? 'WFH' : 'PRESENT',
+            active: true, // Used by partial unique index (one active per employee per day)
         };
         
         const serialized = serializeDates(newRecord);
@@ -3027,7 +3028,8 @@ export async function clockOutAttendance(recordId: string): Promise<AttendanceRe
             employeeName: employeeName || existing.employeeName,
             employeeUsername: employeeUsername || existing.employeeUsername,
             clockOut: now,
-            totalHours: totalHours
+            totalHours: totalHours,
+            active: false, // So partial unique index no longer applies
         };
         
         const serialized = serializeDates(updated);
@@ -3122,7 +3124,8 @@ export async function autoCloseOldAttendanceRecords(): Promise<number> {
             
             const updateData = {
                 clockOut: endOfDay,
-                totalHours: totalHours
+                totalHours: totalHours,
+                active: false,
             };
             const serializedUpdate = serializeDates(updateData);
             

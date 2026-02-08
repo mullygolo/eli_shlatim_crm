@@ -27,6 +27,13 @@ const isAnswered = (status: string): boolean => {
     return u === 'ANSWER' || u === 'ANSWERED';
 };
 
+/** Build the public webhook URL for the call center (no auth). */
+function getWebhookCallsUrl(): string {
+    const apiUrl = import.meta.env.VITE_API_URL || '';
+    const base = apiUrl.startsWith('http') ? apiUrl.replace(/\/api\/?$/, '') : (typeof window !== 'undefined' ? window.location.origin : '');
+    return `${base || ''}/api/webhook/calls`;
+}
+
 const CallCenterPage: React.FC = () => {
     const [logs, setLogs] = useState<CallLog[]>([]);
     const [loading, setLoading] = useState(true);
@@ -38,6 +45,7 @@ const CallCenterPage: React.FC = () => {
     const [syncSuccess, setSyncSuccess] = useState<string | null>(null);
     const [syncStartDate, setSyncStartDate] = useState('');
     const [syncEndDate, setSyncEndDate] = useState('');
+    const [webhookCopied, setWebhookCopied] = useState(false);
 
     useEffect(() => {
         let cancelled = false;
@@ -111,6 +119,17 @@ const CallCenterPage: React.FC = () => {
         setSyncStartDate(thirtyDaysAgo.toISOString().split('T')[0]);
     }, []);
 
+    const webhookUrl = getWebhookCallsUrl();
+    const handleCopyWebhook = async () => {
+        try {
+            await navigator.clipboard.writeText(webhookUrl);
+            setWebhookCopied(true);
+            setTimeout(() => setWebhookCopied(false), 2000);
+        } catch {
+            setWebhookCopied(false);
+        }
+    };
+
     if (loading) {
         return (
             <div className="flex justify-center items-center py-16" dir="rtl">
@@ -146,6 +165,25 @@ const CallCenterPage: React.FC = () => {
                     <ImportIcon className="h-5 w-5" />
                     סנכרן היסטוריה מהמרכזיה
                 </button>
+            </div>
+
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+                <p className="text-sm font-medium text-slate-700 mb-2">
+                    הגדרת המרכזיה: הזן את הכתובת הבאה בשדה Webhook URL במערכת המרכזיה
+                </p>
+                <div className="flex flex-wrap items-center gap-2">
+                    <code className="flex-1 min-w-0 text-sm text-slate-800 bg-white border border-slate-200 rounded px-3 py-2 font-mono break-all">
+                        {webhookUrl}
+                    </code>
+                    <button
+                        type="button"
+                        onClick={handleCopyWebhook}
+                        className="inline-flex items-center gap-1.5 shrink-0 px-3 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition"
+                    >
+                        <CopyIcon className="h-4 w-4" />
+                        {webhookCopied ? 'הועתק!' : 'העתק'}
+                    </button>
+                </div>
             </div>
 
             <div className="bg-white shadow-md rounded-lg overflow-hidden">
@@ -317,6 +355,12 @@ const CallCenterPage: React.FC = () => {
         </div>
     );
 };
+
+const CopyIcon: React.FC<{ className?: string }> = ({ className }) => (
+    <svg className={className} xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+    </svg>
+);
 
 const PlayIcon: React.FC<{ className?: string }> = ({ className }) => (
     <svg className={className} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">

@@ -11,6 +11,8 @@ interface DocumentViewerProps {
     /** פתיחת מודל: 'full' = כל הסוגים. 'from-document' + fromDocumentType + sourceDocumentId = אופציות לפי סוג המסמך */
     onOpenCreateModal?: (mode: 'full' | 'from-document', fromDocumentType?: 'invoice' | 'receipt' | 'credit' | 'estimate', sourceDocumentId?: string) => void;
     onCancelDocument?: (documentId: string, type: DocumentInfoType) => void;
+    /** false = כפתור ביטול מסמך מושבת (למשתמש שאינו מנהל) */
+    canCancelDocument?: boolean;
     /** שיוך מסמך מחשבונית ירוקה ידנית */
     onLinkDocument?: (documentId: string) => Promise<void>;
     /** מזהה הלקוח בחשבונית ירוקה — להצגת רשימת מסמכים לבחירה */
@@ -107,6 +109,7 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({
     onOpenInGreenInvoice,
     onOpenCreateModal,
     onCancelDocument,
+    canCancelDocument = true,
     onLinkDocument,
     customerGreenInvoiceClientId
 }) => {
@@ -726,7 +729,9 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({
                         {onCancelDocument && doc.cancellable && (doc.type === 'invoice' || doc.type === 'invoice_receipt' || doc.type === 'receipt') && (
                             <button
                                 type="button"
+                                disabled={!canCancelDocument}
                                 onClick={() => {
+                                    if (!canCancelDocument) return;
                                     const msg = doc.type === 'invoice'
                                         ? 'האם אתה בטוח שברצונך לבטל את המסמך? פעולה זו תיצור חשבונית זיכוי.'
                                         : doc.type === 'invoice_receipt'
@@ -736,8 +741,8 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({
                                         onCancelDocument(doc.id, doc.type);
                                     }
                                 }}
-                                className="px-3 py-1.5 text-sm bg-red-600 text-white rounded-md hover:bg-red-700 transition-colors"
-                                title={doc.type === 'invoice' ? 'ביטול מסמך (יצירת חשבונית זיכוי)' : doc.type === 'invoice_receipt' ? 'ביטול מסמך (חשבונית זיכוי + קבלה שלילית)' : 'ביטול קבלה (הפקת קבלה שלילית)'}
+                                className="px-3 py-1.5 text-sm bg-red-600 text-white rounded-md hover:bg-red-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                title={!canCancelDocument ? 'ביטול מסמך – למנהל בלבד' : doc.type === 'invoice' ? 'ביטול מסמך (יצירת חשבונית זיכוי)' : doc.type === 'invoice_receipt' ? 'ביטול מסמך (חשבונית זיכוי + קבלה שלילית)' : 'ביטול קבלה (הפקת קבלה שלילית)'}
                             >
                                 ביטול
                             </button>

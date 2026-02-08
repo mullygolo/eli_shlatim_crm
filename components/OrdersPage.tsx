@@ -3117,6 +3117,7 @@ const OrderForm: React.FC<{
                         <DocumentViewer
                             order={order}
                             customerGreenInvoiceClientId={customers.find(c => c.id === order.customerId)?.greenInvoiceClientId}
+                            canCancelDocument={isAdmin}
                             onDownload={handleDownloadDocument}
                             onOpenInGreenInvoice={handleOpenInGreenInvoice}
                             onOpenCreateModal={(mode, fromDocumentType, sourceDocumentId) => {

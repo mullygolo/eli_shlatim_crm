@@ -1,4 +1,4 @@
-import { Router } from 'express';
+תייimport { Router } from 'express';
 import { verifyToken, AuthRequest } from '../middleware/auth.js';
 import {
     createClient,
@@ -313,7 +313,7 @@ router.post('/orders/:orderId/link-document', async (req, res) => {
         const totals = calculateOrderTotals(order);
         const orderTotalWithVat = totals.totalAmount * (1 + (order.vatRate ?? vatRate) / 100);
         const remainingBalance = orderTotalWithVat - totals.totalPaid;
-        if (allocAmount > remainingBalance + 1) {
+        if (allocAmount > remainingBalance + 0.01) {
             return res.status(400).json({
                 error: `ההקצאה (₪${allocAmount.toFixed(2)}) חורגת מיתרת ההזמנה לתשלום (₪${remainingBalance.toFixed(2)})`,
                 errors: [`יתרה לתשלום בהזמנה ${order.orderNumber}: ₪${remainingBalance.toFixed(2)}`]
@@ -385,7 +385,7 @@ router.post('/documents/link-orders', async (req, res) => {
             const orderTotalWithVat = totals.totalAmount * (1 + (o.vatRate ?? defaultVatRate) / 100);
             const remainingBalance = orderTotalWithVat - totals.totalPaid;
             const alloc = allocations[o.id] || 0;
-            if (alloc > remainingBalance + 1) {
+            if (alloc > remainingBalance + 0.01) {
                 return res.status(400).json({
                     error: `ההקצאה להזמנה ${o.orderNumber} (₪${alloc.toFixed(2)}) חורגת מיתרת ההזמנה לתשלום (₪${remainingBalance.toFixed(2)})`,
                     errors: [`יתרה לתשלום בהזמנה ${o.orderNumber}: ₪${remainingBalance.toFixed(2)}`]
@@ -431,7 +431,6 @@ router.post('/documents/link-orders', async (req, res) => {
                 if (seen.has(key)) continue;
                 seen.add(key);
                 const repaymentDateStr = p.repaymentDate || (p.method === 'Cheque' ? p.date : undefined);
-                const isCheque = p.method === 'Cheque';
                 orderPayments.push({
                     id: `gi_pay_${Date.now()}_${orderId}_${added}`,
                     amount: allocAmt,
@@ -439,7 +438,7 @@ router.post('/documents/link-orders', async (req, res) => {
                     method: (methodMap[p.method || ''] || 'העברה בנקאית') as any,
                     reference: p.reference || '',
                     repaymentDate: repaymentDateStr ? new Date(repaymentDateStr) : undefined,
-                    status: isCheque ? 'PENDING' : 'CLEARED',
+                    status: 'CLEARED',
                     notes: 'סונכרן מחשבונית ירוקה'
                 });
                 added++;

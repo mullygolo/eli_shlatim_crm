@@ -2341,6 +2341,7 @@ interface AggregatedCheckServer {
     status: TransactionStatus;
     statusHistory: any[];
     sources: any[];
+    hasAttachments?: boolean;
 }
 
 export async function getChecksPaginated(
@@ -2613,8 +2614,15 @@ export async function getChecksPaginated(
         const skip = (page - 1) * limit;
         const paginatedChecks = filteredChecks.slice(skip, skip + limit);
 
+        // Enrich with hasAttachments
+        const uniqueIdsWithAttachments = await getCheckUniqueIdsWithAttachments();
+        const checksWithAttachments = paginatedChecks.map(c => ({
+            ...c,
+            hasAttachments: uniqueIdsWithAttachments.has(c.uniqueId)
+        }));
+
         return {
-            checks: paginatedChecks,
+            checks: checksWithAttachments,
             totalCount,
             page,
             limit,
@@ -2636,6 +2644,18 @@ export async function getChecksPaginated(
 interface CheckAttachmentsDoc {
     uniqueId: string;
     attachments: Attachment[];
+}
+
+/** Returns set of check uniqueIds that have at least one attachment. */
+export async function getCheckUniqueIdsWithAttachments(): Promise<Set<string>> {
+    try {
+        const database = await getDb();
+        const docs = await database.collection<CheckAttachmentsDoc>('checkAttachments').find({}).project({ uniqueId: 1 }).toArray();
+        return new Set(docs.map(d => d.uniqueId));
+    } catch (error) {
+        console.error('Error fetching check uniqueIds with attachments:', error);
+        return new Set();
+    }
 }
 
 export async function getCheckAttachments(uniqueId: string): Promise<Attachment[]> {

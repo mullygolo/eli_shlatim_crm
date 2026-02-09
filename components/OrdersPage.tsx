@@ -793,12 +793,34 @@ const OrderForm: React.FC<{
 
     const [paymentIdToDelete, setPaymentIdToDelete] = useState<string | null>(null); 
     const [viewingPaymentDocuments, setViewingPaymentDocuments] = useState<Attachment[] | null>(null);
+    /** For each check payment id, whether it has attachments (images/PDF) – used to show eye icon only when relevant. */
+    const [checkHasAttachments, setCheckHasAttachments] = useState<Record<string, boolean>>({});
     const [isCreateDocumentModalOpen, setIsCreateDocumentModalOpen] = useState(false);
     const [createDocumentModalMode, setCreateDocumentModalMode] = useState<'full' | 'from-document'>('full');
     const [createDocumentModalFromType, setCreateDocumentModalFromType] = useState<'invoice' | 'receipt' | 'credit' | 'estimate' | undefined>(undefined);
     const [createDocumentModalSourceId, setCreateDocumentModalSourceId] = useState<string | undefined>(undefined);
     const [invoiceSummary, setInvoiceSummary] = useState<{ invoicedAmount: number; creditsAmount: number; netInvoiced: number; hasInvoices: boolean; hasReceipts: boolean } | null>(null);
     const [collectionInfoExpanded, setCollectionInfoExpanded] = useState(false);
+
+    // Load which check payments have attachments (for eye icon in מסמכים column)
+    useEffect(() => {
+        const checkPayments = (formData.payments || []).filter(p => p.method === PaymentMethod.CHECK);
+        setCheckHasAttachments(prev => {
+            const next: Record<string, boolean> = {};
+            checkPayments.forEach(p => { if (prev[p.id] !== undefined) next[p.id] = prev[p.id]; });
+            return next;
+        });
+        if (checkPayments.length === 0) return;
+        let cancelled = false;
+        checkPayments.forEach(p => {
+            mongoService.getCheckAttachments(p.id).then(atts => {
+                if (!cancelled) setCheckHasAttachments(prev => ({ ...prev, [p.id]: atts.length > 0 }));
+            }).catch(() => {
+                if (!cancelled) setCheckHasAttachments(prev => ({ ...prev, [p.id]: false }));
+            });
+        });
+        return () => { cancelled = true; };
+    }, [formData.payments]);
 
     // GreenInvoice document creation handlers
     const handleCreateDocumentInternal = async (
@@ -3064,23 +3086,43 @@ const OrderForm: React.FC<{
                                                     </span>
                                                 </td>
                                                 <td className="px-3 py-2">
-                                                    {hasDocs ? (
-                                                        <button 
-                                                            type="button" 
-                                                            onClick={() => {
-                                                                const docs = payment.attachments && payment.attachments.length > 0 
-                                                                    ? payment.attachments 
-                                                                    : (payment.attachment ? [payment.attachment] : []);
-                                                                setViewingPaymentDocuments(docs);
-                                                            }}
-                                                            className="text-primary hover:text-indigo-800 flex items-center gap-1 text-xs font-medium"
-                                                        >
-                                                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
-                                                                <path fillRule="evenodd" d="M1 4a1 1 0 011-1h16a1 1 0 011 1v8a1 1 0 01-1 1H2a1 1 0 01-1-1V4zm12 4a3 3 0 11-6 0 3 3 0 016 0zM4 9a1 1 0 100-2 1 1 0 000 2zm13-1a1 1 0 11-2 0 1 1 0 012 0zM1.75 14.5a.75.75 0 000 1.5c4.417 0 8.693.603 12.749 1.73 1.111.309 2.251-.512 2.251-1.696v-.784a.75.75 0 00-1.5 0v.784a2.718 2.718 0 01-.529.134c-4.303 1.256-8.99 1.582-13.676.832H1.75z" clipRule="evenodd" />
-                                                            </svg>
-                                                            צפה ({docsCount})
-                                                        </button>
-                                                    ) : '-'}
+                                                    <div className="flex items-center gap-2 justify-end flex-wrap">
+                                                        {hasDocs && (
+                                                            <button 
+                                                                type="button" 
+                                                                onClick={() => {
+                                                                    const docs = payment.attachments && payment.attachments.length > 0 
+                                                                        ? payment.attachments 
+                                                                        : (payment.attachment ? [payment.attachment] : []);
+                                                                    setViewingPaymentDocuments(docs);
+                                                                }}
+                                                                className="text-primary hover:text-indigo-800 flex items-center gap-1 text-xs font-medium"
+                                                            >
+                                                                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+                                                                    <path fillRule="evenodd" d="M1 4a1 1 0 011-1h16a1 1 0 011 1v8a1 1 0 01-1 1H2a1 1 0 01-1-1V4zm12 4a3 3 0 11-6 0 3 3 0 016 0zM4 9a1 1 0 100-2 1 1 0 000 2zm13-1a1 1 0 11-2 0 1 1 0 012 0zM1.75 14.5a.75.75 0 000 1.5c4.417 0 8.693.603 12.749 1.73 1.111.309 2.251-.512 2.251-1.696v-.784a.75.75 0 00-1.5 0v.784a2.718 2.718 0 01-.529.134c-4.303 1.256-8.99 1.582-13.676.832H1.75z" clipRule="evenodd" />
+                                                                </svg>
+                                                                צפה ({docsCount})
+                                                            </button>
+                                                        )}
+                                                        {payment.method === PaymentMethod.CHECK && checkHasAttachments[payment.id] === true && (
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => {
+                                                                    mongoService.getCheckAttachments(payment.id).then(atts => {
+                                                                        if (atts.length > 0) setViewingPaymentDocuments(atts);
+                                                                    });
+                                                                }}
+                                                                className="p-1.5 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-colors"
+                                                                title="צפייה מהירה בתמונות/PDF של הצ'ק"
+                                                            >
+                                                                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                                                    <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                                                                    <path strokeLinecap="round" strokeLinejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                                                                </svg>
+                                                            </button>
+                                                        )}
+                                                        {!hasDocs && payment.method !== PaymentMethod.CHECK && '-'}
+                                                    </div>
                                                 </td>
                                                 <td className="px-3 py-2 text-left">
                                                     {payment.notes?.includes('סונכרן מחשבונית ירוקה') ? (

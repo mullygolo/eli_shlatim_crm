@@ -183,6 +183,7 @@ interface AggregatedCheck {
     status: TransactionStatus;
     statusHistory: any[];
     sources: CheckSource[];
+    hasAttachments?: boolean;
 }
 
 const TabButton: React.FC<{ label: string; active: boolean; onClick: () => void; icon?: React.ReactNode }> = ({ label, active, onClick, icon }) => (
@@ -965,7 +966,9 @@ const CheckCenter: React.FC<{
     incomingOnly?: boolean;
     /** Open file preview for a check attachment (image/PDF). */
     onViewCheckAttachment?: (att: Attachment) => void;
-}> = ({ orders, setOrders, fixedExpenses, setFixedExpenses, variableExpenses, setVariableExpenses, debts, setDebts, receivables, setReceivables, addActivity, incomingOnly = false, onViewCheckAttachment }) => {
+    /** Open quick view for all attachments of a check (from row eye icon). */
+    onViewCheckAttachments?: (attachments: Attachment[]) => void;
+}> = ({ orders, setOrders, fixedExpenses, setFixedExpenses, variableExpenses, setVariableExpenses, debts, setDebts, receivables, setReceivables, addActivity, incomingOnly = false, onViewCheckAttachment, onViewCheckAttachments }) => {
     const [tab, setTab] = useState<'INCOMING' | 'OUTGOING'>(incomingOnly ? 'INCOMING' : 'INCOMING');
     // SMART FILTER: Active (Actionable), Urgent (Overdue/Bounced), Archive (History), All
     const [smartFilter, setSmartFilter] = useState<'ACTIVE' | 'URGENT' | 'ARCHIVE' | 'ALL'>('ACTIVE');
@@ -996,7 +999,8 @@ const CheckCenter: React.FC<{
             const convertedChecks: AggregatedCheck[] = result.checks.map((c: any) => ({
                 ...c,
                 date: new Date(c.date),
-                repaymentDate: new Date(c.repaymentDate)
+                repaymentDate: new Date(c.repaymentDate),
+                hasAttachments: !!c.hasAttachments
             }));
             
             setPaginatedChecks(convertedChecks);
@@ -1395,7 +1399,30 @@ const CheckCenter: React.FC<{
                                         <td className={`px-6 py-4 font-black text-lg ${isBounced ? 'text-red-700' : 'text-slate-900'}`}>₪{check.amount.toLocaleString()}</td>
                                         <td className="px-6 py-4">{getStatusBadge(check.status)}</td>
                                         <td className="px-6 py-4 text-left">
-                                            <button onClick={() => setSelectedCheck({check, viewOnly: false})} className="bg-white hover:bg-indigo-600 hover:text-white px-4 py-2 rounded-lg border border-indigo-200 text-primary text-xs font-black shadow-sm transition-all group-hover:shadow-md">ניהול צ'ק</button>
+                                            <div className="flex items-center gap-2 justify-end">
+                                                {check.hasAttachments && (
+                                                    <>
+                                                        <span className="text-slate-400" title="מצורף תמונה/PDF לצ'ק">
+                                                            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" /></svg>
+                                                        </span>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => {
+                                                                mongoService.getCheckAttachments(check.uniqueId).then(atts => {
+                                                                    if (atts.length && onViewCheckAttachments) {
+                                                                        onViewCheckAttachments(atts);
+                                                                    }
+                                                                });
+                                                            }}
+                                                            className="p-2 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors"
+                                                            title="צפייה מהירה במצורפים"
+                                                        >
+                                                            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /><path strokeLinecap="round" strokeLinejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" /></svg>
+                                                        </button>
+                                                    </>
+                                                )}
+                                                <button onClick={() => setSelectedCheck({check, viewOnly: false})} className="bg-white hover:bg-indigo-600 hover:text-white px-4 py-2 rounded-lg border border-indigo-200 text-primary text-xs font-black shadow-sm transition-all group-hover:shadow-md">ניהול צ'ק</button>
+                                            </div>
                                         </td>
                                     </tr>
                                 );
@@ -2830,7 +2857,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
                         <p className="text-sm text-slate-500 mt-0.5">צפייה ועדכון סטטוס לצ'קים שנכנסו מלקוחות וחייבים</p>
                     </div>
                     <div className="p-6 min-h-[400px]">
-                        <CheckCenter orders={orders} setOrders={setOrders} fixedExpenses={fixedExpenses} setFixedExpenses={setFixedExpenses} variableExpenses={variableExpenses} setVariableExpenses={setVariableExpenses} debts={debts} setDebts={setDebts} receivables={receivables} setReceivables={setReceivables} addActivity={addActivity} incomingOnly={true} onViewCheckAttachment={(att) => { setViewingLoanDoc(att); setViewingAttachmentList(null); }} />
+                        <CheckCenter orders={orders} setOrders={setOrders} fixedExpenses={fixedExpenses} setFixedExpenses={setFixedExpenses} variableExpenses={variableExpenses} setVariableExpenses={setVariableExpenses} debts={debts} setDebts={setDebts} receivables={receivables} setReceivables={setReceivables} addActivity={addActivity} incomingOnly={true} onViewCheckAttachment={(att) => { setViewingLoanDoc(att); setViewingAttachmentList(null); }} onViewCheckAttachments={(attachments) => { setViewingAttachmentList(attachments); setViewingAttachmentIndex(0); setViewingLoanDoc(attachments[0]); }} />
                     </div>
                 </div>
             </div>
@@ -2899,7 +2926,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
                         </ErrorBoundary>
                     )}
 
-                    {activeTab === 'CHECKS' && <CheckCenter orders={orders} setOrders={setOrders} fixedExpenses={fixedExpenses} setFixedExpenses={setFixedExpenses} variableExpenses={variableExpenses} setVariableExpenses={setVariableExpenses} debts={debts} setDebts={setDebts} receivables={receivables} setReceivables={setReceivables} addActivity={addActivity} onViewCheckAttachment={(att) => { setViewingLoanDoc(att); setViewingAttachmentList(null); }} />}
+                    {activeTab === 'CHECKS' && <CheckCenter orders={orders} setOrders={setOrders} fixedExpenses={fixedExpenses} setFixedExpenses={setFixedExpenses} variableExpenses={variableExpenses} setVariableExpenses={setVariableExpenses} debts={debts} setDebts={setDebts} receivables={receivables} setReceivables={setReceivables} addActivity={addActivity} onViewCheckAttachment={(att) => { setViewingLoanDoc(att); setViewingAttachmentList(null); }} onViewCheckAttachments={(attachments) => { setViewingAttachmentList(attachments); setViewingAttachmentIndex(0); setViewingLoanDoc(attachments[0]); }} />}
 
                     {activeTab === 'FIXED' && (
                         <div className="text-start">

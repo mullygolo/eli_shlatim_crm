@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 
 interface Option {
     value: string;
@@ -26,12 +27,26 @@ const SearchableSelect: React.FC<SearchableSelectProps> = ({
 }) => {
     const [isOpen, setIsOpen] = useState(false);
     const [searchQuery, setSearchQuery] = useState('');
+    const [dropdownRect, setDropdownRect] = useState<{ top: number; left: number; width: number } | null>(null);
     const wrapperRef = useRef<HTMLDivElement>(null);
     const searchInputRef = useRef<HTMLInputElement>(null);
+
+    const updateDropdownPosition = () => {
+        if (wrapperRef.current) {
+            const rect = wrapperRef.current.getBoundingClientRect();
+            setDropdownRect({
+                top: rect.bottom + 4,
+                left: rect.left,
+                width: Math.max(rect.width, 200),
+            });
+        }
+    };
 
     useEffect(() => {
         function handleClickOutside(event: MouseEvent) {
             if (wrapperRef.current && !wrapperRef.current.contains(event.target as Node)) {
+                const target = event.target as HTMLElement;
+                if (target.closest?.('[data-searchable-select-dropdown]')) return;
                 setIsOpen(false);
             }
         }
@@ -42,7 +57,18 @@ const SearchableSelect: React.FC<SearchableSelectProps> = ({
     useEffect(() => {
         if (isOpen) {
             setSearchQuery('');
-            searchInputRef.current?.focus();
+            updateDropdownPosition();
+            const t = setTimeout(() => searchInputRef.current?.focus(), 0);
+            const onScrollOrResize = () => updateDropdownPosition();
+            window.addEventListener('scroll', onScrollOrResize, true);
+            window.addEventListener('resize', onScrollOrResize);
+            return () => {
+                clearTimeout(t);
+                window.removeEventListener('scroll', onScrollOrResize, true);
+                window.removeEventListener('resize', onScrollOrResize);
+            };
+        } else {
+            setDropdownRect(null);
         }
     }, [isOpen]);
 
@@ -64,70 +90,82 @@ const SearchableSelect: React.FC<SearchableSelectProps> = ({
 
     const selectedLabel = value ? (options.find(o => o.value === value)?.label ?? '') : '';
 
-    return (
-        <div className="relative w-full min-w-0" ref={wrapperRef} id={id}>
-            <button
-                type="button"
-                onClick={() => setIsOpen(!isOpen)}
-                title={title ?? (value ? selectedLabel : placeholder)}
-                className={`w-full text-start rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary truncate ${className}`}
-            >
-                <span className="block truncate">{value ? selectedLabel : placeholder}</span>
-                <span className="absolute end-2 top-1/2 -translate-y-1/2 pointer-events-none">
-                    <svg className={`h-4 w-4 text-slate-500 transition-transform ${isOpen ? 'rotate-180' : ''}`} xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                    </svg>
-                </span>
-            </button>
-            {isOpen && (
-                <div className="absolute z-50 mt-1 left-0 right-0 min-w-full bg-white shadow-lg border border-slate-200 rounded-md overflow-hidden">
-                    <div className="p-1.5 border-b border-slate-100 bg-slate-50/50">
-                        <input
-                            ref={searchInputRef}
-                            type="text"
-                            value={searchQuery}
-                            onChange={e => setSearchQuery(e.target.value)}
-                            onKeyDown={e => e.stopPropagation()}
-                            placeholder="חפש..."
-                            dir="rtl"
-                            className="w-full text-sm p-1.5 border border-slate-200 rounded focus:ring-2 focus:ring-primary/30 focus:border-primary text-right placeholder:text-slate-400"
-                        />
-                    </div>
-                    <ul className="max-h-48 overflow-y-auto py-1">
-                        <li>
+    const dropdownContent = isOpen && dropdownRect && (
+        <div
+            data-searchable-select-dropdown
+            className="fixed z-[9999] bg-white shadow-lg border border-slate-200 rounded-md overflow-hidden"
+            style={{
+                top: dropdownRect.top,
+                left: dropdownRect.left,
+                width: dropdownRect.width,
+            }}
+        >
+            <div className="p-1.5 border-b border-slate-100 bg-slate-50/50">
+                <input
+                    ref={searchInputRef}
+                    type="text"
+                    value={searchQuery}
+                    onChange={e => setSearchQuery(e.target.value)}
+                    onKeyDown={e => e.stopPropagation()}
+                    placeholder="חפש..."
+                    dir="rtl"
+                    className="w-full text-sm p-1.5 border border-slate-200 rounded focus:ring-2 focus:ring-primary/30 focus:border-primary text-right placeholder:text-slate-400"
+                />
+            </div>
+            <ul className="max-h-48 overflow-y-auto py-1">
+                <li>
+                    <button
+                        type="button"
+                        onClick={() => {
+                            onChange('');
+                            setIsOpen(false);
+                        }}
+                        className="w-full text-right px-3 py-2 text-sm hover:bg-slate-50 text-slate-500"
+                    >
+                        {placeholder}
+                    </button>
+                </li>
+                {filteredOptions.length === 0 ? (
+                    <li className="px-4 py-3 text-sm text-slate-400 text-center">אין תוצאות</li>
+                ) : (
+                    filteredOptions.map(option => (
+                        <li key={option.value}>
                             <button
                                 type="button"
                                 onClick={() => {
-                                    onChange('');
+                                    onChange(option.value);
                                     setIsOpen(false);
                                 }}
-                                className="w-full text-right px-3 py-2 text-sm hover:bg-slate-50 text-slate-500"
+                                className={`w-full text-right px-3 py-2 text-sm hover:bg-slate-50 ${option.value === value ? 'bg-primary/10 font-medium' : ''}`}
                             >
-                                {placeholder}
+                                {option.label}
                             </button>
                         </li>
-                        {filteredOptions.length === 0 ? (
-                            <li className="px-4 py-3 text-sm text-slate-400 text-center">אין תוצאות</li>
-                        ) : (
-                            filteredOptions.map(option => (
-                                <li key={option.value}>
-                                    <button
-                                        type="button"
-                                        onClick={() => {
-                                            onChange(option.value);
-                                            setIsOpen(false);
-                                        }}
-                                        className={`w-full text-right px-3 py-2 text-sm hover:bg-slate-50 ${option.value === value ? 'bg-primary/10 font-medium' : ''}`}
-                                    >
-                                        {option.label}
-                                    </button>
-                                </li>
-                            ))
-                        )}
-                    </ul>
-                </div>
-            )}
+                    ))
+                )}
+            </ul>
         </div>
+    );
+
+    return (
+        <>
+            <div className="relative w-full min-w-0" ref={wrapperRef} id={id}>
+                <button
+                    type="button"
+                    onClick={() => setIsOpen(!isOpen)}
+                    title={title ?? (value ? selectedLabel : placeholder)}
+                    className={`w-full text-start rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary truncate ${className}`}
+                >
+                    <span className="block truncate">{value ? selectedLabel : placeholder}</span>
+                    <span className="absolute end-2 top-1/2 -translate-y-1/2 pointer-events-none">
+                        <svg className={`h-4 w-4 text-slate-500 transition-transform ${isOpen ? 'rotate-180' : ''}`} xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                        </svg>
+                    </span>
+                </button>
+            </div>
+            {typeof document !== 'undefined' && dropdownContent && createPortal(dropdownContent, document.body)}
+        </>
     );
 };
 

@@ -1,5 +1,14 @@
 
-import { LineItem, AdditionalService, CustomerPayment, TransactionStatus } from '../types.js';
+import { LineItem, AdditionalService, CustomerPayment, TransactionStatus, LineItemUnit } from '../types.js';
+
+/** Effective quantity for billing: for M2 uses width×height×quantity, otherwise quantity */
+export const getLineItemEffectiveQuantity = (item: LineItem): number => {
+    const qty = item?.quantity ?? 0;
+    if (item?.unitType === LineItemUnit.M2 && item.width != null && item.height != null) {
+        return (item.width * item.height * qty) || 0;
+    }
+    return qty;
+};
 
 interface Totalable {
     lineItems: LineItem[];
@@ -14,13 +23,13 @@ export const calculateOrderTotals = (order: Totalable) => {
     const payments = order?.payments || [];
 
     const totalAmountFromItems = lineItems.reduce((sum, item) => {
-        const qty = item?.quantity || 0;
+        const qty = getLineItemEffectiveQuantity(item);
         const price = item?.unitPrice || 0;
         return sum + (qty * price);
     }, 0);
     
     const totalCostFromItems = lineItems.reduce((sum, item) => {
-        const qty = item?.quantity || 0;
+        const qty = getLineItemEffectiveQuantity(item);
         const cost = item?.cost || 0;
         return sum + (qty * cost);
     }, 0);

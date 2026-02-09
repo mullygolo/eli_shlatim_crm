@@ -498,6 +498,8 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({
                                     setLinkDocId('');
                                     setShowLinkForm(false);
                                     setRefreshTrigger(t => t + 1);
+                                } catch (err: any) {
+                                    alert(err?.message || 'שיוך המסמך נכשל. נסה שוב או פנה לתמיכה.');
                                 } finally {
                                     setLinkLoading(false);
                                 }
@@ -590,6 +592,8 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({
                                     setLinkDocId('');
                                     setShowLinkForm(false);
                                     setRefreshTrigger(t => t + 1);
+                                } catch (err: any) {
+                                    alert(err?.message || 'שיוך המסמך נכשל. נסה שוב או פנה לתמיכה.');
                                 } finally {
                                     setLinkLoading(false);
                                 }

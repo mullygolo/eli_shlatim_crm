@@ -11,7 +11,7 @@ import DocumentViewer from './DocumentViewer';
 import OrdersImportModal from './OrdersImportModal';
 import SearchableSelect from './SearchableSelect';
 import AutoResizeTextarea from './AutoResizeTextarea';
-import { calculateOrderTotals, calculateDueDate } from '../utils/calculations';
+import { calculateOrderTotals, calculateDueDate, getLineItemEffectiveQuantity } from '../utils/calculations';
 import MultiSelectFilter from './MultiSelectFilter';
 import * as mongoService from '../services/mongoService';
 import { getProducts } from '../services/priceListService';
@@ -1244,6 +1244,14 @@ const OrderForm: React.FC<{
     const totalDueWithVat = useMemo(() => totals.totalAmount * (1 + effectiveVatRate / 100), [totals.totalAmount, effectiveVatRate]);
     const totalPaid = totals.totalPaid;
     const balanceDue = totalDueWithVat - totalPaid;
+
+    // When invoice is rounded (within ₪1 above order total), show invoice amount in ניהול גבייה summary line
+    const { displayTotal, displayBalance } = useMemo(() => {
+        const net = invoiceSummary?.netInvoiced ?? 0;
+        const useRounded = !!invoiceSummary?.hasInvoices && net > totalDueWithVat + 0.01 && net <= totalDueWithVat + 1;
+        const total = useRounded ? net : totalDueWithVat;
+        return { displayTotal: total, displayBalance: Math.max(0, total - totalPaid) };
+    }, [invoiceSummary?.hasInvoices, invoiceSummary?.netInvoiced, totalDueWithVat, totalPaid]);
 
     const derivedPaymentStatus = useMemo(() => {
         if (totalPaid <= 0) return PaymentStatus.UNPAID;
@@ -2692,6 +2700,7 @@ const OrderForm: React.FC<{
                         </div>
                         <div className="divide-y-2 divide-slate-300">
                         {formData.lineItems.map((item, index) => {
+                            const effectiveQty = getLineItemEffectiveQuantity(item);
                             const itemMarkup = item.cost > 0 ? ((item.unitPrice - item.cost) / item.cost) * 100 : (item.unitPrice > 0 ? 100 : 0);
                             const markupColorClass = getProfitMarginColor(itemMarkup);
                             const rowBg = index % 2 === 0 ? 'bg-white' : 'bg-slate-50';
@@ -2779,10 +2788,10 @@ const OrderForm: React.FC<{
                                         <div className={`md:col-span-1 flex items-center md:flex-col md:justify-center md:items-start mt-1 md:mt-0 md:py-1.5 md:px-2 ${cellBorder}`}>
                                             <label className="text-xs font-medium text-slate-500 md:hidden w-20">סה"כ</label>
                                             <div className="flex flex-col">
-                                                <span className="text-xs font-semibold text-slate-800">₪{(item.quantity * item.unitPrice).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                                                <span className="text-xs font-semibold text-slate-800">₪{(effectiveQty * item.unitPrice).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                                                 {item.cost > 0 && (
-                                                    <span className="text-[10px] text-slate-500" title="סה״כ עלות">
-                                                        (₪{(item.quantity * item.cost).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })})
+                                                    <span className="text-[10px] text-slate-500" title="סה״כ עלות לספק">
+                                                        (₪{(effectiveQty * item.cost).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })})
                                                     </span>
                                                 )}
                                                 {item.unitType === LineItemUnit.M2 && item.width && item.height && (
@@ -2870,7 +2879,10 @@ const OrderForm: React.FC<{
                                 step="0.1"
                                 value={formData.vatRate}
                                 onChange={handleMasterChange}
-                                className="w-16 text-xs p-1 border rounded bg-white font-bold text-primary focus:ring-primary"
+                                readOnly={!isAdmin}
+                                disabled={!isAdmin}
+                                title={!isAdmin ? 'תיקון מע"מ – למנהל מערכת בלבד' : undefined}
+                                className={`w-16 text-xs p-1 border rounded font-bold text-primary focus:ring-primary ${!isAdmin ? 'bg-slate-100 cursor-not-allowed opacity-75' : 'bg-white'}`}
                             />
                         </div>
                     </div>
@@ -2966,6 +2978,11 @@ const OrderForm: React.FC<{
                                         )}
                                     </div>
                                 </div>
+                                {invoiceSummary.hasInvoices && invoiceSummary.netInvoiced > totalDueWithVat + 0.01 && invoiceSummary.netInvoiced <= totalDueWithVat + 1 && (
+                                    <p className="text-[10px] text-slate-500 mt-2 mb-1 italic">
+                                        סכום החשבונית (₪{invoiceSummary.netInvoiced.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}) מעוגל לעומת סה״כ ההזמנה (₪{totalDueWithVat.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })})
+                                    </p>
+                                )}
                                 {!isActiveDeal ? (
                                     <div className="flex flex-wrap gap-2 pt-2 border-t border-slate-200 text-xs">
                                         <span className="inline-flex items-center px-2 py-1 rounded bg-slate-100 text-slate-600 font-medium border border-slate-200">
@@ -2990,13 +3007,13 @@ const OrderForm: React.FC<{
                         )}
                         <div className="mb-4">
                             <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-xs mb-1.5">
-                                <span className="text-slate-600">שולם ₪{totalPaid.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} · יתרה ₪{balanceDue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} · סה״כ ₪{totalDueWithVat.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                                <span className="text-slate-600">שולם ₪{totalPaid.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} · יתרה ₪{displayBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} · סה״כ ₪{displayTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                                 {(formData.payments || []).length === 0 && <span className="text-slate-400">טרם התקבלו תשלומים</span>}
                             </div>
                             <div className="w-full bg-red-100 rounded-full h-2 overflow-hidden relative">
                                 <div 
                                     className="bg-green-500 h-full transition-all duration-500" 
-                                    style={{ width: `${Math.min(100, (totalPaid / (totalDueWithVat || 1)) * 100)}%` }}
+                                    style={{ width: `${Math.min(100, (totalPaid / (displayTotal || 1)) * 100)}%` }}
                                 ></div>
                             </div>
                         </div>
@@ -3154,8 +3171,16 @@ const OrderForm: React.FC<{
                                     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
                                     body: JSON.stringify({ documentId })
                                 });
-                                const data = await res.json();
-                                if (!res.ok) throw new Error(data.error || 'שגיאה בשיוך מסמך');
+                                let data: { error?: string; errors?: string[] } = {};
+                                try {
+                                    data = await res.json();
+                                } catch {
+                                    if (!res.ok) throw new Error(`שגיאה בשיוך מסמך (${res.status})`);
+                                }
+                                if (!res.ok) {
+                                    const msg = data.error || (Array.isArray(data.errors) && data.errors[0]) || 'שגיאה בשיוך מסמך';
+                                    throw new Error(msg);
+                                }
                                 const paymentsAdded = data.paymentsAdded ?? 0;
                                 const newPayments = data.orderUpdates?.payments;
                                 const linkLogEvent: TimelineEvent = {
@@ -4333,6 +4358,13 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                             const totalDueWithVat = totalAmount * (1 + currentOrderVat / 100);
                             
                             const balanceDue = isActiveDeal ? Math.max(0, totalDueWithVat - totalPaid) : 0;
+                            // Same derived payment status as in order form (so list and form stay in sync)
+                            const listDerivedPaymentStatus =
+                                totalPaid <= 0
+                                    ? PaymentStatus.UNPAID
+                                    : totalPaid >= totalDueWithVat - 1
+                                        ? PaymentStatus.PAID
+                                        : PaymentStatus.PARTIALLY_PAID;
                             const calculationBaseDate = order.dealStartDate || order.date;
                             const dueDate = calculateDueDate(calculationBaseDate, order.paymentTerms);
                             const today = new Date();
@@ -4466,12 +4498,17 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                                     </td>
                                     <td className="px-4 py-4 whitespace-nowrap text-sm font-bold text-red-600">
                                         {isActiveDeal ? (
-                                            balanceDue > 1 ? (
+                                            listDerivedPaymentStatus === PaymentStatus.PAID ? (
+                                                <span className="text-green-600 text-xs">שולם במלואו</span>
+                                            ) : (
                                                 <>
                                                     <div className="text-red-600">{balanceDue.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
                                                     <div className="text-[10px] text-red-400 font-normal">כולל מע"מ</div>
+                                                    {listDerivedPaymentStatus === PaymentStatus.PARTIALLY_PAID && (
+                                                        <div className="text-[10px] text-orange-600 font-semibold mt-0.5">תשלום חלקי</div>
+                                                    )}
                                                 </>
-                                            ) : <span className="text-green-600 text-xs">שולם במלואו</span>
+                                            )
                                         ) : (
                                             <span className="text-slate-400 text-xs font-normal">לא לתשלום</span>
                                         )}

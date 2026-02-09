@@ -1,6 +1,7 @@
-import React, { useMemo } from 'react';
-import { Employee, AttendanceRecord } from '../types';
+import React, { useMemo, useState, useEffect, useRef } from 'react';
+import { Employee, AttendanceRecord, NotificationItem } from '../types';
 import { useAuth } from '../contexts/AuthContext';
+import * as mongoService from '../services/mongoService';
 
 function formatHeaderDate(date: Date) {
     const weekday = new Intl.DateTimeFormat('he-IL', { weekday: 'long' }).format(date);
@@ -69,7 +70,44 @@ interface ActiveEmployeeInfo {
 
 const Header: React.FC<HeaderProps> = ({ title, employees = [], attendanceRecords = [], showAddOrderWidget, onAddOrder }) => {
     const { user, logout } = useAuth();
-    
+    const [notifications, setNotifications] = useState<NotificationItem[]>([]);
+    const [notificationsLoading, setNotificationsLoading] = useState(false);
+    const [bellOpen, setBellOpen] = useState(false);
+    const bellRef = useRef<HTMLDivElement>(null);
+
+    const fetchNotifications = () => {
+        if (!user?.id) return;
+        setNotificationsLoading(true);
+        mongoService.getNotifications()
+            .then(setNotifications)
+            .catch(() => setNotifications([]))
+            .finally(() => setNotificationsLoading(false));
+    };
+
+    useEffect(() => {
+        if (user?.id) fetchNotifications();
+    }, [user?.id]);
+    useEffect(() => {
+        if (bellOpen && user?.id) fetchNotifications();
+    }, [bellOpen]);
+
+    useEffect(() => {
+        function handleClickOutside(e: MouseEvent) {
+            if (bellRef.current && !bellRef.current.contains(e.target as Node)) setBellOpen(false);
+        }
+        if (bellOpen) {
+            document.addEventListener('mousedown', handleClickOutside);
+            return () => document.removeEventListener('mousedown', handleClickOutside);
+        }
+    }, [bellOpen]);
+
+    const handleMarkRead = (ids: string[]) => {
+        if (ids.length === 0) return;
+        mongoService.markNotificationsRead(ids).then(() => {
+            setNotifications(prev => prev.filter(n => !ids.includes(n.id)));
+        }).catch(() => {});
+    };
+
     const activeEmployees = useMemo((): ActiveEmployeeInfo[] => {
         const todayStr = new Date().toDateString();
         
@@ -133,6 +171,66 @@ const Header: React.FC<HeaderProps> = ({ title, employees = [], attendanceRecord
             </div>
 
             <div className="flex items-center gap-4">
+            {/* התראות (פעמון) */}
+            {user && (
+                <div className="relative" ref={bellRef}>
+                    <button
+                        type="button"
+                        onClick={() => setBellOpen(!bellOpen)}
+                        className="relative p-2 rounded-lg text-slate-600 hover:bg-slate-100 hover:text-slate-800 transition-colors"
+                        title="התראות"
+                        aria-label="התראות"
+                    >
+                        <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
+                        </svg>
+                        {notifications.length > 0 && (
+                            <span className="absolute -top-0.5 -right-0.5 flex h-4 min-w-[1rem] items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-bold text-white">
+                                {notifications.length > 99 ? '99+' : notifications.length}
+                            </span>
+                        )}
+                    </button>
+                    {bellOpen && (
+                        <div className="absolute left-0 top-full mt-2 w-[340px] max-h-[70vh] overflow-hidden bg-white rounded-xl shadow-xl border border-slate-200 z-[9999] flex flex-col">
+                            <div className="p-3 border-b border-slate-100 flex justify-between items-center">
+                                <h3 className="font-bold text-slate-800">התראות</h3>
+                                {notifications.length > 0 && (
+                                    <button
+                                        type="button"
+                                        onClick={() => handleMarkRead(notifications.map(n => n.id))}
+                                        className="text-xs text-primary hover:text-indigo-700 font-medium"
+                                    >
+                                        סמן הכל כראוי
+                                    </button>
+                                )}
+                            </div>
+                            <div className="overflow-y-auto flex-1 p-2">
+                                {notificationsLoading ? (
+                                    <p className="text-sm text-slate-400 py-4 text-center">טוען...</p>
+                                ) : notifications.length === 0 ? (
+                                    <p className="text-sm text-slate-400 py-4 text-center">אין התראות חדשות</p>
+                                ) : (
+                                    <ul className="space-y-2">
+                                        {notifications.map((n) => (
+                                            <li key={n.id} className="p-3 rounded-lg bg-slate-50 border border-slate-100 text-right">
+                                                <p className="font-semibold text-slate-800 text-sm">{n.title}</p>
+                                                <p className="text-xs text-slate-600 mt-0.5">{n.description}</p>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => handleMarkRead([n.id])}
+                                                    className="text-[10px] text-primary hover:underline mt-1"
+                                                >
+                                                    סמן כראוי
+                                                </button>
+                                            </li>
+                                        ))}
+                                    </ul>
+                                )}
+                            </div>
+                        </div>
+                    )}
+                </div>
+            )}
             {/* Order: הוסף הזמנה → מחוברים כעת → מחובר כ: → התנתק */}
             {showAddOrderWidget && onAddOrder && (
                 <button

@@ -625,6 +625,14 @@ export interface WallPost {
     timelineEventId?: string;
 }
 
+export type NotificationType = 'NOTE' | 'TASK' | 'LOGISTICS_TODAY' | 'WALL_POST' | 'FORGOT_CLOCK_OUT';
+export interface NotificationItem {
+    id: string;
+    type: NotificationType;
+    title: string;
+    description: string;
+}
+
 export interface CallLog {
     id: string;
     uniqueId: string;

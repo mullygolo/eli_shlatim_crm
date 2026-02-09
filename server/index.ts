@@ -23,6 +23,7 @@ import webhookCallsRouter from './routes/webhookCalls.js';
 import webhookGreenInvoiceRouter from './routes/webhookGreenInvoice.js';
 import callLogsRouter from './routes/callLogs.js';
 import performanceMetricsRouter from './routes/performanceMetrics.js';
+import notificationsRouter from './routes/notifications.js';
 import { initializeDefaultAdmin, autoCloseOldAttendanceRecords, initializeAttendanceIndexes, initializeCallLogsIndex, initializeStatusConfigs, getDb } from './services/mongoService.js';
 import { getDateStringIsrael } from './utils/timezone.js';
 
@@ -63,6 +64,7 @@ app.use('/api/green-invoice', greenInvoiceRouter);
 app.use('/api/webhook', webhookCallsRouter);
 app.use('/api/call-logs', callLogsRouter);
 app.use('/api/performance-metrics', performanceMetricsRouter);
+app.use('/api/notifications', notificationsRouter);
 
 // Health check
 app.get('/api/health', (req, res) => {

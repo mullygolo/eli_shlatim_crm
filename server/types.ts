@@ -618,6 +618,24 @@ export interface WallPost {
     timelineEventId?: string;
 }
 
+/** Per-user state for which notifications have been seen (bell) */
+export interface NotificationReadState {
+    employeeId: string;
+    readNoteIds: string[];       // timeline event IDs (NOTE)
+    readWallPostIds: string[];   // wall post IDs
+    readLogisticsDate?: string;  // 'YYYY-MM-DD' – user marked "seen" logistics for this day
+    dismissedForgotClockOutAt?: string; // 'YYYY-MM-DD' – user dismissed forgot-clock-out for this date
+}
+
+/** One item in the bell dropdown (explanations only, no links) */
+export type NotificationType = 'NOTE' | 'TASK' | 'LOGISTICS_TODAY' | 'WALL_POST' | 'FORGOT_CLOCK_OUT';
+export interface NotificationItem {
+    id: string;
+    type: NotificationType;
+    title: string;
+    description: string;
+}
+
 export interface CallLog {
     id: string;
     uniqueId: string;

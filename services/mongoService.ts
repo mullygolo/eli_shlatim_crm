@@ -2,7 +2,7 @@ import {
     Customer, Order, Supplier, Employee, Activity, ActivityFilters, ActivitiesResult, OrderStatusConfiguration,
     FixedExpense, VariableExpense, Loan, Debt, Receivable, EquityInvestment,
     AttendanceRecord, ManualEvent, WallPost, CallLog, ImprovementSuggestion, ImprovementSuggestionStatus, ImprovementSuggestionType,
-    PerformanceMetricsPayload
+    PerformanceMetricsPayload, NotificationItem
 } from '../types';
 
 // API Base URL - use relative path in production
@@ -780,6 +780,19 @@ export async function createWallPost(post: WallPost): Promise<WallPost> {
     return apiRequest<WallPost>('/wall-posts', {
         method: 'POST',
         body: JSON.stringify(post),
+    });
+}
+
+// ==================== NOTIFICATIONS (BELL) ====================
+export async function getNotifications(): Promise<NotificationItem[]> {
+    const res = await apiRequest<{ notifications: NotificationItem[] }>('/notifications');
+    return res.notifications;
+}
+
+export async function markNotificationsRead(notificationIds: string[]): Promise<void> {
+    await apiRequest<void>('/notifications/read', {
+        method: 'POST',
+        body: JSON.stringify({ notificationIds }),
     });
 }
 

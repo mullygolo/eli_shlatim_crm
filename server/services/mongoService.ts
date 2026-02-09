@@ -7,7 +7,7 @@ import {
     LineItem, AdditionalService, SupplierPayment, TransactionStatus,
     PaymentMethod, CustomerPayment, ReceivablePayment, DebtPayment,
     OrderDocumentLink, ImprovementSuggestion, ImprovementSuggestionStatus, ImprovementSuggestionType,
-    OrderType
+    OrderType, NotificationReadState, NotificationItem, NotificationType
 } from '../types.js';
 import { hashPassword } from '../utils/password.js';
 import { getTodayRangeIsrael, getDateStringIsrael, getMonthRangeIsrael, getDayRangeIsrael } from '../utils/timezone.js';
@@ -3220,6 +3220,176 @@ export async function createWallPost(post: WallPost): Promise<WallPost> {
         console.error('Error creating wall post:', error);
         throw error;
     }
+}
+
+// ==================== NOTIFICATION READ STATE (BELL) ====================
+const NOTIFICATION_READ_COLLECTION = 'notificationReadState';
+
+export async function getNotificationReadState(employeeId: string): Promise<NotificationReadState> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<NotificationReadState>(NOTIFICATION_READ_COLLECTION);
+        const doc = await collection.findOne({ employeeId });
+        if (!doc) return { employeeId, readNoteIds: [], readWallPostIds: [] };
+        return doc as NotificationReadState;
+    } catch (error) {
+        console.error('Error fetching notification read state:', error);
+        return { employeeId, readNoteIds: [], readWallPostIds: [] };
+    }
+}
+
+export async function updateNotificationReadState(employeeId: string, updates: Partial<Omit<NotificationReadState, 'employeeId'>>): Promise<NotificationReadState> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<NotificationReadState>(NOTIFICATION_READ_COLLECTION);
+        const existing = await collection.findOne({ employeeId });
+        const readNoteIds = updates.readNoteIds ?? existing?.readNoteIds ?? [];
+        const readWallPostIds = updates.readWallPostIds ?? existing?.readWallPostIds ?? [];
+        const readLogisticsDate = updates.readLogisticsDate ?? existing?.readLogisticsDate;
+        const dismissedForgotClockOutAt = updates.dismissedForgotClockOutAt ?? existing?.dismissedForgotClockOutAt;
+        const next: NotificationReadState = {
+            employeeId,
+            readNoteIds,
+            readWallPostIds,
+            ...(readLogisticsDate !== undefined && { readLogisticsDate }),
+            ...(dismissedForgotClockOutAt !== undefined && { dismissedForgotClockOutAt }),
+        };
+        await collection.updateOne(
+            { employeeId },
+            { $set: next },
+            { upsert: true }
+        );
+        return next;
+    } catch (error) {
+        console.error('Error updating notification read state:', error);
+        throw error;
+    }
+}
+
+/** Build list of notifications for the bell (explanations only). Tasks: only if not completed; others filtered by per-user read state. */
+export async function getNotificationsForUser(employeeId: string): Promise<NotificationItem[]> {
+    const todayStr = getDateStringIsrael(new Date());
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yesterdayStr = getDateStringIsrael(yesterday);
+
+    const [orders, wallPosts, manualEvents, attendanceRecords, readState] = await Promise.all([
+        getOrders(),
+        getWallPosts(),
+        getManualEvents(),
+        getAttendanceRecords(),
+        getNotificationReadState(employeeId),
+    ]);
+
+    const readNoteIds = new Set(readState.readNoteIds ?? []);
+    const readWallPostIds = new Set(readState.readWallPostIds ?? []);
+    const readLogisticsDate = readState.readLogisticsDate;
+    const dismissedForgotClockOut = readState.dismissedForgotClockOutAt === yesterdayStr;
+
+    const items: NotificationItem[] = [];
+
+    // 1) NOTES from order timeline (unread by this user)
+    for (const order of orders) {
+        if (!order.timeline) continue;
+        for (const event of order.timeline) {
+            if (event.type !== 'NOTE') continue;
+            if (readNoteIds.has(event.id)) continue;
+            items.push({
+                id: `note_${event.id}`,
+                type: 'NOTE',
+                title: 'הערה חדשה בהזמנה',
+                description: `הזמנה ${order.orderNumber || order.id}: ${(event.content || '').slice(0, 80)}${(event.content || '').length > 80 ? '...' : ''}`,
+            });
+        }
+    }
+
+    // 2) TASKS due today or overdue, not completed (no per-user read; completion = gone for everyone)
+    for (const order of orders) {
+        if (!order.timeline) continue;
+        for (const event of order.timeline) {
+            if (event.type !== 'TASK' || event.isCompleted || !event.dueDate) continue;
+            const dueStr = getDateStringIsrael(new Date(event.dueDate));
+            if (dueStr > todayStr) continue; // future: don't show yet
+            const isOverdue = dueStr < todayStr;
+            items.push({
+                id: `task_${event.id}`,
+                type: 'TASK',
+                title: isOverdue ? 'משימה באיחור' : 'משימה להיום',
+                description: `הזמנה ${order.orderNumber || order.id}: ${(event.content || '').slice(0, 60)}${(event.content || '').length > 60 ? '...' : ''}`,
+            });
+        }
+    }
+
+    // 3) Logistics (delivery/installation) or manual events scheduled for today – one notification per day, per-user read
+    if (readLogisticsDate !== todayStr) {
+        let hasLogisticsToday = false;
+        const parts: string[] = [];
+        for (const order of orders) {
+            const lineItems = order.lineItems || [];
+            for (const li of lineItems) {
+                if ((li.serviceType !== 'DELIVERY' && li.serviceType !== 'INSTALLATION') || !li.serviceDetails?.scheduledDate) continue;
+                const d = new Date(li.serviceDetails.scheduledDate);
+                if (getDateStringIsrael(d) !== todayStr) continue;
+                hasLogisticsToday = true;
+                const kind = li.serviceType === 'DELIVERY' ? 'משלוח' : 'התקנה';
+                parts.push(`הזמנה ${order.orderNumber}: ${(li.description || kind).slice(0, 40)}`);
+            }
+            for (const svc of order.additionalServices || []) {
+                if (!svc.scheduledDate || getDateStringIsrael(new Date(svc.scheduledDate)) !== todayStr) continue;
+                hasLogisticsToday = true;
+                parts.push(`הזמנה ${order.orderNumber}: ${(svc.description || 'שירות').slice(0, 40)}`);
+            }
+        }
+        for (const evt of manualEvents) {
+            if (getDateStringIsrael(new Date(evt.date)) !== todayStr) continue;
+            hasLogisticsToday = true;
+            parts.push(evt.title || 'אירוע');
+        }
+        if (hasLogisticsToday) {
+            items.push({
+                id: `logistics_today_${todayStr}`,
+                type: 'LOGISTICS_TODAY',
+                title: 'משלוח/התקנה או אירוע מתוכנן להיום',
+                description: parts.slice(0, 3).join(' · ') || 'פרטים ביומן בלוח הבקרה',
+            });
+        }
+    }
+
+    // 4) Wall posts (unread by this user)
+    for (const post of wallPosts) {
+        if (readWallPostIds.has(post.id)) continue;
+        items.push({
+            id: `wall_${post.id}`,
+            type: 'WALL_POST',
+            title: 'עדכון בקיר צוות',
+            description: `${post.authorName || 'משתמש'}: ${(post.content || '').slice(0, 70)}${(post.content || '').length > 70 ? '...' : ''}`,
+        });
+    }
+
+    // 5) Forgot to clock out yesterday (only for this employee, and not dismissed)
+    if (!dismissedForgotClockOut) {
+        const openYesterday = attendanceRecords.find(
+            r => r.employeeId === employeeId && getDateStringIsrael(new Date(r.date)) === yesterdayStr && r.clockIn && !r.clockOut
+        );
+        if (openYesterday) {
+            items.push({
+                id: `forgot_clockout_${yesterdayStr}`,
+                type: 'FORGOT_CLOCK_OUT',
+                title: 'שכחת להחתים יציאה אתמול',
+                description: 'נא לתקן את השעות ולהגיש בקשה לתיקון ידני.',
+            });
+        }
+    }
+
+    // Sort by type order then by id for stability
+    const typeOrder: NotificationType[] = ['FORGOT_CLOCK_OUT', 'TASK', 'LOGISTICS_TODAY', 'NOTE', 'WALL_POST'];
+    items.sort((a, b) => {
+        const ai = typeOrder.indexOf(a.type);
+        const bi = typeOrder.indexOf(b.type);
+        if (ai !== bi) return ai - bi;
+        return a.id.localeCompare(b.id);
+    });
+    return items;
 }
 
 // ==================== IMPROVEMENT SUGGESTIONS ====================

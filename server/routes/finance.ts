@@ -6,7 +6,9 @@ import {
     getDebts, getDebtsPaginated, createDebt, updateDebt, deleteDebt,
     getReceivables, getReceivablesPaginated, createReceivable, updateReceivable, deleteReceivable,
     getEquity, createEquity, updateEquity, deleteEquity,
-    getChecksPaginated
+    getChecksPaginated,
+    getCheckAttachments,
+    setCheckAttachments
 } from '../services/mongoService.js';
 
 const router = Router();
@@ -282,6 +284,25 @@ router.get('/checks/paginated', async (req, res) => {
         res.json(result);
     } catch (error) {
         res.status(500).json({ error: 'Failed to fetch paginated checks' });
+    }
+});
+
+// Check attachments (images/PDFs per check)
+router.get('/check-attachments/:uniqueId', async (req, res) => {
+    try {
+        const attachments = await getCheckAttachments(req.params.uniqueId);
+        res.json(attachments);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch check attachments' });
+    }
+});
+
+router.put('/check-attachments/:uniqueId', async (req, res) => {
+    try {
+        const attachments = await setCheckAttachments(req.params.uniqueId, req.body.attachments || []);
+        res.json(attachments);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to save check attachments' });
     }
 });
 

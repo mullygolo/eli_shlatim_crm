@@ -766,17 +766,72 @@ const ReceivableCollectionModal: React.FC<{
     );
 };
 
+const readFileAsAttachment = (file: File): Promise<Attachment> => {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            if (e.target?.result) {
+                resolve({
+                    id: `att_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
+                    fileName: file.name,
+                    dataUrl: e.target.result as string,
+                    type: file.type,
+                });
+            } else reject(new Error('Failed to read file'));
+        };
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(file);
+    });
+};
+
 const CheckActionModal: React.FC<{
     check: AggregatedCheck;
     onUpdateStatus: (check: AggregatedCheck, newStatus: TransactionStatus, metadata?: any) => void;
     onClose: () => void;
     viewOnlyHistory?: boolean;
-}> = ({ check, onUpdateStatus, onClose, viewOnlyHistory = false }) => {
+    onViewAttachment?: (att: Attachment) => void;
+}> = ({ check, onUpdateStatus, onClose, viewOnlyHistory = false, onViewAttachment }) => {
     const [selectedStatus, setSelectedStatus] = useState<TransactionStatus>(check.status);
     const [note, setNote] = useState('');
     const [bounceFee, setBounceFee] = useState<number>(0);
     const [addFee, setAddFee] = useState(false);
+    const [checkAttachments, setCheckAttachmentsState] = useState<Attachment[]>([]);
+    const [loadingAttachments, setLoadingAttachments] = useState(true);
     const isIncoming = check.type === 'INCOMING';
+
+    useEffect(() => {
+        let cancelled = false;
+        setLoadingAttachments(true);
+        mongoService.getCheckAttachments(check.uniqueId).then((list) => {
+            if (!cancelled) setCheckAttachmentsState(list);
+        }).catch(() => {
+            if (!cancelled) setCheckAttachmentsState([]);
+        }).finally(() => {
+            if (!cancelled) setLoadingAttachments(false);
+        });
+        return () => { cancelled = true; };
+    }, [check.uniqueId]);
+
+    const saveCheckAttachments = useCallback((list: Attachment[]) => {
+        mongoService.setCheckAttachments(check.uniqueId, list).then(() => setCheckAttachmentsState(list)).catch((err) => {
+            console.error('Failed to save check attachments:', err);
+            alert(err?.message || 'שגיאה בשמירת הקבצים.');
+        });
+    }, [check.uniqueId]);
+
+    const handleCheckFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const files = e.target.files;
+        if (!files || files.length === 0) return;
+        const newOnes: Attachment[] = [];
+        for (let i = 0; i < files.length; i++) {
+            try {
+                newOnes.push(await readFileAsAttachment(files[i]));
+            } catch (_) { /* skip */ }
+        }
+        const next = [...checkAttachments, ...newOnes];
+        saveCheckAttachments(next);
+        e.target.value = '';
+    };
 
     const statusOptions: { value: TransactionStatus; label: string; color: string }[] = [
         { value: 'PENDING', label: isIncoming ? 'ביד (ממתין להפקדה)' : 'נמסר (טרם נפרע)', color: 'bg-yellow-100 text-yellow-800' },
@@ -843,6 +898,30 @@ const CheckActionModal: React.FC<{
                         </div>
                     </div>
                 )}
+                <div className="border-b border-slate-200 pb-6 mb-6">
+                    <h4 className="font-bold text-slate-800 mb-3">תמונה / PDF של הצ'ק</h4>
+                    {loadingAttachments ? (
+                        <p className="text-sm text-slate-500">טוען...</p>
+                    ) : (
+                        <>
+                            <input type="file" multiple accept="image/*,.pdf" onChange={handleCheckFileChange} className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100" />
+                            <p className="text-[10px] text-slate-400 mt-1">תמונות או PDF. ניתן לבחור מספר קבצים.</p>
+                            {checkAttachments.length > 0 && (
+                                <ul className="mt-2 space-y-1.5 max-h-40 overflow-y-auto">
+                                    {checkAttachments.map((att) => (
+                                        <li key={att.id} className="flex items-center justify-between p-2 bg-slate-50 border border-slate-200 rounded-lg">
+                                            <span className="text-xs font-bold text-slate-700 truncate flex-1 min-w-0">{att.fileName}</span>
+                                            <div className="flex gap-2 shrink-0">
+                                                {onViewAttachment && <button type="button" onClick={() => onViewAttachment(att)} className="text-[10px] bg-white border border-slate-200 px-2 py-1 rounded font-bold text-indigo-600 hover:bg-indigo-50">צפה</button>}
+                                                <button type="button" onClick={() => saveCheckAttachments(checkAttachments.filter((a) => a.id !== att.id))} className="text-[10px] text-red-500 font-bold px-2 py-1 hover:bg-red-50 rounded">הסר</button>
+                                            </div>
+                                        </li>
+                                    ))}
+                                </ul>
+                            )}
+                        </>
+                    )}
+                </div>
                 <div>
                     <h4 className="font-bold text-slate-800 mb-3 flex items-center">
                         <ClockIcon className="w-4 h-4 me-2 text-slate-500"/> היסטוריית גלגול הצ'ק
@@ -884,7 +963,9 @@ const CheckCenter: React.FC<{
     addActivity: (description: string, options?: import('../types').AddActivityOptions) => void;
     /** When true, show only incoming checks (for MANAGER/EMPLOYEE). */
     incomingOnly?: boolean;
-}> = ({ orders, setOrders, fixedExpenses, setFixedExpenses, variableExpenses, setVariableExpenses, debts, setDebts, receivables, setReceivables, addActivity, incomingOnly = false }) => {
+    /** Open file preview for a check attachment (image/PDF). */
+    onViewCheckAttachment?: (att: Attachment) => void;
+}> = ({ orders, setOrders, fixedExpenses, setFixedExpenses, variableExpenses, setVariableExpenses, debts, setDebts, receivables, setReceivables, addActivity, incomingOnly = false, onViewCheckAttachment }) => {
     const [tab, setTab] = useState<'INCOMING' | 'OUTGOING'>(incomingOnly ? 'INCOMING' : 'INCOMING');
     // SMART FILTER: Active (Actionable), Urgent (Overdue/Bounced), Archive (History), All
     const [smartFilter, setSmartFilter] = useState<'ACTIVE' | 'URGENT' | 'ARCHIVE' | 'ALL'>('ACTIVE');
@@ -1396,7 +1477,7 @@ const CheckCenter: React.FC<{
                     </div>
                 )}
             </div>
-            {selectedCheck && <CheckActionModal check={selectedCheck.check} onClose={() => setSelectedCheck(null)} onUpdateStatus={handleUpdateCheckStatus} viewOnlyHistory={selectedCheck.viewOnly} />}
+            {selectedCheck && <CheckActionModal check={selectedCheck.check} onClose={() => setSelectedCheck(null)} onUpdateStatus={handleUpdateCheckStatus} viewOnlyHistory={selectedCheck.viewOnly} onViewAttachment={onViewCheckAttachment} />}
         </div>
     );
 };
@@ -2749,7 +2830,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
                         <p className="text-sm text-slate-500 mt-0.5">צפייה ועדכון סטטוס לצ'קים שנכנסו מלקוחות וחייבים</p>
                     </div>
                     <div className="p-6 min-h-[400px]">
-                        <CheckCenter orders={orders} setOrders={setOrders} fixedExpenses={fixedExpenses} setFixedExpenses={setFixedExpenses} variableExpenses={variableExpenses} setVariableExpenses={setVariableExpenses} debts={debts} setDebts={setDebts} receivables={receivables} setReceivables={setReceivables} addActivity={addActivity} incomingOnly={true} />
+                        <CheckCenter orders={orders} setOrders={setOrders} fixedExpenses={fixedExpenses} setFixedExpenses={setFixedExpenses} variableExpenses={variableExpenses} setVariableExpenses={setVariableExpenses} debts={debts} setDebts={setDebts} receivables={receivables} setReceivables={setReceivables} addActivity={addActivity} incomingOnly={true} onViewCheckAttachment={(att) => { setViewingLoanDoc(att); setViewingAttachmentList(null); }} />
                     </div>
                 </div>
             </div>
@@ -2818,7 +2899,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
                         </ErrorBoundary>
                     )}
 
-                    {activeTab === 'CHECKS' && <CheckCenter orders={orders} setOrders={setOrders} fixedExpenses={fixedExpenses} setFixedExpenses={setFixedExpenses} variableExpenses={variableExpenses} setVariableExpenses={setVariableExpenses} debts={debts} setDebts={setDebts} receivables={receivables} setReceivables={setReceivables} addActivity={addActivity} />}
+                    {activeTab === 'CHECKS' && <CheckCenter orders={orders} setOrders={setOrders} fixedExpenses={fixedExpenses} setFixedExpenses={setFixedExpenses} variableExpenses={variableExpenses} setVariableExpenses={setVariableExpenses} debts={debts} setDebts={setDebts} receivables={receivables} setReceivables={setReceivables} addActivity={addActivity} onViewCheckAttachment={(att) => { setViewingLoanDoc(att); setViewingAttachmentList(null); }} />}
 
                     {activeTab === 'FIXED' && (
                         <div className="text-start">
@@ -3863,7 +3944,8 @@ const FinancePage: React.FC<FinancePageProps> = ({
                             handleUpdateReceivablePaymentStatus(check.sources[0].receivableId!, check.uniqueId, newStatus, metadata?.note);
                         }
                     }} 
-                    viewOnlyHistory={selectedCheckForDebt.viewOnly} 
+                    viewOnlyHistory={selectedCheckForDebt.viewOnly}
+                    onViewAttachment={(att) => { setViewingLoanDoc(att); setViewingAttachmentList(null); }}
                 />
             )}
         </div>

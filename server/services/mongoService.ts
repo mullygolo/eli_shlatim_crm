@@ -7,7 +7,8 @@ import {
     LineItem, AdditionalService, SupplierPayment, TransactionStatus,
     PaymentMethod, CustomerPayment, ReceivablePayment, DebtPayment,
     OrderDocumentLink, ImprovementSuggestion, ImprovementSuggestionStatus, ImprovementSuggestionType,
-    OrderType, NotificationReadState, NotificationItem, NotificationType
+    OrderType, NotificationReadState, NotificationItem, NotificationType,
+    Attachment
 } from '../types.js';
 import { hashPassword } from '../utils/password.js';
 import { getTodayRangeIsrael, getDateStringIsrael, getMonthRangeIsrael, getDayRangeIsrael } from '../utils/timezone.js';
@@ -2627,6 +2628,42 @@ export async function getChecksPaginated(
         };
     } catch (error) {
         console.error('Error fetching paginated checks:', error);
+        throw error;
+    }
+}
+
+/** Attachments (images/PDFs) per check, keyed by check uniqueId (e.g. payment id). */
+interface CheckAttachmentsDoc {
+    uniqueId: string;
+    attachments: Attachment[];
+}
+
+export async function getCheckAttachments(uniqueId: string): Promise<Attachment[]> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<CheckAttachmentsDoc>('checkAttachments');
+        const doc = await collection.findOne({ uniqueId });
+        if (!doc || !doc.attachments) return [];
+        return (doc.attachments || []).map((a: any) => deserializeDates(a) as Attachment);
+    } catch (error) {
+        console.error('Error fetching check attachments:', error);
+        throw error;
+    }
+}
+
+export async function setCheckAttachments(uniqueId: string, attachments: Attachment[]): Promise<Attachment[]> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<CheckAttachmentsDoc>('checkAttachments');
+        const serialized = attachments.map(a => serializeDates(a));
+        await collection.updateOne(
+            { uniqueId },
+            { $set: { uniqueId, attachments: serialized } },
+            { upsert: true }
+        );
+        return attachments;
+    } catch (error) {
+        console.error('Error saving check attachments:', error);
         throw error;
     }
 }

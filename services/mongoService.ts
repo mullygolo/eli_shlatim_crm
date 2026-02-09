@@ -2,7 +2,8 @@ import {
     Customer, Order, Supplier, Employee, Activity, ActivityFilters, ActivitiesResult, OrderStatusConfiguration,
     FixedExpense, VariableExpense, Loan, Debt, Receivable, EquityInvestment,
     AttendanceRecord, ManualEvent, WallPost, CallLog, ImprovementSuggestion, ImprovementSuggestionStatus, ImprovementSuggestionType,
-    PerformanceMetricsPayload, NotificationItem
+    PerformanceMetricsPayload, NotificationItem,
+    Attachment
 } from '../types';
 
 // API Base URL - use relative path in production
@@ -655,6 +656,17 @@ export async function getChecksPaginated(
     if (filters.searchQuery) queryParams.append('searchQuery', filters.searchQuery);
     
     return apiRequest<any>(`/finance/checks/paginated?${queryParams}`);
+}
+
+export async function getCheckAttachments(uniqueId: string): Promise<Attachment[]> {
+    return apiRequest<Attachment[]>(`/finance/check-attachments/${encodeURIComponent(uniqueId)}`);
+}
+
+export async function setCheckAttachments(uniqueId: string, attachments: Attachment[]): Promise<Attachment[]> {
+    return apiRequest<Attachment[]>(`/finance/check-attachments/${encodeURIComponent(uniqueId)}`, {
+        method: 'PUT',
+        body: JSON.stringify({ attachments }),
+    });
 }
 
 // ==================== EQUITY ====================

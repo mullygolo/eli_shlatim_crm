@@ -1,6 +1,6 @@
 import { Order, Customer, CustomerPayment, LineItem, AdditionalService, LineItemUnit, PaymentStatus } from '../types.js';
 import { CreateInvoiceRequest, GreenInvoiceInvoiceItem, CreateClientRequest } from '../types/greenInvoice.js';
-import { calculateOrderTotals, calculateDueDate } from '../utils/calculations.js';
+import { calculateOrderTotals, calculateDueDate, getLineItemEffectiveQuantity } from '../utils/calculations.js';
 import { getDateStringIsrael } from '../utils/timezone.js';
 import { normalizeIsraeliIdOrCompanyNumber } from '../utils/israeliId.js';
 
@@ -94,15 +94,16 @@ export function mapCustomerToClient(customer: Customer): CreateClientRequest & {
 }
 
 /**
- * Map LineItem to GreenInvoice InvoiceItem
+ * Map LineItem to GreenInvoice InvoiceItem.
+ * For M² items uses effective quantity (width×height×quantity) so invoice total matches order form.
  */
 function mapLineItemToInvoiceItem(item: LineItem): GreenInvoiceInvoiceItem {
-    // Calculate amount based on quantity and unit price
-    const amount = item.quantity * item.unitPrice;
-    
+    const effectiveQty = getLineItemEffectiveQuantity(item);
+    const amount = effectiveQty * item.unitPrice;
+
     return {
         description: item.description || '',
-        quantity: item.quantity,
+        quantity: effectiveQty,
         rate: item.unitPrice.toString(),
         amount: amount.toString()
     };
@@ -221,12 +222,15 @@ export function mapOrderToDocumentRequest(
 
     const income: any[] = [];
     order.lineItems.forEach((item, idx) => {
+        // Use effective quantity (for M²: width×height×quantity) so invoice totals match order form
+        const effectiveQty = getLineItemEffectiveQuantity(item);
+
         // Build enhanced description with width, height, and total area for M2 items
         let description = ensureDescription(item.description, `פריט ${idx + 1}`);
         
         // For M2 items with width and height, format: "שם מוצר, רוחב X מטר, גובה Y מטר, סה"כ Z מ"ר"
         if (item.unitType === LineItemUnit.M2 && item.width && item.height) {
-            const totalArea = item.width * item.height;
+            const totalArea = item.width * item.height * (item.quantity ?? 1);
             description = `${description}, רוחב ${item.width} מטר, גובה ${item.height} מטר, סה"כ ${totalArea} מ"ר`;
         } else if (item.unitType) {
             // For other unit types, just add the unit type
@@ -235,7 +239,7 @@ export function mapOrderToDocumentRequest(
         
         income.push({
             description: description,
-            quantity: item.quantity,
+            quantity: effectiveQty,
             price: item.unitPrice,
             currency: 'ILS',
             vatType,

@@ -24,7 +24,8 @@ import webhookGreenInvoiceRouter from './routes/webhookGreenInvoice.js';
 import callLogsRouter from './routes/callLogs.js';
 import performanceMetricsRouter from './routes/performanceMetrics.js';
 import notificationsRouter from './routes/notifications.js';
-import { initializeDefaultAdmin, autoCloseOldAttendanceRecords, initializeAttendanceIndexes, initializeCallLogsIndex, initializeStatusConfigs, getDb } from './services/mongoService.js';
+import viewEventsRouter from './routes/viewEvents.js';
+import { initializeDefaultAdmin, autoCloseOldAttendanceRecords, initializeAttendanceIndexes, initializeCallLogsIndex, initializeViewEventsIndexes, initializeStatusConfigs, getDb } from './services/mongoService.js';
 import { getDateStringIsrael } from './utils/timezone.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -65,6 +66,7 @@ app.use('/api/webhook', webhookCallsRouter);
 app.use('/api/call-logs', callLogsRouter);
 app.use('/api/performance-metrics', performanceMetricsRouter);
 app.use('/api/notifications', notificationsRouter);
+app.use('/api/view-events', viewEventsRouter);
 
 // Health check
 app.get('/api/health', (req, res) => {
@@ -167,6 +169,13 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
         console.log('✓ Call logs index initialization completed');
     } catch (error) {
         console.error('✗ Failed to initialize call logs index:', error);
+    }
+
+    try {
+        await initializeViewEventsIndexes();
+        console.log('✓ View events indexes initialization completed');
+    } catch (error) {
+        console.error('✗ Failed to initialize view events indexes:', error);
     }
     
     // Set up periodic task to auto-close old attendance records

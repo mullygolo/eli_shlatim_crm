@@ -8,7 +8,8 @@ import {
     PaymentMethod, CustomerPayment, ReceivablePayment, DebtPayment,
     OrderDocumentLink, ImprovementSuggestion, ImprovementSuggestionStatus, ImprovementSuggestionType,
     OrderType, NotificationReadState, NotificationItem, NotificationType,
-    Attachment
+    Attachment,
+    ViewEvent, ViewEventsAggregatedResult, ViewEventsRawFilters, ViewEventsRawResult
 } from '../types.js';
 import { hashPassword } from '../utils/password.js';
 import { getTodayRangeIsrael, getDateStringIsrael, getMonthRangeIsrael, getDayRangeIsrael } from '../utils/timezone.js';
@@ -1565,6 +1566,136 @@ export async function createActivity(activity: Activity): Promise<Activity> {
         return deserializeDates(serialized) as Activity;
     } catch (error) {
         console.error('Error creating activity:', error);
+        throw error;
+    }
+}
+
+// ==================== VIEW EVENTS (engagement tracking) ====================
+const VIEW_EVENTS_COLLECTION = 'view_events';
+
+export async function initializeViewEventsIndexes(): Promise<void> {
+    try {
+        const database = await getDb();
+        const col = database.collection(VIEW_EVENTS_COLLECTION);
+        await col.createIndex({ userId: 1, startedAt: 1 });
+        await col.createIndex({ entityType: 1, entityId: 1, startedAt: 1 });
+        await col.createIndex({ startedAt: 1 });
+    } catch (error) {
+        console.error('Error initializing view_events indexes:', error);
+        throw error;
+    }
+}
+
+export async function insertViewEvents(events: ViewEvent[]): Promise<void> {
+    if (!events.length) return;
+    try {
+        const database = await getDb();
+        const col = database.collection<ViewEvent>(VIEW_EVENTS_COLLECTION);
+        const docs = events.map(e => ({
+            ...e,
+            id: e.id || `ve_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`,
+        }));
+        await col.insertMany(docs);
+    } catch (error) {
+        console.error('Error inserting view events:', error);
+        throw error;
+    }
+}
+
+export async function getViewEventsAggregated(filters: { from: string; to: string; userId?: string }): Promise<ViewEventsAggregatedResult> {
+    try {
+        const database = await getDb();
+        const col = database.collection<ViewEvent>(VIEW_EVENTS_COLLECTION);
+        const { start: fromStart } = getDayRangeIsrael(filters.from);
+        const { end: toEnd } = getDayRangeIsrael(filters.to);
+        const fromStartISO = fromStart.toISOString();
+        const toEndISO = toEnd.toISOString();
+
+        const match: Record<string, unknown> = {
+            startedAt: { $gte: fromStartISO, $lte: toEndISO },
+        };
+        if (filters.userId) match.userId = filters.userId;
+
+        const pipeline: object[] = [
+            { $match: match },
+            {
+                $addFields: {
+                    dateKey: { $dateToString: { format: '%Y-%m-%d', date: { $toDate: '$startedAt' } } },
+                    durationSeconds: {
+                        $cond: {
+                            if: { $and: [{ $ne: ['$endedAt', null] }, { $ne: ['$endedAt', ''] }] },
+                            then: { $divide: [{ $subtract: [{ $toDate: '$endedAt' }, { $toDate: '$startedAt' }] }, 1000] },
+                            else: { $ifNull: ['$durationSeconds', 0] },
+                        },
+                    },
+                },
+            },
+            {
+                $group: {
+                    _id: { userId: '$userId', username: '$username', entityType: '$entityType', dateKey: '$dateKey' },
+                    viewCount: { $sum: 1 },
+                    totalDurationSeconds: { $sum: '$durationSeconds' },
+                },
+            },
+            {
+                $project: {
+                    userId: '$_id.userId',
+                    username: '$_id.username',
+                    entityType: '$_id.entityType',
+                    dateKey: '$_id.dateKey',
+                    viewCount: 1,
+                    totalDurationSeconds: 1,
+                    _id: 0,
+                },
+            },
+            { $sort: { userId: 1, dateKey: -1, entityType: 1 } },
+        ];
+
+        const raw = await col.aggregate(pipeline).toArray() as (ViewEventsAggregatedRow & { totalDurationSeconds?: number })[];
+        const rows: ViewEventsAggregatedRow[] = raw.map((r) => ({
+            ...r,
+            totalDurationSeconds: Math.round(r.totalDurationSeconds ?? 0),
+        }));
+        return {
+            from: filters.from,
+            to: filters.to,
+            rows,
+        };
+    } catch (error) {
+        console.error('Error aggregating view events:', error);
+        throw error;
+    }
+}
+
+export async function getViewEventsRaw(filters: ViewEventsRawFilters): Promise<ViewEventsRawResult> {
+    try {
+        const database = await getDb();
+        const col = database.collection<ViewEvent>(VIEW_EVENTS_COLLECTION);
+        const match: Record<string, unknown> = {};
+        if (filters.from || filters.to) {
+            const fromStart = filters.from ? getDayRangeIsrael(filters.from).start.toISOString() : null;
+            const toEnd = filters.to ? getDayRangeIsrael(filters.to).end.toISOString() : null;
+            match.startedAt = {};
+            if (fromStart) (match.startedAt as Record<string, string>).$gte = fromStart;
+            if (toEnd) (match.startedAt as Record<string, string>).$lte = toEnd;
+        }
+        if (filters.userId) match.userId = filters.userId;
+        if (filters.entityType) match.entityType = filters.entityType;
+
+        const page = Math.max(1, filters.page ?? 1);
+        const limit = Math.min(100, Math.max(1, filters.limit ?? 50));
+        const skip = (page - 1) * limit;
+
+        const [events, total] = await Promise.all([
+            col.find(match).sort({ startedAt: -1 }).skip(skip).limit(limit).toArray(),
+            col.countDocuments(match),
+        ]);
+        return {
+            events: events as ViewEvent[],
+            total,
+        };
+    } catch (error) {
+        console.error('Error fetching raw view events:', error);
         throw error;
     }
 }

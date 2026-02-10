@@ -1,6 +1,7 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { AuthProvider } from './contexts/AuthContext';
+import { ViewTrackerProvider } from './contexts/ViewTrackerContext';
 import { RootErrorBoundary } from './components/RootErrorBoundary';
 import App from './App';
 
@@ -36,7 +37,9 @@ try {
     <React.StrictMode>
       <RootErrorBoundary>
         <AuthProvider>
-          <App />
+          <ViewTrackerProvider>
+            <App />
+          </ViewTrackerProvider>
         </AuthProvider>
       </RootErrorBoundary>
     </React.StrictMode>

@@ -7,6 +7,7 @@ import EmployeesPage from './EmployeesPage';
 import VatSettingsSection from './VatSettingsSection';
 import TipTapEditor from './TipTapEditor';
 import LogsAndAuditTab from './LogsAndAuditTab';
+import UsageAndViewsTab from './UsageAndViewsTab';
 
 interface SettingsPageProps {
     statusConfigs: OrderStatusConfiguration[];
@@ -247,7 +248,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
 }) => {
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingConfig, setEditingConfig] = useState<OrderStatusConfiguration | null>(null);
-    const [activeTab, setActiveTab] = useState<'statuses' | 'employees' | 'general' | 'logs'>('statuses');
+    const [activeTab, setActiveTab] = useState<'statuses' | 'employees' | 'general' | 'logs' | 'usage'>('statuses');
     const [localSystemMessage, setLocalSystemMessage] = useState(systemMessage);
     const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
     
@@ -348,6 +349,12 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
                     className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${activeTab === 'logs' ? 'bg-primary text-white shadow' : 'text-slate-600 hover:bg-slate-50'}`}
                 >
                     לוגים ותיעוד
+                </button>
+                <button
+                    onClick={() => setActiveTab('usage')}
+                    className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${activeTab === 'usage' ? 'bg-primary text-white shadow' : 'text-slate-600 hover:bg-slate-50'}`}
+                >
+                    שימוש וצפיות
                 </button>
             </div>
 
@@ -458,6 +465,10 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
                     </div>
                     <LogsAndAuditTab employees={employees} onNavigateToOrder={onNavigateToOrder} />
                 </>
+            )}
+
+            {activeTab === 'usage' && (
+                <UsageAndViewsTab employees={employees} />
             )}
 
             {activeTab === 'general' && (

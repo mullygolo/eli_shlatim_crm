@@ -260,6 +260,47 @@ export interface ActivitiesResult {
     total: number;
 }
 
+export interface ViewEvent {
+    id?: string;
+    userId: string;
+    username?: string;
+    entityType: string;
+    entityId?: string;
+    label?: string;
+    startedAt: string;
+    endedAt?: string;
+    durationSeconds?: number;
+}
+
+export interface ViewEventsAggregatedRow {
+    userId: string;
+    username?: string;
+    entityType: string;
+    dateKey: string;
+    viewCount: number;
+    totalDurationSeconds: number;
+}
+
+export interface ViewEventsAggregatedResult {
+    from: string;
+    to: string;
+    rows: ViewEventsAggregatedRow[];
+}
+
+export interface ViewEventsRawFilters {
+    from?: string;
+    to?: string;
+    userId?: string;
+    entityType?: string;
+    page?: number;
+    limit?: number;
+}
+
+export interface ViewEventsRawResult {
+    events: ViewEvent[];
+    total: number;
+}
+
 export interface StatusHistoryEntry {
     status: string;
     startDate: Date;

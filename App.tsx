@@ -2,6 +2,7 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { Customer, Order, Activity, AddActivityOptions, Supplier, Employee, Page, OrderStatusConfiguration, FixedExpense, VariableExpense, Loan, EquityInvestment, Debt, AttendanceRecord, ManualEvent, PayrollOverrideMap, Receivable } from './types';
 import { useAuth } from './contexts/AuthContext';
+import { useViewTracker } from './contexts/ViewTrackerContext';
 import ProtectedRoute from './components/ProtectedRoute';
 import {
     getCustomers, createCustomer, updateCustomer, deleteCustomer,
@@ -63,6 +64,8 @@ export const PAGE_TITLES: Record<Page, string> = {
 
 const App: React.FC = () => {
     const { user } = useAuth();
+    const { trackViewStart, trackViewEnd } = useViewTracker();
+    const prevPageRef = useRef<Page | null>(null);
     const [currentPage, setCurrentPage] = useState<Page>('Dashboard');
     const [customers, setCustomers] = useState<Customer[]>([]);
     const [orders, setOrders] = useState<Order[]>([]);
@@ -138,6 +141,17 @@ const App: React.FC = () => {
             });
         };
     }, [isAuthenticated, logout]);
+
+    // Track page/route views for usage analytics
+    useEffect(() => {
+        const key = `route_${currentPage}`;
+        const label = PAGE_TITLES[currentPage];
+        if (prevPageRef.current !== null) {
+            trackViewEnd(`route_${prevPageRef.current}`);
+        }
+        trackViewStart(key, 'route', undefined, label);
+        prevPageRef.current = currentPage;
+    }, [currentPage, trackViewStart, trackViewEnd]);
 
     // Load data in two phases: critical first (show app fast), then rest in background
     const CRITICAL_TIMEOUT_MS = 10000;

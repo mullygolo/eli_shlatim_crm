@@ -267,6 +267,54 @@ export interface AddActivityOptions {
     metadata?: Record<string, unknown>;
 }
 
+/** View/engagement tracking: one view session (e.g. opened order, stayed on page). */
+export interface ViewEvent {
+    id?: string;
+    userId: string;
+    username?: string;
+    /** e.g. 'order' | 'customer' | 'route' */
+    entityType: string;
+    entityId?: string;
+    /** e.g. 'הזמנות' for route, orderNumber for order */
+    label?: string;
+    /** When the view started (client time, ISO string). */
+    startedAt: string;
+    /** When the view ended; if missing, frontend may send on next batch. */
+    endedAt?: string;
+    /** Duration in seconds (optional; can be derived from startedAt/endedAt). */
+    durationSeconds?: number;
+}
+
+export interface ViewEventsAggregatedRow {
+    userId: string;
+    username?: string;
+    entityType: string;
+    /** YYYY-MM-DD for daily grouping */
+    dateKey: string;
+    viewCount: number;
+    totalDurationSeconds: number;
+}
+
+export interface ViewEventsAggregatedResult {
+    from: string;
+    to: string;
+    rows: ViewEventsAggregatedRow[];
+}
+
+export interface ViewEventsRawFilters {
+    from?: string;
+    to?: string;
+    userId?: string;
+    entityType?: string;
+    page?: number;
+    limit?: number;
+}
+
+export interface ViewEventsRawResult {
+    events: ViewEvent[];
+    total: number;
+}
+
 export interface StatusHistoryEntry {
     status: string;
     startDate: Date;

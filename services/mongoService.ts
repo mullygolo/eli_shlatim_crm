@@ -3,7 +3,8 @@ import {
     FixedExpense, VariableExpense, Loan, Debt, Receivable, EquityInvestment,
     AttendanceRecord, ManualEvent, WallPost, CallLog, ImprovementSuggestion, ImprovementSuggestionStatus, ImprovementSuggestionType,
     PerformanceMetricsPayload, NotificationItem,
-    Attachment
+    Attachment,
+    ViewEvent, ViewEventsAggregatedResult, ViewEventsRawFilters, ViewEventsRawResult
 } from '../types';
 
 // API Base URL - use relative path in production
@@ -375,6 +376,34 @@ export async function createActivity(activity: Activity): Promise<Activity> {
         method: 'POST',
         body: JSON.stringify(activity),
     });
+}
+
+// ==================== VIEW EVENTS ====================
+export async function postViewEvents(events: ViewEvent[]): Promise<void> {
+    if (!events.length) return;
+    await apiRequest<void>('/view-events', {
+        method: 'POST',
+        body: JSON.stringify({ events }),
+    });
+}
+
+export async function getViewEventsAggregated(params: { from: string; to: string; userId?: string }): Promise<ViewEventsAggregatedResult> {
+    const search = new URLSearchParams();
+    search.set('from', params.from);
+    search.set('to', params.to);
+    if (params.userId) search.set('userId', params.userId);
+    return apiRequest<ViewEventsAggregatedResult>(`/view-events/aggregated?${search.toString()}`);
+}
+
+export async function getViewEventsRaw(filters: ViewEventsRawFilters): Promise<ViewEventsRawResult> {
+    const search = new URLSearchParams();
+    if (filters.from) search.set('from', filters.from);
+    if (filters.to) search.set('to', filters.to);
+    if (filters.userId) search.set('userId', filters.userId);
+    if (filters.entityType) search.set('entityType', filters.entityType);
+    if (filters.page != null) search.set('page', String(filters.page));
+    if (filters.limit != null) search.set('limit', String(filters.limit));
+    return apiRequest<ViewEventsRawResult>(`/view-events/raw?${search.toString()}`);
 }
 
 // ==================== STATUS CONFIGS ====================

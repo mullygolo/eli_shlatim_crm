@@ -19,6 +19,7 @@ import { addSalesHistoryEntry, createAdHocProduct, sendQuoteRequests } from '../
 import { calculateProductPrice } from '../utils/priceCalculations';
 import { useAsyncAction } from '../hooks/useAsyncAction';
 import { useAuth } from '../contexts/AuthContext';
+import { useViewTracker } from '../contexts/ViewTrackerContext';
 
 interface OrdersPageProps {
     orders: Order[];
@@ -3252,7 +3253,39 @@ const OrderForm: React.FC<{
                 <h3 className="text-xl font-semibold text-slate-800 border-b pb-2">קבצים וגלריה</h3>
                 <OrderFileManager 
                     attachments={formData.attachments} 
-                    onUpdate={(newAttachments) => setFormData(prev => ({ ...prev, attachments: newAttachments }))} 
+                    onUpdate={(newAttachments) => {
+                        setFormData(prev => {
+                            const prevAtts = prev.attachments || [];
+                            const prevIds = new Set(prevAtts.map(a => a.id));
+                            const newIds = new Set(newAttachments.map(a => a.id));
+                            const added = newAttachments.filter(a => !prevIds.has(a.id));
+                            const removed = prevAtts.filter(a => !newIds.has(a.id));
+                            const newLogEvents: TimelineEvent[] = [];
+                            added.forEach(att => {
+                                newLogEvents.push({
+                                    id: `log_att_${Date.now()}_${att.id}`,
+                                    timestamp: new Date(),
+                                    user: loggedInUserName,
+                                    type: 'LOG',
+                                    content: `הועלה קובץ: ${att.fileName}`
+                                });
+                            });
+                            removed.forEach(att => {
+                                newLogEvents.push({
+                                    id: `log_att_${Date.now()}_${att.id}`,
+                                    timestamp: new Date(),
+                                    user: loggedInUserName,
+                                    type: 'LOG',
+                                    content: `הוסר קובץ: ${att.fileName}`
+                                });
+                            });
+                            return {
+                                ...prev,
+                                attachments: newAttachments,
+                                timeline: [...newLogEvents, ...(prev.timeline || [])]
+                            };
+                        });
+                    }} 
                 />
             </div>
 
@@ -3608,6 +3641,7 @@ function getOrdersViewFromStorage(): Partial<{
 
 const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLocal, customers, setCustomers, suppliers, setSuppliers, employees, addActivity, initialOpenOrderId, onOrderOpened, openNewOrderRequest, onClearedOpenNewOrderRequest, statusConfigs, getNextOrderNumber, vatRate }) => {
     const { user } = useAuth();
+    const { trackViewStart, trackViewEnd } = useViewTracker();
     const isAdmin = user?.roleType === 'ADMIN';
     /** שם המשתמש המחובר — לכתיבה ביומן (שינוי סטטוס מהטבלה וכו') */
     const loggedInUserName = (user && employees.find(e => e.id === user.id)?.name) || user?.name || 'מערכת';
@@ -3668,6 +3702,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
 
     const closeOrderModal = React.useCallback(() => {
         const orderId = editingOrder?.id;
+        if (orderId) trackViewEnd(`order_${orderId}`);
         setOrderFormHeaderContent(null);
         setOrderLockedByOther(null);
         setEditingOrder(null);
@@ -3675,7 +3710,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
         if (orderId && user?.id) {
             mongoService.releaseOrderLock(orderId).catch(() => {});
         }
-    }, [editingOrder?.id, user?.id]);
+    }, [editingOrder?.id, user?.id, trackViewEnd]);
 
     const handleEditOrder = async (order: Order) => {
         setOrderLockedByOther(null);
@@ -3690,6 +3725,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
             }
         }
         setEditingOrder(order);
+        trackViewStart(`order_${order.id}`, 'order', order.id, order.orderNumber);
         setIsModalOpen(true);
     };
 
@@ -3800,6 +3836,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
 
     const handleDraftCreate = (draftOrder: Order) => {
         setEditingOrder(draftOrder);
+        trackViewStart(`order_${draftOrder.id}`, 'order', draftOrder.id, draftOrder.orderNumber);
     };
 
     // Helper function to fetch paginated orders (silent = true: don't show loading spinner, for background refresh)
@@ -3972,8 +4009,10 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
     const handleSaveOrder = async (order: Order, keepOpen: boolean = false) => {
         try {
             const exists = orders.some(o => o.id === order.id);
+            const originalOrder = exists ? orders.find(o => o.id === order.id) : null;
+            const originalTimelineIds = new Set(originalOrder?.timeline?.map((e: TimelineEvent) => e.id) ?? []);
             let savedOrder: Order;
-            
+
             if (exists) {
                 // Update existing order on server
                 savedOrder = await mongoService.updateOrder(order);
@@ -3983,7 +4022,37 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                 savedOrder = await mongoService.createOrder(order);
                 addActivity(`הזמנה חדשה נוספה: ${order.description}`, { entityType: 'order', entityId: savedOrder.id, action: 'create', metadata: { orderNumber: savedOrder.orderNumber } });
             }
-            
+
+            // Push every new timeline event (יומן מערכת) to global תיעוד לוגים so nothing is missing
+            const timeline = savedOrder.timeline || order.timeline || [];
+            for (const event of timeline) {
+                if (originalTimelineIds.has(event.id)) continue;
+                const ts = event.timestamp instanceof Date ? event.timestamp : new Date(event.timestamp);
+                let desc = `[הזמנה ${savedOrder.orderNumber}] `;
+                if (event.type === 'LOG') {
+                    desc += event.content;
+                    if (event.changes && event.changes.length > 0) {
+                        const parts = event.changes.map((c: FieldChange) =>
+                            c.action === 'ADDED' ? `${c.label}: ${String(c.newValue ?? '')}` :
+                            c.action === 'REMOVED' ? `${c.label}: ${String(c.oldValue ?? '')}` :
+                            `${c.label}: ${String(c.oldValue)} → ${String(c.newValue)}`);
+                        desc += ' — ' + parts.join('; ');
+                    }
+                } else if (event.type === 'NOTE') {
+                    desc += `הערה: ${event.content}`;
+                } else if (event.type === 'TASK') {
+                    desc += `משימה: ${event.content}`;
+                    if (event.assigneeId) {
+                        const assigneeName = employees.find(e => e.id === event.assigneeId)?.name;
+                        if (assigneeName) desc += ` (שוייך ל: ${assigneeName})`;
+                    }
+                    if (event.dueDate) desc += ` — יעד: ${new Date(event.dueDate).toLocaleDateString('he-IL')}`;
+                } else {
+                    desc += event.content;
+                }
+                addActivity(desc, { entityType: 'order', entityId: savedOrder.id, action: 'update', metadata: { orderNumber: savedOrder.orderNumber, timelineEventType: event.type, timelineEventId: event.id, timestamp: ts.toISOString() } });
+            }
+
             // Update global orders state so CustomersPage "היסטוריית הזמנות" and other consumers see the change (e.g. customerId)
             setOrdersLocal(prevOrders => {
                 const exists = prevOrders.some(o => o.id === savedOrder.id);
@@ -4007,6 +4076,8 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
             }
 
         if (keepOpen) {
+                if (order.id) trackViewEnd(`order_${order.id}`);
+                trackViewStart(`order_${savedOrder.id}`, 'order', savedOrder.id, savedOrder.orderNumber);
                 setEditingOrder(savedOrder);
         } else {
             closeOrderModal();

@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import DOMPurify from 'dompurify';
 // Fixed error: Removed 'OrderStatus' which is not exported from '../types'
 import { Customer, Order, Activity, Employee, OrderStatusConfiguration, PaymentStatus, ManualEvent, WallPost, PaymentMethod } from '../types';
@@ -439,6 +439,10 @@ const StrongNumberCard: React.FC<{
     const [lostDealsPeriod, setLostDealsPeriod] = useState<LostDealsPeriod>('THIS_MONTH');
     const [lostDealsModalOpen, setLostDealsModalOpen] = useState(false);
     const [dailyModalOpen, setDailyModalOpen] = useState(false);
+    /** Selected date for daily stats (YYYY-MM-DD). null = today. */
+    const [selectedDailyDate, setSelectedDailyDate] = useState<string | null>(null);
+    const [dailyPickerOpen, setDailyPickerOpen] = useState(false);
+    const dailyCardRef = useRef<HTMLDivElement>(null);
     const [monthlyModalOpen, setMonthlyModalOpen] = useState(false);
     const [yearlyModalOpen, setYearlyModalOpen] = useState(false);
     const [collectionModalOpen, setCollectionModalOpen] = useState(false);
@@ -450,6 +454,15 @@ const StrongNumberCard: React.FC<{
         window.addEventListener('keydown', onKey);
         return () => window.removeEventListener('keydown', onKey);
     }, [lostDealsModalOpen]);
+
+    useEffect(() => {
+        if (!dailyPickerOpen) return;
+        const onMouseDown = (e: MouseEvent) => {
+            if (dailyCardRef.current && !dailyCardRef.current.contains(e.target as Node)) setDailyPickerOpen(false);
+        };
+        window.addEventListener('mousedown', onMouseDown);
+        return () => window.removeEventListener('mousedown', onMouseDown);
+    }, [dailyPickerOpen]);
     // Helper to calculate metrics for a filtered list of orders (same logic as Orders page: profit % = רווח מהעלות)
     const calculateMetrics = (filteredOrders: Order[]): FinancialMetric => {
         const result = filteredOrders.reduce((acc, order) => {
@@ -478,6 +491,7 @@ const StrongNumberCard: React.FC<{
     const stats = useMemo(() => {
         const now = new Date();
         const todayStr = getDateStringIsrael(now);
+        const dailyStr = selectedDailyDate ?? todayStr;
         const monthStr = todayStr.slice(0, 7);
         const yearStr = todayStr.slice(0, 4);
         const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
@@ -516,8 +530,8 @@ const StrongNumberCard: React.FC<{
         // תאריך לחישוב = תאריך אישור העסקה (dealStartDate), או תאריך הזמנה אם אין – לצורכי דוחות והכנסות
         const orderDateStr = (o: Order) => getDateStringIsrael(o.dealStartDate || o.date);
 
-        // רווח יומי = עסקאות מאושרות שאושרו היום (לפי תאריך אישור העסקה)
-        const dailyDeals = activeDealsForStrongNumbers.filter(o => orderDateStr(o) === todayStr);
+        // רווח יומי = עסקאות מאושרות שאושרו ביום הנבחר (לפי תאריך אישור העסקה)
+        const dailyDeals = activeDealsForStrongNumbers.filter(o => orderDateStr(o) === dailyStr);
         // רווח חודשי = עסקאות מאושרות שאושרו בחודש הנוכחי (לפי תאריך אישור העסקה)
         const monthlyDeals = activeDealsForStrongNumbers.filter(o => orderDateStr(o).slice(0, 7) === monthStr);
         // רווח שנתי = עסקאות מאושרות שאושרו השנה, מתחילת ינואר עד היום (לפי תאריך אישור העסקה)
@@ -685,7 +699,28 @@ const StrongNumberCard: React.FC<{
                 thisMonthOrders: collectionThisMonthOrders
             }
         };
-    }, [orders, statusConfigs, vatRate, lostDealsPeriod]);
+    }, [orders, statusConfigs, vatRate, lostDealsPeriod, selectedDailyDate]);
+
+    const todayStrForPicker = getDateStringIsrael(new Date());
+    const [y, m, dayNum] = [todayStrForPicker.slice(0, 4), todayStrForPicker.slice(5, 7), parseInt(todayStrForPicker.slice(8, 10), 10)];
+    const dailyPickerDays = useMemo(() => {
+        const list: { dateStr: string; label: string }[] = [];
+        for (let d = 1; d < dayNum; d++) {
+            const dateStr = `${y}-${m}-${String(d).padStart(2, '0')}`;
+            const date = new Date(parseInt(y, 10), parseInt(m, 10) - 1, d);
+            const weekday = date.toLocaleDateString('he-IL', { weekday: 'long' });
+            const ddm = date.toLocaleDateString('he-IL', { day: 'numeric', month: 'numeric' });
+            list.push({ dateStr, label: `${weekday} ${ddm}` });
+        }
+        return list.reverse();
+    }, [y, m, dayNum]);
+
+    const dailyCardTitle = (!selectedDailyDate || selectedDailyDate === todayStrForPicker)
+        ? 'היום'
+        : (dailyPickerDays.find(entry => entry.dateStr === selectedDailyDate)?.label ?? (() => {
+            const d = new Date(selectedDailyDate + 'T12:00:00');
+            return d.toLocaleDateString('he-IL', { weekday: 'long', day: 'numeric', month: 'numeric' });
+        })());
 
     const formatCurrency = (val: number) => val.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 0, maximumFractionDigits: 0 });
     
@@ -741,7 +776,59 @@ const StrongNumberCard: React.FC<{
             </div>
             
             <div className="p-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-4 bg-white">
-                <TimeFrameBlock title="היום" data={stats.daily} colorClass="text-indigo-600" bgClass="bg-indigo-50/30" hideProfitAndMargin={isEmployee} onCardClick={() => setDailyModalOpen(true)} />
+                <div
+                    ref={dailyCardRef}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => setDailyModalOpen(true)}
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setDailyModalOpen(true); } }}
+                    className="p-4 rounded-xl border border-slate-100 flex flex-col justify-between min-h-[130px] hover:shadow-md transition-all bg-indigo-50/30 cursor-pointer focus:outline-none focus:ring-2 focus:ring-offset-1 focus:ring-indigo-300 relative"
+                >
+                    <div className="flex justify-between items-start mb-2">
+                        <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider">{dailyCardTitle}</h4>
+                        <div className="flex items-center gap-1">
+                            <button
+                                type="button"
+                                onClick={(e) => { e.stopPropagation(); setDailyPickerOpen(prev => !prev); }}
+                                className="text-[10px] bg-indigo-100 hover:bg-indigo-200 text-indigo-700 px-2 py-1 rounded font-medium"
+                            >
+                                בחר יום
+                            </button>
+                            <span className="text-xs bg-white/50 px-2 py-0.5 rounded-full text-slate-600 font-medium">{stats.daily.count} עסקאות</span>
+                        </div>
+                    </div>
+                    {dailyPickerOpen && (
+                        <div
+                            className="absolute top-10 left-0 right-0 z-20 bg-white border border-slate-200 rounded-lg shadow-lg max-h-48 overflow-y-auto py-1"
+                            onClick={(e) => e.stopPropagation()}
+                        >
+                            <button type="button" onClick={() => { setSelectedDailyDate(null); setDailyPickerOpen(false); }} className="w-full text-right px-3 py-2 text-sm hover:bg-indigo-50 font-medium text-indigo-700">
+                                היום
+                            </button>
+                            {dailyPickerDays.map(({ dateStr, label }) => (
+                                <button key={dateStr} type="button" onClick={() => { setSelectedDailyDate(dateStr); setDailyPickerOpen(false); }} className={`w-full text-right px-3 py-2 text-sm hover:bg-slate-50 ${selectedDailyDate === dateStr ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-slate-700'}`}>
+                                    {label}
+                                </button>
+                            ))}
+                        </div>
+                    )}
+                    <div className="flex-grow flex flex-col justify-center mb-2">
+                        <div className="text-2xl font-black text-indigo-600">{formatCurrency(stats.daily.revenueExclVat)}</div>
+                        <div className="text-[10px] text-slate-400 font-medium">לא כולל מע"מ</div>
+                    </div>
+                    {!isEmployee && (
+                        <div className="space-y-1 pt-2 border-t border-slate-200/50">
+                            <div className="flex justify-between text-xs items-center">
+                                <span className="text-slate-500">רווח:</span>
+                                <span className="font-bold text-emerald-600">{formatCurrency(stats.daily.profit)}</span>
+                            </div>
+                            <div className="flex justify-between text-xs items-center">
+                                <span className="text-slate-500">אחוז (רווח מהעלות):</span>
+                                <span className="font-medium text-slate-700 bg-white px-1.5 rounded">{stats.daily.margin.toFixed(1)}%</span>
+                            </div>
+                        </div>
+                    )}
+                </div>
                 <TimeFrameBlock title="החודש" data={stats.monthly} colorClass="text-blue-600" bgClass="bg-blue-50/30" hideProfitAndMargin={isEmployee} onCardClick={() => setMonthlyModalOpen(true)} />
                 {!isEmployee && <TimeFrameBlock title="השנה" data={stats.yearly} colorClass="text-sky-700" bgClass="bg-sky-50/30" onCardClick={() => setYearlyModalOpen(true)} />}
 
@@ -943,7 +1030,7 @@ const StrongNumberCard: React.FC<{
                                 </thead>
                                 <tbody className="divide-y divide-slate-100">
                                     {stats.dailyDealsList.length === 0 ? (
-                                        <tr><td colSpan={4} className="px-3 py-4 text-slate-500 text-center">אין עסקאות היום</td></tr>
+                                        <tr><td colSpan={4} className="px-3 py-4 text-slate-500 text-center">{selectedDailyDate ? `אין עסקאות ב־${dailyCardTitle}` : 'אין עסקאות היום'}</td></tr>
                                     ) : (
                                         stats.dailyDealsList.map((order) => {
                                             const { totalAmount, profit } = calculateOrderTotals(order);

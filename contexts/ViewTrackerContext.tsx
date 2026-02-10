@@ -168,7 +168,7 @@ export const ViewTrackerProvider: React.FC<{ children: ReactNode }> = ({ childre
                 trackViewStart(cur.key, cur.entityType, cur.entityId, cur.label);
             }
         };
-        window.addEventListener('mousemove', onActivity);
+        window.addEventListener('mousemove', onActivity, { passive: true });
         window.addEventListener('keydown', onActivity);
         return () => {
             window.removeEventListener('mousemove', onActivity);

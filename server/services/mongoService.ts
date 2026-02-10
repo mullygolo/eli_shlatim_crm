@@ -9,7 +9,7 @@ import {
     OrderDocumentLink, ImprovementSuggestion, ImprovementSuggestionStatus, ImprovementSuggestionType,
     OrderType, NotificationReadState, NotificationItem, NotificationType,
     Attachment,
-    ViewEvent, ViewEventsAggregatedResult, ViewEventsRawFilters, ViewEventsRawResult
+    ViewEvent, ViewEventsAggregatedRow, ViewEventsAggregatedResult, ViewEventsRawFilters, ViewEventsRawResult
 } from '../types.js';
 import { hashPassword } from '../utils/password.js';
 import { getTodayRangeIsrael, getDateStringIsrael, getMonthRangeIsrael, getDayRangeIsrael } from '../utils/timezone.js';

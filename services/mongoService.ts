@@ -4,7 +4,8 @@ import {
     AttendanceRecord, ManualEvent, WallPost, CallLog, ImprovementSuggestion, ImprovementSuggestionStatus, ImprovementSuggestionType,
     PerformanceMetricsPayload, NotificationItem,
     Attachment,
-    ViewEvent, ViewEventsAggregatedResult, ViewEventsRawFilters, ViewEventsRawResult
+    ViewEvent, ViewEventsAggregatedResult, ViewEventsRawFilters, ViewEventsRawResult,
+    ViewEventsChartType, ViewEventsChartResult
 } from '../types';
 
 // API Base URL - use relative path in production
@@ -404,6 +405,15 @@ export async function getViewEventsRaw(filters: ViewEventsRawFilters): Promise<V
     if (filters.page != null) search.set('page', String(filters.page));
     if (filters.limit != null) search.set('limit', String(filters.limit));
     return apiRequest<ViewEventsRawResult>(`/view-events/raw?${search.toString()}`);
+}
+
+export async function getViewEventsChartData(params: { from: string; to: string; userId?: string; type?: ViewEventsChartType }): Promise<ViewEventsChartResult> {
+    const search = new URLSearchParams();
+    search.set('from', params.from);
+    search.set('to', params.to);
+    if (params.userId) search.set('userId', params.userId);
+    if (params.type) search.set('type', params.type);
+    return apiRequest<ViewEventsChartResult>(`/view-events/chart-data?${search.toString()}`);
 }
 
 // ==================== STATUS CONFIGS ====================

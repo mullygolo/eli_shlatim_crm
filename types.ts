@@ -315,6 +315,40 @@ export interface ViewEventsRawResult {
     total: number;
 }
 
+export type ViewEventsChartType = 'byHour' | 'byDay' | 'byEntity' | 'byUser';
+
+export interface ViewEventsChartRowByHour {
+    hour: number;
+    totalDurationSeconds: number;
+    viewCount: number;
+}
+
+export interface ViewEventsChartRowByDay {
+    dateKey: string;
+    totalDurationSeconds: number;
+    viewCount: number;
+}
+
+export interface ViewEventsChartRowByEntity {
+    entityType: string;
+    label?: string;
+    totalDurationSeconds: number;
+    viewCount: number;
+}
+
+export interface ViewEventsChartRowByUser {
+    userId: string;
+    username?: string;
+    totalDurationSeconds: number;
+    viewCount: number;
+}
+
+export type ViewEventsChartResult =
+    | { type: 'byHour'; data: ViewEventsChartRowByHour[] }
+    | { type: 'byDay'; data: ViewEventsChartRowByDay[] }
+    | { type: 'byEntity'; data: ViewEventsChartRowByEntity[] }
+    | { type: 'byUser'; data: ViewEventsChartRowByUser[] };
+
 export interface StatusHistoryEntry {
     status: string;
     startDate: Date;

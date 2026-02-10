@@ -6,6 +6,7 @@ import Modal from './Modal';
 import { calculateOrderTotals } from '../utils/calculations';
 import { PAYMENT_TERMS_OPTIONS } from '../constants';
 import * as mongoService from '../services/mongoService';
+import { useViewTracker } from '../contexts/ViewTrackerContext';
 
 interface SuppliersPageProps {
     suppliers: Supplier[];
@@ -271,6 +272,7 @@ const SupplierForm: React.FC<{
 
 
 const SuppliersPage: React.FC<SuppliersPageProps> = ({ suppliers, setSuppliers, addActivity, orders, setOrders, transactions, setTransactions }) => {
+    const { trackViewStart, trackViewEnd } = useViewTracker();
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingSupplier, setEditingSupplier] = useState<Supplier | null>(null);
     const [searchTerm, setSearchTerm] = useState('');
@@ -350,7 +352,14 @@ const SuppliersPage: React.FC<SuppliersPageProps> = ({ suppliers, setSuppliers, 
 
     const handleEditSupplier = (supplier: Supplier) => {
         setEditingSupplier(supplier);
+        trackViewStart(`supplier_${supplier.id}`, 'supplier', supplier.id, supplier.name);
         setIsModalOpen(true);
+    };
+
+    const handleCloseSupplierModal = () => {
+        if (editingSupplier) trackViewEnd(`supplier_${editingSupplier.id}`);
+        setEditingSupplier(null);
+        setIsModalOpen(false);
     };
 
     // Supplier deletion is disabled - suppliers should not be deleted
@@ -416,6 +425,8 @@ const SuppliersPage: React.FC<SuppliersPageProps> = ({ suppliers, setSuppliers, 
         setDuplicateFound(null);
         setPendingNewSupplier(null);
         setIsMergeModalOpen(false);
+        if (editingSupplier) trackViewEnd(`supplier_${editingSupplier.id}`);
+        setEditingSupplier(null);
         setIsModalOpen(false);
         // Refresh paginated suppliers after merge
         await refetchSuppliers();
@@ -425,8 +436,7 @@ const SuppliersPage: React.FC<SuppliersPageProps> = ({ suppliers, setSuppliers, 
         if (editingSupplier) {
             setSuppliers(prev => prev.map(s => s.id === supplier.id ? supplier : s));
             addActivity(`ספק עודכן: ${supplier.name}`, { entityType: 'supplier', entityId: supplier.id, action: 'update', metadata: { name: supplier.name } });
-            setIsModalOpen(false);
-            setEditingSupplier(null);
+            handleCloseSupplierModal();
             // Refresh paginated suppliers after update
             await refetchSuppliers();
         } else {
@@ -441,8 +451,7 @@ const SuppliersPage: React.FC<SuppliersPageProps> = ({ suppliers, setSuppliers, 
             } else {
                 setSuppliers(prev => [...prev, supplier]);
                 addActivity(`ספק חדש נוסף: ${supplier.name}`, { entityType: 'supplier', entityId: supplier.id, action: 'create', metadata: { name: supplier.name } });
-                setIsModalOpen(false);
-                setEditingSupplier(null);
+                handleCloseSupplierModal();
                 // Refresh paginated suppliers after create
                 await refetchSuppliers();
             }
@@ -590,11 +599,11 @@ const SuppliersPage: React.FC<SuppliersPageProps> = ({ suppliers, setSuppliers, 
             </div>
             
             {isModalOpen && (
-                <Modal title={editingSupplier ? "עריכת ספק" : "הוספת ספק"} onClose={() => setIsModalOpen(false)}>
+                <Modal title={editingSupplier ? "עריכת ספק" : "הוספת ספק"} onClose={handleCloseSupplierModal}>
                     <SupplierForm 
                         supplier={editingSupplier} 
                         onSave={handleSaveSupplier} 
-                        onCancel={() => setIsModalOpen(false)} 
+                        onCancel={handleCloseSupplierModal} 
                         onMergeClick={() => setIsMergeModalOpen(true)}
                     />
                 </Modal>

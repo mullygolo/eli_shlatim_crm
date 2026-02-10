@@ -5,6 +5,7 @@ import Modal from './Modal';
 import { CUSTOMER_CATEGORIES, PAYMENT_TERMS_OPTIONS } from '../constants';
 import { calculateOrderTotals } from '../utils/calculations';
 import * as mongoService from '../services/mongoService';
+import { useViewTracker } from '../contexts/ViewTrackerContext';
 
 // Added missing interface definition for CustomersPageProps
 interface CustomersPageProps {
@@ -1279,6 +1280,7 @@ const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, custo
 };
 
 const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, setCustomersLocal, orders, setOrders, addActivity, onNavigateToOrder, statusConfigs, vatRate }) => {
+    const { trackViewStart, trackViewEnd } = useViewTracker();
     const [isNewCustomerModalOpen, setIsNewCustomerModalOpen] = useState(false);
     const [isDetailModalOpen, setIsDetailModalOpen] = useState(false);
     const [isCollectionCenterOpen, setIsCollectionCenterOpen] = useState(false);
@@ -1390,7 +1392,14 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
 
     const handleViewCustomer = (customer: Customer) => {
         setViewingCustomer(customer);
+        trackViewStart(`customer_${customer.id}`, 'customer', customer.id, customer.name);
         setIsDetailModalOpen(true);
+    };
+
+    const handleCloseDetailModal = () => {
+        if (viewingCustomer) trackViewEnd(`customer_${viewingCustomer.id}`);
+        setIsDetailModalOpen(false);
+        setViewingCustomer(null);
     };
 
     const handleOpenCollectionCenter = (customer: Customer) => {
@@ -1571,8 +1580,7 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
             addActivity(`לקוח עודכן: ${saved.name}${response.syncToGI === 'ok' ? ' • סונכרן לחשבונית ירוקה' : ''}`, { entityType: 'customer', entityId: saved.id, action: 'update', metadata: { name: saved.name } });
         }
 
-        setIsDetailModalOpen(false);
-        setViewingCustomer(null);
+        handleCloseDetailModal();
     };
 
     const handleSyncFromGreenInvoice = async () => {
@@ -1891,13 +1899,13 @@ ${results.errors?.length > 0 ? `\n- שגיאות: ${results.errors.length}` : ''
             )}
 
              {isDetailModalOpen && viewingCustomer && (
-                <Modal title={`כרטיס לקוח: ${viewingCustomer.name}`} onClose={() => setIsDetailModalOpen(false)} size="5xl">
+                <Modal title={`כרטיס לקוח: ${viewingCustomer.name}`} onClose={handleCloseDetailModal} size="5xl">
                     <CustomerDetailView 
                         customer={viewingCustomer} 
                         customerOrders={customerOrders}
                         customerOrdersLoading={customerOrdersLoading}
                         onSave={handleSaveCustomerUpdate}
-                        onCancel={() => setIsDetailModalOpen(false)}
+                        onCancel={handleCloseDetailModal}
                         onNavigateToOrder={onNavigateToOrder}
                         onMergeClick={() => setIsMergeModalOpen(true)}
                         statusConfigs={statusConfigs}

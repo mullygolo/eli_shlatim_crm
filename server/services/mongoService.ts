@@ -9,7 +9,8 @@ import {
     OrderDocumentLink, ImprovementSuggestion, ImprovementSuggestionStatus, ImprovementSuggestionType,
     OrderType, NotificationReadState, NotificationItem, NotificationType,
     Attachment,
-    ViewEvent, ViewEventsAggregatedRow, ViewEventsAggregatedResult, ViewEventsRawFilters, ViewEventsRawResult
+    ViewEvent, ViewEventsAggregatedRow, ViewEventsAggregatedResult, ViewEventsRawFilters, ViewEventsRawResult,
+    ViewEventsChartType, ViewEventsChartResult, ViewEventsChartRowByHour, ViewEventsChartRowByDay, ViewEventsChartRowByEntity, ViewEventsChartRowByUser
 } from '../types.js';
 import { hashPassword } from '../utils/password.js';
 import { getTodayRangeIsrael, getDateStringIsrael, getMonthRangeIsrael, getDayRangeIsrael } from '../utils/timezone.js';
@@ -1696,6 +1697,97 @@ export async function getViewEventsRaw(filters: ViewEventsRawFilters): Promise<V
         };
     } catch (error) {
         console.error('Error fetching raw view events:', error);
+        throw error;
+    }
+}
+
+export async function getViewEventsChartData(
+    filters: { from: string; to: string; userId?: string },
+    chartType: ViewEventsChartType
+): Promise<ViewEventsChartResult> {
+    try {
+        const database = await getDb();
+        const col = database.collection<ViewEvent>(VIEW_EVENTS_COLLECTION);
+        const { start: fromStart } = getDayRangeIsrael(filters.from);
+        const { end: toEnd } = getDayRangeIsrael(filters.to);
+        const fromStartISO = fromStart.toISOString();
+        const toEndISO = toEnd.toISOString();
+        const match: Record<string, unknown> = {
+            startedAt: { $gte: fromStartISO, $lte: toEndISO },
+        };
+        if (filters.userId) match.userId = filters.userId;
+
+        const durationField = {
+            $cond: {
+                if: { $and: [{ $ne: ['$endedAt', null] }, { $ne: ['$endedAt', ''] }] },
+                then: { $divide: [{ $subtract: [{ $toDate: '$endedAt' }, { $toDate: '$startedAt' }] }, 1000] },
+                else: { $ifNull: ['$durationSeconds', 0] },
+            },
+        };
+
+        if (chartType === 'byHour') {
+            const pipeline = [
+                { $match: match },
+                { $addFields: { durationSeconds: durationField, hour: { $hour: { $toDate: '$startedAt' } } } },
+                { $group: { _id: '$hour', totalDurationSeconds: { $sum: '$durationSeconds' }, viewCount: { $sum: 1 } } },
+                { $sort: { _id: 1 } },
+                { $project: { hour: '$_id', totalDurationSeconds: 1, viewCount: 1, _id: 0 } },
+            ];
+            const data = (await col.aggregate(pipeline).toArray()) as ViewEventsChartRowByHour[];
+            return { type: 'byHour', data: data.map((r) => ({ ...r, totalDurationSeconds: Math.round(r.totalDurationSeconds ?? 0) })) };
+        }
+
+        if (chartType === 'byDay') {
+            const pipeline = [
+                { $match: match },
+                { $addFields: { dateKey: { $dateToString: { format: '%Y-%m-%d', date: { $toDate: '$startedAt' } } }, durationSeconds: durationField } },
+                { $group: { _id: '$dateKey', totalDurationSeconds: { $sum: '$durationSeconds' }, viewCount: { $sum: 1 } } },
+                { $sort: { _id: 1 } },
+                { $project: { dateKey: '$_id', totalDurationSeconds: 1, viewCount: 1, _id: 0 } },
+            ];
+            const data = (await col.aggregate(pipeline).toArray()) as ViewEventsChartRowByDay[];
+            return { type: 'byDay', data: data.map((r) => ({ ...r, totalDurationSeconds: Math.round(r.totalDurationSeconds ?? 0) })) };
+        }
+
+        if (chartType === 'byEntity') {
+            const pipeline = [
+                { $match: match },
+                { $addFields: { durationSeconds: durationField } },
+                { $group: { _id: { entityType: '$entityType', label: '$label' }, totalDurationSeconds: { $sum: '$durationSeconds' }, viewCount: { $sum: 1 } } },
+                { $sort: { totalDurationSeconds: -1 } },
+                { $project: { entityType: '$_id.entityType', label: '$_id.label', totalDurationSeconds: 1, viewCount: 1, _id: 0 } },
+            ];
+            const raw = await col.aggregate(pipeline).toArray();
+            const data: ViewEventsChartRowByEntity[] = raw.map((r: { entityType?: string; label?: string; totalDurationSeconds?: number; viewCount?: number }) => ({
+                entityType: r.entityType ?? '',
+                label: r.label,
+                totalDurationSeconds: Math.round(r.totalDurationSeconds ?? 0),
+                viewCount: r.viewCount ?? 0,
+            }));
+            return { type: 'byEntity', data };
+        }
+
+        if (chartType === 'byUser') {
+            const pipeline = [
+                { $match: match },
+                { $addFields: { durationSeconds: durationField } },
+                { $group: { _id: { userId: '$userId', username: '$username' }, totalDurationSeconds: { $sum: '$durationSeconds' }, viewCount: { $sum: 1 } } },
+                { $sort: { totalDurationSeconds: -1 } },
+                { $project: { userId: '$_id.userId', username: '$_id.username', totalDurationSeconds: 1, viewCount: 1, _id: 0 } },
+            ];
+            const raw = await col.aggregate(pipeline).toArray();
+            const data: ViewEventsChartRowByUser[] = raw.map((r: { userId?: string; username?: string; totalDurationSeconds?: number; viewCount?: number }) => ({
+                userId: r.userId ?? '',
+                username: r.username,
+                totalDurationSeconds: Math.round(r.totalDurationSeconds ?? 0),
+                viewCount: r.viewCount ?? 0,
+            }));
+            return { type: 'byUser', data };
+        }
+
+        return { type: 'byHour', data: [] };
+    } catch (error) {
+        console.error('Error fetching view events chart data:', error);
         throw error;
     }
 }

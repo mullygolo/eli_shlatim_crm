@@ -1,7 +1,7 @@
 import { Router, Response } from 'express';
 import { verifyToken, requireRole, AuthRequest } from '../middleware/auth.js';
-import { insertViewEvents, getViewEventsAggregated, getViewEventsRaw } from '../services/mongoService.js';
-import { ViewEvent } from '../types.js';
+import { insertViewEvents, getViewEventsAggregated, getViewEventsRaw, getViewEventsChartData } from '../services/mongoService.js';
+import { ViewEvent, ViewEventsChartType } from '../types.js';
 
 const router = Router();
 
@@ -72,6 +72,30 @@ router.get('/raw', verifyToken, requireRole('ADMIN'), async (req: AuthRequest, r
     } catch (error) {
         console.error('View events raw error:', error);
         res.status(500).json({ error: 'שגיאה בטעינת פירוט צפיות' });
+    }
+});
+
+/**
+ * GET /api/view-events/chart-data
+ * Query: from, to, userId?, type=byHour|byDay|byEntity|byUser
+ * Auth: ADMIN only
+ */
+router.get('/chart-data', verifyToken, requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+    try {
+        const from = typeof req.query.from === 'string' ? req.query.from : undefined;
+        const to = typeof req.query.to === 'string' ? req.query.to : undefined;
+        const userId = typeof req.query.userId === 'string' ? req.query.userId : undefined;
+        const type = (typeof req.query.type === 'string' ? req.query.type : 'byDay') as ViewEventsChartType;
+        if (!from || !to) {
+            return res.status(400).json({ error: 'נדרשים פרמטרים from ו-to (YYYY-MM-DD)' });
+        }
+        const validTypes: ViewEventsChartType[] = ['byHour', 'byDay', 'byEntity', 'byUser'];
+        const chartType = validTypes.includes(type) ? type : 'byDay';
+        const result = await getViewEventsChartData({ from, to, userId }, chartType);
+        res.json(result);
+    } catch (error) {
+        console.error('View events chart-data error:', error);
+        res.status(500).json({ error: 'שגיאה בטעינת נתוני גרפים' });
     }
 });
 

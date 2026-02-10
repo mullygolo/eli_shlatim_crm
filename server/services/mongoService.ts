@@ -1770,10 +1770,11 @@ export async function getViewEventsChartData(
         if (chartType === 'byUser') {
             const pipeline = [
                 { $match: match },
-                { $addFields: { durationSeconds: durationField } },
-                { $group: { _id: { userId: '$userId', username: '$username' }, totalDurationSeconds: { $sum: '$durationSeconds' }, viewCount: { $sum: 1 } } },
+                { $addFields: { durationSeconds: durationField, userKey: { $cond: [{ $and: [{ $ne: ['$userId', ''] }, { $ne: ['$userId', null] }] }, '$userId', { $ifNull: ['$username', ''] }] } } },
+                { $match: { userKey: { $ne: '' } } },
+                { $group: { _id: '$userKey', totalDurationSeconds: { $sum: '$durationSeconds' }, viewCount: { $sum: 1 }, userId: { $max: '$userId' }, username: { $max: '$username' } } },
                 { $sort: { totalDurationSeconds: -1 } },
-                { $project: { userId: '$_id.userId', username: '$_id.username', totalDurationSeconds: 1, viewCount: 1, _id: 0 } },
+                { $project: { userId: { $ifNull: ['$userId', ''] }, username: '$username', totalDurationSeconds: 1, viewCount: 1, _id: 0 } },
             ];
             const raw = await col.aggregate(pipeline).toArray();
             const data: ViewEventsChartRowByUser[] = raw.map((r: { userId?: string; username?: string; totalDurationSeconds?: number; viewCount?: number }) => ({

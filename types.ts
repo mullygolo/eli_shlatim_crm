@@ -668,6 +668,8 @@ export interface AttendanceRecord {
 export interface PayrollOverride {
     finalGross?: number;
     finalEmployerCost?: number;
+    /** הערה על שורת העובד לאותו חודש (מוצגת גם בפירוט בדוח רווח והפסד) */
+    note?: string;
 }
 
 export type PayrollOverrideMap = Record<string, PayrollOverride>; // Key: empId_year_month

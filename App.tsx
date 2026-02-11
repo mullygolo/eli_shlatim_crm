@@ -90,6 +90,8 @@ const App: React.FC = () => {
     // Attendance State
     const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>([]);
     const [payrollOverrides, setPayrollOverrides] = useState<PayrollOverrideMap>({});
+    const payrollOverridesRef = useRef<PayrollOverrideMap>(payrollOverrides);
+    payrollOverridesRef.current = payrollOverrides;
     const attendanceMutationInProgressRef = useRef(false);
 
     // Calendar Manual Events
@@ -883,11 +885,14 @@ const App: React.FC = () => {
         }
     }, []);
 
-    const setPayrollOverridesWithSync = useCallback(async (overrides: PayrollOverrideMap) => {
-        setPayrollOverrides(overrides);
+    const setPayrollOverridesWithSync = useCallback(async (overridesOrUpdater: React.SetStateAction<PayrollOverrideMap>) => {
+        const nextOverrides = typeof overridesOrUpdater === 'function'
+            ? overridesOrUpdater(payrollOverridesRef.current)
+            : overridesOrUpdater;
+        setPayrollOverrides(nextOverrides);
         try {
             const settings = await getSettings();
-            await updateSettings({ ...settings, payrollOverrides: overrides });
+            await updateSettings({ ...settings, payrollOverrides: nextOverrides });
         } catch (err) {
             console.error('Error updating payroll overrides:', err);
         }

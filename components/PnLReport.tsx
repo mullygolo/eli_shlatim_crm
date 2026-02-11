@@ -523,9 +523,10 @@ const PnLReport: React.FC<PnLReportProps> = ({
 
                 if (totalPayroll > 0) {
                     pnlMap[monthKey].payroll += totalPayroll;
-                    const subtext = manualOverride && override?.finalEmployerCost !== undefined && override?.finalGross === undefined
+                    const subtextBase = manualOverride && override?.finalEmployerCost !== undefined && override?.finalGross === undefined
                         ? `עלות מעביד מתוקנת: ${totalPayroll.toLocaleString()}`
                         : `שכר: ${monthlyGross.toLocaleString()}, סוציאליות: ${employerCostPart.toLocaleString()}${manualOverride ? ' • מתוקן ידנית' : ''}`;
+                    const subtext = override?.note ? [override.note, subtextBase].filter(Boolean).join(' • ') : subtextBase;
                     pnlMap[monthKey].payrollItems.push({
                         name: emp.name,
                         amount: totalPayroll,

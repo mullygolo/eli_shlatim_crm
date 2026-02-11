@@ -1065,15 +1065,14 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
         };
     };
 
-    const handleOverrideChange = (empId: string, field: 'finalGross' | 'finalEmployerCost', value: string) => {
+    const handleOverrideChange = (empId: string, field: 'finalGross' | 'finalEmployerCost' | 'note', value: string) => {
         const key = `${empId}_${selectedYear}_${selectedMonth}`;
-        const numVal = value === '' ? undefined : parseFloat(value);
-        
+        const valueToSet = field === 'note' ? value : (value === '' ? undefined : parseFloat(value));
         setPayrollOverrides(prev => ({
             ...prev,
             [key]: {
                 ...(prev[key] || {}),
-                [field]: numVal
+                [field]: valueToSet
             }
         }));
     };
@@ -1257,6 +1256,7 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
                                     <th className="px-6 py-4 border-b">בונוס</th>
                                     <th className="px-6 py-4 border-b font-black text-slate-900 bg-slate-100/30">ברוטו סופי (תלוש)</th>
                                     <th className="px-6 py-4 border-b font-black text-indigo-900 bg-indigo-50/30">עלות מעביד סופית</th>
+                                    <th className="px-6 py-4 border-b font-medium text-slate-600">הערה</th>
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-100">
@@ -1336,6 +1336,15 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
                                                     {!stats.hasCostOverride && <span className="text-[10px] text-indigo-400 italic">משוער: ₪{stats.employerCost.toLocaleString()}</span>}
                                                 </div>
                                             </td>
+                                            <td className="px-6 py-4 bg-slate-50/50">
+                                                <input
+                                                    type="text"
+                                                    value={override?.note ?? ''}
+                                                    onChange={(e) => handleOverrideChange(emp.id, 'note', e.target.value)}
+                                                    placeholder="הערה (מופיעה גם בדוח רווח והפסד)"
+                                                    className="w-full text-sm p-1.5 border border-slate-200 rounded-md focus:ring-1 focus:ring-primary text-slate-700"
+                                                />
+                                            </td>
                                         </tr>
                                     );
                                 })}
@@ -1351,6 +1360,7 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
                                     <td className="px-6 py-4 text-green-700">₪{grandTotals.bonus.toLocaleString()}</td>
                                     <td className="px-6 py-4 text-slate-900 text-lg bg-slate-200/20">₪{grandTotals.totalGross.toLocaleString()}</td>
                                     <td className="px-6 py-4 text-primary text-xl bg-indigo-100/50">₪{grandTotals.employerCost.toLocaleString()}</td>
+                                    <td className="px-6 py-4 bg-slate-100"></td>
                                 </tr>
                             </tfoot>
                         </table>

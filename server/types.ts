@@ -654,6 +654,7 @@ export interface AttendanceRecord {
 export interface PayrollOverride {
     finalGross?: number;
     finalEmployerCost?: number;
+    note?: string;
 }
 
 export type PayrollOverrideMap = Record<string, PayrollOverride>; // Key: empId_year_month

@@ -3680,6 +3680,8 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
     /** When set, show confirm modal for status change; on confirm run update (like Save order). */
     const [pendingStatusChange, setPendingStatusChange] = useState<{ orderId: string; order: Order; newStatus: string } | null>(null);
     const [statusChangeSaving, setStatusChangeSaving] = useState(false);
+    /** Mobile: filters panel (drawer) open. */
+    const [filtersPanelOpen, setFiltersPanelOpen] = useState(false);
 
     const customerOptions = useMemo(() => customers.map(c => ({ value: c.id, label: c.name })), [customers]);
     const supplierOptions = useMemo(() => suppliers.map(s => ({ value: s.id, label: s.name })), [suppliers]);
@@ -4308,7 +4310,65 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
     
     return (
         <div>
-            <div className="flex justify-between items-start mb-6 gap-4">
+            {/* Mobile: filters toggle + sort row */}
+            <div className="md:hidden flex flex-wrap items-center gap-2 mb-4">
+                <button
+                    type="button"
+                    onClick={() => setFiltersPanelOpen(true)}
+                    className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white border border-slate-200 shadow-sm text-slate-700 font-medium min-h-[44px]"
+                >
+                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" /></svg>
+                    מסננים
+                </button>
+                <div className="flex items-center gap-2">
+                    <label className="text-xs font-bold text-slate-500 whitespace-nowrap">מיון:</label>
+                    <select
+                        value={sortBy}
+                        onChange={e => setSortBy(e.target.value as 'date' | 'dueDate' | 'updatedAt')}
+                        className="text-sm font-medium px-3 py-2 rounded-md border border-slate-300 bg-white min-h-[44px]"
+                    >
+                        <option value="date">תאריך</option>
+                        <option value="dueDate">מועד תשלום</option>
+                        <option value="updatedAt">עודכנו לאחרונה</option>
+                    </select>
+                </div>
+                <button type="button" onClick={resetFilters} className="text-xs font-black text-slate-400 hover:text-red-500 px-3 py-2 rounded border border-slate-100 min-h-[44px]">נקה</button>
+            </div>
+            {/* Filters panel: desktop inline, mobile in drawer */}
+            {filtersPanelOpen && (
+                <>
+                    <div className="fixed inset-0 bg-black/50 z-40 md:hidden" onClick={() => setFiltersPanelOpen(false)} aria-hidden />
+                    <div className="fixed inset-x-0 bottom-0 top-12 z-50 md:hidden bg-white rounded-t-2xl shadow-xl overflow-y-auto" dir="rtl">
+                        <div className="sticky top-0 bg-white border-b border-slate-200 px-4 py-3 flex justify-between items-center">
+                            <span className="font-bold text-slate-800">מסננים</span>
+                            <button type="button" onClick={() => setFiltersPanelOpen(false)} className="p-2 rounded-lg text-slate-500 hover:bg-slate-100 min-h-[44px] min-w-[44px] flex items-center justify-center">סגור</button>
+                        </div>
+                        <div className="p-4 pb-8">
+                            <div className="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label className="block text-[10px] font-black text-slate-400 uppercase mb-1">סוג תאריך</label>
+                                    <select value={dateFilterType} onChange={e => setDateFilterType(e.target.value as any)} className={`w-full text-xs p-2 border rounded-md font-bold min-h-[44px] ${dateFilterType === 'DEAL_DATE' ? 'bg-indigo-50 border-primary' : 'border-slate-300'}`}>
+                                        <option value="ORDER_DATE">תאריך הזמנה</option>
+                                        <option value="DEAL_DATE">תאריך אישור</option>
+                                    </select>
+                                </div>
+                                <div><label className="block text-[10px] font-black text-slate-400 uppercase mb-1">מתאריך</label><input type="date" value={startDateFilter} onChange={e => setStartDateFilter(e.target.value)} className="w-full text-xs p-2 border border-slate-300 rounded-md min-h-[44px]" /></div>
+                                <div><label className="block text-[10px] font-black text-slate-400 uppercase mb-1">עד תאריך</label><input type="date" value={endDateFilter} onChange={e => setEndDateFilter(e.target.value)} className="w-full text-xs p-2 border border-slate-300 rounded-md min-h-[44px]" /></div>
+                                <div><label className="block text-[10px] font-black text-slate-400 uppercase mb-1">חודש</label><select disabled={!!startDateFilter || !!endDateFilter} value={monthFilter} onChange={e => setMonthFilter(e.target.value)} className="w-full text-xs p-2 border-slate-300 rounded-md min-h-[44px] disabled:bg-slate-50">{availableMonths.map(m => <option key={m.value} value={m.value}>{m.name}</option>)}</select></div>
+                                <div><label className="block text-[10px] font-black text-slate-400 uppercase mb-1">שנה</label><select disabled={!!startDateFilter || !!endDateFilter} value={yearFilter} onChange={e => setYearFilter(e.target.value)} className="w-full text-xs p-2 border-slate-300 rounded-md min-h-[44px] disabled:bg-slate-50">{availableYears.map(y => <option key={y} value={y}>{y}</option>)}</select></div>
+                                <div className="col-span-2"><MultiSelectFilter label="לקוח" options={customerOptions} selectedValues={customerFilter} onChange={(v) => { setCustomerFilter(v); if (v.length === 0) setCustomerIsImportPlaceholderOnly(false); }} /></div>
+                                <div className="col-span-2"><MultiSelectFilter label="עובד" options={employeeOptions} selectedValues={employeeFilter} onChange={setEmployeeFilter} /></div>
+                                <div className="col-span-2"><MultiSelectFilter label="ספק" options={supplierOptions} selectedValues={supplierFilter} onChange={setSupplierFilter} /></div>
+                                <div className="col-span-2"><MultiSelectFilter label="סטטוס" options={orderStatusOptions} selectedValues={orderStatusFilter} onChange={setOrderStatusFilter} /></div>
+                                <div className="col-span-2"><label className="block text-[10px] font-black text-slate-400 uppercase mb-1">חיפוש</label><input type="text" placeholder="חיפוש..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)} className="w-full text-xs p-2 border-slate-300 rounded-md min-h-[44px]" /></div>
+                                <div className="col-span-2"><label className="flex items-center gap-2 text-xs font-medium text-slate-600 cursor-pointer"><input type="checkbox" checked={customerIsImportPlaceholderOnly} onChange={e => setCustomerIsImportPlaceholderOnly(e.target.checked)} className="rounded border-slate-300 text-primary" /> הזמנות עם לקוח מייבוא</label></div>
+                            </div>
+                            <button type="button" onClick={() => setFiltersPanelOpen(false)} className="mt-6 w-full py-3 rounded-xl bg-primary text-white font-bold min-h-[48px]">החל מסננים</button>
+                        </div>
+                    </div>
+                </>
+            )}
+            <div className="hidden md:block flex justify-between items-start mb-6 gap-4">
                  <div className="flex-grow bg-white p-3 rounded-lg shadow-sm border border-slate-200 text-start">
                     <div className="flex flex-col gap-4">
                         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-11 gap-3">
@@ -4435,7 +4495,37 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                     </div>
                 </div>
             </div>
-            <div className="bg-white shadow-md rounded-lg overflow-x-auto">
+            {/* Mobile: order cards */}
+            <div className="md:hidden space-y-3 pb-4">
+                {filteredOrders.map((order) => {
+                    const { totalAmount, totalPaid } = calculateOrderTotals(order);
+                    const statusConfig = statusConfigs.find(c => c.label === order.orderStatus);
+                    const isActiveDeal = statusConfig ? (statusConfig.isActiveDeal || statusConfig.isCompleted) : false;
+                    const currentOrderVat = order.vatRate ?? vatRate;
+                    const totalDueWithVat = totalAmount * (1 + currentOrderVat / 100);
+                    const balanceDue = isActiveDeal ? Math.max(0, totalDueWithVat - totalPaid) : 0;
+                    const displayDate = dateFilterType === 'ORDER_DATE' ? order.date : order.dealStartDate;
+                    return (
+                        <button
+                            key={order.id}
+                            type="button"
+                            onClick={() => handleEditOrder(order)}
+                            className="w-full text-right bg-white rounded-xl border border-slate-200 shadow-sm p-4 hover:bg-slate-50 active:bg-slate-100 transition-colors min-h-[44px]"
+                        >
+                            <div className="flex justify-between items-start gap-2">
+                                <span className="font-bold text-primary">{order.orderNumber}</span>
+                                <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${getStatusBadge(order.orderStatus)}`}>{order.orderStatus}</span>
+                            </div>
+                            <p className="text-sm text-slate-600 mt-1 truncate">{getCustomerName(order.customerId)}</p>
+                            <div className="flex flex-wrap items-center gap-2 mt-2 text-xs text-slate-500">
+                                <span>{displayDate ? new Date(displayDate).toLocaleDateString('he-IL') : '—'}</span>
+                                {balanceDue > 0 && <span className="font-semibold text-amber-700">יתרה: ₪{balanceDue.toLocaleString()}</span>}
+                            </div>
+                        </button>
+                    );
+                })}
+            </div>
+            <div className="hidden md:block bg-white shadow-md rounded-lg overflow-x-auto">
                 <table className="min-w-full divide-y divide-slate-200 text-start">
                     <thead className="bg-slate-50 sticky top-0 z-10 shadow-sm">
                         <tr>

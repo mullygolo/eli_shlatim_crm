@@ -479,7 +479,29 @@ const SuppliersPage: React.FC<SuppliersPageProps> = ({ suppliers, setSuppliers, 
                     הוסף ספק
                 </button>
             </div>
-            <div className="bg-white shadow-md rounded-lg">
+            {/* Mobile: supplier cards */}
+            <div className="md:hidden space-y-3 pb-4">
+                {filteredSuppliers.length === 0 && !loadingSuppliers && (
+                    <div className="text-center py-8 text-slate-500 bg-white rounded-xl border border-slate-200 p-4">
+                        <p className="font-semibold">לא נמצאו ספקים</p>
+                        <p className="text-sm mt-1">נסה חיפוש אחר או הוסף ספק חדש.</p>
+                    </div>
+                )}
+                {filteredSuppliers.map(supplier => (
+                    <button
+                        key={supplier.id}
+                        type="button"
+                        onClick={() => handleEditSupplier(supplier)}
+                        className="w-full text-right bg-white rounded-xl border border-slate-200 shadow-sm p-4 hover:bg-slate-50 active:bg-slate-100 transition-colors min-h-[44px]"
+                    >
+                        <div className="font-bold text-primary">{supplier.name}</div>
+                        {supplier.contacts[0] && <p className="text-sm text-slate-600 mt-0.5">{supplier.contacts[0].name}</p>}
+                        <p className="text-xs text-slate-500 mt-1">{supplier.paymentTerms}</p>
+                        <p className="text-sm font-semibold text-red-600 mt-2">{calculateOwedForMonth(supplier.id).toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 0, maximumFractionDigits: 0 })} חוב החודש</p>
+                    </button>
+                ))}
+            </div>
+            <div className="hidden md:block bg-white shadow-md rounded-lg">
                 <table className="min-w-full divide-y divide-slate-200 text-start">
                     <thead className="bg-slate-50">
                         <tr>

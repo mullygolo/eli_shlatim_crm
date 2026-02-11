@@ -67,6 +67,7 @@ const App: React.FC = () => {
     const { trackViewStart, trackViewEnd } = useViewTracker();
     const prevPageRef = useRef<Page | null>(null);
     const [currentPage, setCurrentPage] = useState<Page>('Dashboard');
+    const [sidebarOpen, setSidebarOpen] = useState(false);
     const [customers, setCustomers] = useState<Customer[]>([]);
     const [orders, setOrders] = useState<Order[]>([]);
     const [activities, setActivities] = useState<Activity[]>([]);
@@ -922,8 +923,45 @@ const App: React.FC = () => {
 
     return (
         <ProtectedRoute>
-            <div className="flex h-screen bg-light-bg" dir="rtl">
-                <Sidebar currentPage={currentPage} setCurrentPage={setCurrentPage} />
+            <div className="flex h-screen bg-light-bg min-h-[100dvh]" dir="rtl" style={{ paddingLeft: 'env(safe-area-inset-left)', paddingRight: 'env(safe-area-inset-right)', paddingTop: 'env(safe-area-inset-top)', paddingBottom: 'env(safe-area-inset-bottom)' } as React.CSSProperties}>
+                {/* Desktop sidebar: visible from md up */}
+                <div className="hidden md:flex md:w-64 md:flex-shrink-0 md:flex-col">
+                    <Sidebar currentPage={currentPage} setCurrentPage={setCurrentPage} />
+                </div>
+                {/* Mobile drawer overlay and panel */}
+                {sidebarOpen && (
+                    <>
+                        <div
+                            className="fixed inset-0 bg-black/50 z-40 md:hidden"
+                            onClick={() => setSidebarOpen(false)}
+                            onKeyDown={(e) => e.key === 'Escape' && setSidebarOpen(false)}
+                            aria-hidden
+                        />
+                        <div className="fixed top-0 right-0 bottom-0 w-72 max-w-[85vw] bg-dark-bg text-white z-50 flex flex-col md:hidden shadow-xl" dir="rtl">
+                            <div className="flex items-center justify-between h-20 px-4 border-b border-dark-border flex-shrink-0">
+                                <span className="text-xl font-bold text-white">אלי שלטים</span>
+                                <button
+                                    type="button"
+                                    onClick={() => setSidebarOpen(false)}
+                                    className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-dark-card min-h-[44px] min-w-[44px] flex items-center justify-center"
+                                    aria-label="סגור תפריט"
+                                >
+                                    <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                        <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                                    </svg>
+                                </button>
+                            </div>
+                            <div className="flex-1 overflow-hidden flex flex-col">
+                                <Sidebar
+                                    currentPage={currentPage}
+                                    setCurrentPage={setCurrentPage}
+                                    onClose={() => setSidebarOpen(false)}
+                                    hideBranding
+                                />
+                            </div>
+                        </div>
+                    </>
+                )}
                 <div className="flex-1 flex flex-col min-w-0">
                     <Header
                         title={PAGE_TITLES[currentPage]}
@@ -931,6 +969,7 @@ const App: React.FC = () => {
                         attendanceRecords={attendanceRecords}
                         showAddOrderWidget={['Dashboard', 'Orders', 'Customers', 'Suppliers', 'PriceList', 'Attendance', 'CallCenter'].includes(currentPage)}
                         onAddOrder={handleAddOrderFromHeader}
+                        onOpenSidebar={() => setSidebarOpen(true)}
                     />
                     {backgroundLoadError && (
                         <div className="mx-4 mt-2 sm:mx-6 lg:mx-8 flex flex-wrap items-center justify-between gap-3 rounded-lg bg-amber-50 border border-amber-200 px-4 py-3 text-amber-800" role="alert">

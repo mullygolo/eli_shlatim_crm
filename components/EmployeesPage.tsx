@@ -877,7 +877,27 @@ const EmployeesPage: React.FC<EmployeesPageProps> = ({ employees, setEmployees, 
             </div>
 
             {activeMainTab === 'LIST' && (
-                <div className="bg-white rounded-xl shadow-md border border-slate-200 overflow-hidden">
+                <>
+                {/* Mobile: employee cards */}
+                <div className="md:hidden space-y-3 pb-4">
+                    {filteredEmployees.map(employee => (
+                        <button
+                            key={employee.id}
+                            type="button"
+                            onClick={() => handleEditEmployee(employee)}
+                            className={`w-full text-right bg-white rounded-xl border border-slate-200 shadow-sm p-4 hover:bg-slate-50 active:bg-slate-100 transition-colors min-h-[44px] ${employee.status === 'INACTIVE' ? 'opacity-60' : ''}`}
+                        >
+                            <div className="font-bold text-slate-900">{employee.name}</div>
+                            <p className="text-sm text-slate-600 mt-0.5">{employee.role}</p>
+                            <div className="flex flex-wrap gap-2 mt-2">
+                                <span className={`text-[10px] px-2 py-0.5 rounded font-black uppercase ${employee.salaryType === 'GLOBAL' ? 'bg-indigo-100 text-indigo-700' : 'bg-slate-100 text-slate-600'}`}>{employee.salaryType === 'GLOBAL' ? 'גלובלי' : 'שעתי'}</span>
+                                <span className={`text-[10px] px-2.5 py-1 rounded-full font-black uppercase ${employee.status === 'ACTIVE' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>{employee.status === 'ACTIVE' ? 'פעיל' : 'לא פעיל'}</span>
+                            </div>
+                            <p className="text-sm font-bold text-slate-700 mt-2">₪{employee.salaryType === 'GLOBAL' ? (employee.monthlyBaseSalary || 0).toLocaleString() : employee.hourlyWage}</p>
+                        </button>
+                    ))}
+                </div>
+                <div className="hidden md:block bg-white rounded-xl shadow-md border border-slate-200 overflow-hidden">
                     <div className="overflow-x-auto">
                         <table className="min-w-full divide-y divide-slate-200 text-start">
                             <thead className="bg-slate-50">
@@ -898,6 +918,7 @@ const EmployeesPage: React.FC<EmployeesPageProps> = ({ employees, setEmployees, 
                         </table>
                     </div>
                 </div>
+                </>
             )}
 
             {activeMainTab === 'REQUESTS' && (

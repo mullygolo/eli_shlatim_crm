@@ -29,26 +29,34 @@ const Modal: React.FC<ModalProps> = ({ title, onClose, children, size = 'lg', zI
 
     return (
         <div 
-            className="fixed inset-0 bg-black bg-opacity-50 flex justify-center items-center p-4" 
+            className="fixed inset-0 bg-black bg-opacity-50 flex justify-center items-end md:items-center p-0 md:p-4" 
             style={{ zIndex }} 
             onClick={onClose}
         >
             <div 
-                className={`bg-white rounded-lg shadow-xl w-full ${sizeClasses[size]} max-h-[90vh] flex flex-col`} 
+                className={`bg-white shadow-xl w-full flex flex-col
+                    md:rounded-lg md:max-h-[90vh]
+                    max-md:rounded-t-2xl max-md:max-w-none max-md:h-[95dvh]
+                    ${sizeClasses[size]}`} 
                 onClick={e => e.stopPropagation()}
             >
-                <div className="flex justify-between items-center gap-4 p-4 border-b border-slate-200">
-                    <h3 className="text-lg font-semibold text-slate-900 flex-shrink-0 order-first">{title}</h3>
+                <div className="flex justify-between items-center gap-4 p-4 border-b border-slate-200 flex-shrink-0">
+                    <h3 className="text-lg font-semibold text-slate-900 flex-shrink-0 order-first truncate min-w-0">{title}</h3>
                     <div className="flex items-center gap-3 flex-shrink-0 min-w-0">
                         {headerEnd}
-                        <button onClick={onClose} className="text-slate-400 hover:text-slate-600 flex-shrink-0">
+                        <button
+                            type="button"
+                            onClick={onClose}
+                            className="text-slate-400 hover:text-slate-600 flex-shrink-0 min-h-[44px] min-w-[44px] flex items-center justify-center rounded-lg hover:bg-slate-100"
+                            aria-label="סגור"
+                        >
                             <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
                             </svg>
                         </button>
                     </div>
                 </div>
-                <div className="p-6 overflow-y-auto">
+                <div className="p-4 md:p-6 overflow-y-auto flex-1 min-h-0">
                     {children}
                 </div>
             </div>

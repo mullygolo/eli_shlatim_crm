@@ -66,11 +66,11 @@ const MonthlyGoalWidget: React.FC<{
     }
 
     return (
-        <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 relative overflow-hidden h-full flex flex-col justify-between min-h-[180px]">
+        <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 sm:p-6 relative overflow-hidden h-full flex flex-col justify-between min-h-[180px]">
             <div className="flex justify-between items-start mb-2">
-                <h3 className="text-lg font-bold text-slate-800">יעד הכנסות חודשי</h3>
+                <h3 className="text-base sm:text-lg font-bold text-slate-800">יעד הכנסות חודשי</h3>
                 {canEdit && (
-                    <button onClick={onEdit} className="text-slate-400 hover:text-primary transition-colors" title="עריכת יעד (מנהל מערכת)">
+                    <button type="button" onClick={onEdit} className="text-slate-400 hover:text-primary transition-colors min-h-[44px] min-w-[44px] flex items-center justify-center -m-2" title="עריכת יעד (מנהל מערכת)">
                         <SettingsIcon className="w-5 h-5" />
                     </button>
                 )}
@@ -104,12 +104,12 @@ const SystemMessageWidget: React.FC<{ message: string }> = ({ message }) => {
     const sanitized = DOMPurify.sanitize(toSanitize, { ALLOWED_TAGS: ['p', 'br', 'strong', 'b', 'em', 'i', 'u', 's', 'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'a'] });
     const html = sanitized.trim() || '<p class="text-slate-500">אין הודעות חדשות.</p>';
     return (
-        <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 h-full flex flex-col relative overflow-hidden min-h-[180px]">
+        <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 sm:p-6 h-full flex flex-col relative overflow-hidden min-h-[180px]">
             <div className="flex items-center gap-2 mb-3 border-b border-slate-100 pb-2">
                 <div className="bg-amber-100 p-1.5 rounded-full text-amber-600">
                     <MegaphoneIcon className="w-5 h-5" />
                 </div>
-                <h3 className="text-lg font-bold text-slate-800">הודעות מערכת</h3>
+                <h3 className="text-base sm:text-lg font-bold text-slate-800">הודעות מערכת</h3>
             </div>
             <div
                 className="flex-grow overflow-y-auto max-h-[120px] custom-scrollbar text-slate-700 leading-relaxed text-sm md:text-base [&_p]:mb-2 [&_strong]:font-bold [&_b]:font-bold [&_em]:italic [&_i]:italic [&_ul]:list-disc [&_ol]:list-decimal [&_ul]:mr-4 [&_ol]:mr-4 [&_li]:mr-2 [&_h1]:text-lg [&_h2]:text-base [&_h3]:text-sm [&_a]:text-primary [&_a]:underline"
@@ -310,15 +310,15 @@ const OperationsCalendarWidget: React.FC<{
     const selectedDayItems = useMemo(() => getItemsForDay(selectedDate), [selectedDate, calendarItems]);
 
     return (
-        <div className="bg-white rounded-lg shadow-md border border-slate-200 h-[500px] flex flex-col md:flex-row overflow-hidden">
+        <div className="bg-white rounded-lg shadow-md border border-slate-200 min-h-[400px] h-[500px] max-h-[70vh] md:max-h-none flex flex-col md:flex-row overflow-hidden">
             {/* Left Side: Calendar Grid */}
-            <div className="md:w-7/12 p-4 flex flex-col border-b md:border-b-0 md:border-l border-slate-200">
+            <div className="md:w-7/12 p-4 flex flex-col border-b md:border-b-0 md:border-l border-slate-200 min-h-0 overflow-auto">
                 <div className="flex justify-between items-center mb-4 px-2">
-                    <button onClick={handlePrevMonth} className="text-slate-400 hover:text-primary text-xl font-bold px-2">&lt;</button>
-                    <h3 className="font-bold text-slate-800 text-lg">
+                    <button type="button" onClick={handlePrevMonth} className="text-slate-400 hover:text-primary text-xl font-bold px-2 min-h-[44px] min-w-[44px] flex items-center justify-center">&lt;</button>
+                    <h3 className="font-bold text-slate-800 text-base sm:text-lg">
                         {new Date(currentYear, currentMonth).toLocaleString('he-IL', { month: 'long', year: 'numeric' })}
                     </h3>
-                    <button onClick={handleNextMonth} className="text-slate-400 hover:text-primary text-xl font-bold px-2">&gt;</button>
+                    <button type="button" onClick={handleNextMonth} className="text-slate-400 hover:text-primary text-xl font-bold px-2 min-h-[44px] min-w-[44px] flex items-center justify-center">&gt;</button>
                 </div>
                 
                 <div className="grid grid-cols-7 text-center text-xs font-medium text-slate-500 mb-2">
@@ -775,7 +775,7 @@ const StrongNumberCard: React.FC<{
                 </div>
             </div>
             
-            <div className="p-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-4 bg-white">
+            <div className="p-4 sm:p-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-4 bg-white">
                 <div
                     ref={dailyCardRef}
                     role="button"
@@ -1465,22 +1465,25 @@ const Dashboard: React.FC<DashboardProps> = ({
                         </h2>
                         <div className="flex bg-slate-50 rounded-lg p-1 border border-slate-200">
                             <button 
+                                type="button"
                                 onClick={() => setTaskFilter('TODAY')}
-                                className={`px-2 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1 ${taskFilter === 'TODAY' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                                className={`px-2 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1 min-h-[40px] ${taskFilter === 'TODAY' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
                             >
                                 היום
                                 {taskCounts.TODAY > 0 && <span className="bg-emerald-100 text-emerald-800 px-1 rounded-full text-[10px]">{taskCounts.TODAY}</span>}
                             </button>
                              <button 
+                                type="button"
                                 onClick={() => setTaskFilter('OVERDUE')}
-                                className={`px-2 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1 ${taskFilter === 'OVERDUE' ? 'bg-white text-red-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                                className={`px-2 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1 min-h-[40px] ${taskFilter === 'OVERDUE' ? 'bg-white text-red-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
                             >
                                 איחור
                                 {taskCounts.OVERDUE > 0 && <span className="bg-red-100 text-red-800 px-1 rounded-full text-[10px]">{taskCounts.OVERDUE}</span>}
                             </button>
                             <button 
+                                type="button"
                                 onClick={() => setTaskFilter('FUTURE')}
-                                className={`px-2 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1 ${taskFilter === 'FUTURE' ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                                className={`px-2 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1 min-h-[40px] ${taskFilter === 'FUTURE' ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
                             >
                                 עתיד
                                 {taskCounts.FUTURE > 0 && <span className="bg-blue-100 text-blue-800 px-1 rounded-full text-[10px]">{taskCounts.FUTURE}</span>}
@@ -1537,7 +1540,7 @@ const Dashboard: React.FC<DashboardProps> = ({
                         </button>
                     </div>
                 </div>
-                <div className="min-h-[640px] max-h-[640px] overflow-y-auto p-4 space-y-3 custom-scrollbar">
+                <div className="min-h-[320px] max-h-[640px] md:min-h-[640px] overflow-y-auto p-4 space-y-3 custom-scrollbar">
                     {wallPosts.length === 0 ? (
                         <p className="text-center text-slate-400 text-sm py-6">אין הודעות עדיין. התחל לכתוב.</p>
                     ) : (

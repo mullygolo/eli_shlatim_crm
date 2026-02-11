@@ -1686,7 +1686,37 @@ ${results.errors?.length > 0 ? `\n- שגיאות: ${results.errors.length}` : ''
                     </button>
                 </div>
             </div>
-            <div className="bg-white shadow-md rounded-lg overflow-x-auto">
+            {/* Mobile: customer cards */}
+            <div className="md:hidden space-y-3 pb-4">
+                {filteredCustomers.length === 0 && !loading && (
+                    <div className="text-center py-8 text-slate-500 bg-white rounded-xl border border-slate-200 p-4">
+                        <p className="font-semibold">לא נמצאו לקוחות</p>
+                        <p className="text-sm mt-1">נסה חיפוש אחר או הוסף לקוח חדש.</p>
+                    </div>
+                )}
+                {filteredCustomers.map(customer => {
+                    const primaryContact = customer.contacts.find(c => c.isDefault) || customer.contacts.find(c => c.isBillingContact) || customer.contacts[0];
+                    const customerDebt = (customer as Customer & { debt?: number }).debt || 0;
+                    return (
+                        <button
+                            key={customer.id}
+                            type="button"
+                            onClick={() => handleViewCustomer(customer)}
+                            className="w-full text-right bg-white rounded-xl border border-slate-200 shadow-sm p-4 hover:bg-slate-50 active:bg-slate-100 transition-colors min-h-[44px]"
+                        >
+                            <div className="font-bold text-primary">{customer.name} {customer.isSpecial && '⭐'}</div>
+                            <p className="text-sm text-slate-600 mt-0.5">{primaryContact?.name || '—'}</p>
+                            <p className="text-xs text-slate-500 mt-1">{customer.category || '—'}</p>
+                            {customerDebt !== 0 && (
+                                <p className={`text-sm font-bold mt-2 ${customerDebt > 1 ? 'text-red-600' : 'text-green-600'}`}>
+                                    חוב: ₪{customerDebt.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                                </p>
+                            )}
+                        </button>
+                    );
+                })}
+            </div>
+            <div className="hidden md:block bg-white shadow-md rounded-lg overflow-x-auto">
                 <table className="min-w-full divide-y divide-slate-200 text-start">
                     <thead className="bg-slate-50">
                         <tr>

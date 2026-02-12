@@ -457,7 +457,8 @@ const PnLReport: React.FC<PnLReportProps> = ({
         variableExpenses.forEach(ve => {
             const hasInstallments = ve.checks && ve.checks.length > 0;
             if (hasInstallments) {
-                ve.checks!.forEach((check) => {
+                const totalChecks = ve.checks!.length;
+                ve.checks!.forEach((check, idx) => {
                     if (!check.repaymentDate) return;
                     const rd = new Date(check.repaymentDate);
                     const key = getMonthKey(rd);
@@ -465,11 +466,13 @@ const PnLReport: React.FC<PnLReportProps> = ({
                     const amount = check.amount;
                     const net = ve.isVatExempt ? amount : (ve.includesVat ? amount / (1 + vatRate / 100) : amount);
                     const vat = ve.isVatExempt ? 0 : (ve.includesVat ? amount - net : net * (vatRate / 100));
+                    const instLabel = `תשלום ${idx + 1}/${totalChecks}`;
+                    const subtextBase = ve.category ? `${ve.category} (פריסה)` : 'פריסה';
                     pnlMap[key].variableExpenses += net;
-                    pnlMap[key].variableItems.push({ name: ve.name, amount: net, date: rd, subtext: ve.category ? `${ve.category} (פריסה)` : 'פריסה' });
+                    pnlMap[key].variableItems.push({ name: ve.name, amount: net, date: rd, subtext: `${instLabel} • ${subtextBase}` });
                     if (vat > 0) {
                         pnlMap[key].vatInput += vat;
-                        pnlMap[key].vatInputItems.push({ name: `מע"מ תשומות (משתנות): ${ve.name}`, amount: vat, date: rd, subtext: ve.category ? `${ve.category} (פריסה)` : 'פריסה' });
+                        pnlMap[key].vatInputItems.push({ name: `מע"מ תשומות (משתנות): ${ve.name}`, amount: vat, date: rd, subtext: `${instLabel} • ${subtextBase}` });
                     }
                 });
             } else {

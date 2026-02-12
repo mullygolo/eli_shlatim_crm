@@ -1862,11 +1862,14 @@ const FinancePage: React.FC<FinancePageProps> = ({
                     return yMatches && mMatches;
                 });
 
+                const totalChecks = e.checks!.length;
                 checksInFilter.forEach((check, idx) => {
+                    const origIdx = e.checks!.indexOf(check);
+                    const instLabel = origIdx >= 0 ? ` (${origIdx + 1}/${totalChecks})` : ` (${idx + 1}/${totalChecks})`;
                     displayItems.push({
                         id: `${e.id}_inst_${idx}`,
                         originalId: e.id,
-                        name: `תשלום (פריסה): ${e.name}`,
+                        name: `תשלום (פריסה)${instLabel}: ${e.name}`,
                         category: e.category,
                         amount: check.amount,
                         date: new Date(check.repaymentDate!),

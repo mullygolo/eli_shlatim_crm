@@ -729,6 +729,8 @@ export interface CallLog {
     status: string;
     direction: 'incoming' | 'outgoing' | 'unknown';
     hangupReason?: string;
+    /** True when the recording binary is stored in MongoDB (use GET /api/call-logs/recording/:uniqueId to play). */
+    hasStoredRecording?: boolean;
 }
 
 // Price List Types

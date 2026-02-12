@@ -897,6 +897,26 @@ export async function syncCallLogs(startDate: string, endDate: string, number?: 
     });
 }
 
+/** Fetch stored call recording as Blob (for playback). Requires auth. */
+export async function getCallLogRecordingBlob(uniqueId: string): Promise<Blob> {
+    const token = localStorage.getItem('authToken');
+    const headers: HeadersInit = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const response = await fetch(`${API_BASE_URL}/call-logs/recording/${encodeURIComponent(uniqueId)}`, { headers });
+    if (!response.ok) {
+        const t = await response.text();
+        let msg = `${response.status} ${response.statusText}`;
+        try {
+            const j = JSON.parse(t) as { error?: string };
+            if (j.error) msg = j.error;
+        } catch {
+            if (t && t.length < 200) msg = t;
+        }
+        throw new Error(msg);
+    }
+    return response.blob();
+}
+
 // ==================== SETTINGS ====================
 export interface Settings {
     vatRate: number;

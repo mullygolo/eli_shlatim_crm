@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { getCallLogs, upsertCallLogByUniqueId } from '../services/mongoService.js';
+import { getCallLogs, getCallLogByUniqueId, upsertCallLogByUniqueId } from '../services/mongoService.js';
 import { verifyToken } from '../middleware/auth.js';
 import { fetchCallLogsFromMasterPBX } from '../services/masterPBXService.js';
 import type { CallLog } from '../types.js';
@@ -9,9 +9,33 @@ const router = Router();
 router.get('/', verifyToken, async (req, res) => {
     try {
         const logs = await getCallLogs();
-        res.json(logs);
+        const forClient = logs.map((log) => {
+            const { recordingData: _rd, ...rest } = log as CallLog & { recordingData?: unknown };
+            return { ...rest, hasStoredRecording: !!_rd };
+        });
+        res.json(forClient);
     } catch (error) {
         res.status(500).json({ error: 'Failed to fetch call logs' });
+    }
+});
+
+/**
+ * GET /api/call-logs/recording/:uniqueId
+ * Stream the stored recording from MongoDB (audio/wav). Requires auth.
+ */
+router.get('/recording/:uniqueId', verifyToken, async (req, res) => {
+    try {
+        const { uniqueId } = req.params;
+        const log = await getCallLogByUniqueId(uniqueId);
+        if (!log || !(log as CallLog & { recordingData?: Buffer }).recordingData) {
+            return res.status(404).json({ error: 'Recording not found' });
+        }
+        const buffer = (log as CallLog & { recordingData: Buffer }).recordingData;
+        res.setHeader('Content-Type', 'audio/wav');
+        res.setHeader('Cache-Control', 'private, max-age=3600');
+        res.send(buffer);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch recording' });
     }
 });
 

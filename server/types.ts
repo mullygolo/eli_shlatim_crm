@@ -724,6 +724,8 @@ export interface CallLog {
     status: string;
     direction: 'incoming' | 'outgoing' | 'unknown';
     hangupReason?: string;
+    /** Recording audio stored in MongoDB (Buffer). Not sent to client; use hasStoredRecording + GET /recording/:uniqueId. */
+    recordingData?: Buffer;
 }
 
 // Price List Types

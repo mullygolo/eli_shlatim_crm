@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { CallLog } from '../types';
 import { PhoneIcon, ImportIcon } from './icons';
 import Modal from './Modal';
-import { getCallLogs, syncCallLogs } from '../services/mongoService';
+import { getCallLogs, syncCallLogs, getCallLogRecordingBlob } from '../services/mongoService';
 
 const formatDuration = (seconds: number): string => {
     if (!seconds || isNaN(seconds)) return '0:00';
@@ -39,6 +39,8 @@ const CallCenterPage: React.FC = () => {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [playingLog, setPlayingLog] = useState<CallLog | null>(null);
+    const [playingAudioUrl, setPlayingAudioUrl] = useState<string | null>(null);
+    const [playingAudioLoading, setPlayingAudioLoading] = useState(false);
     const [showSyncModal, setShowSyncModal] = useState(false);
     const [syncLoading, setSyncLoading] = useState(false);
     const [syncError, setSyncError] = useState<string | null>(null);
@@ -67,6 +69,35 @@ const CallCenterPage: React.FC = () => {
             });
         return () => { cancelled = true; };
     }, []);
+
+    useEffect(() => {
+        if (!playingLog) {
+            setPlayingAudioUrl(null);
+            setPlayingAudioLoading(false);
+            return;
+        }
+        if (playingLog.hasStoredRecording) {
+            setPlayingAudioUrl(null);
+            setPlayingAudioLoading(true);
+            let cancelled = false;
+            getCallLogRecordingBlob(playingLog.uniqueId)
+                .then((blob) => {
+                    if (cancelled) return;
+                    setPlayingAudioUrl(URL.createObjectURL(blob));
+                })
+                .catch(() => {
+                    if (!cancelled) setPlayingAudioUrl(null);
+                })
+                .finally(() => {
+                    if (!cancelled) setPlayingAudioLoading(false);
+                });
+            return () => {
+                cancelled = true;
+            };
+        }
+        setPlayingAudioUrl(playingLog.file || null);
+        setPlayingAudioLoading(false);
+    }, [playingLog]);
 
     const loadLogs = async () => {
         setLoading(true);
@@ -226,7 +257,7 @@ const CallCenterPage: React.FC = () => {
                                         </span>
                                     </td>
                                     <td className="px-4 py-3 whitespace-nowrap">
-                                        {log.file ? (
+                                        {log.file || log.hasStoredRecording ? (
                                             <button
                                                 type="button"
                                                 onClick={() => setPlayingLog(log)}
@@ -255,19 +286,31 @@ const CallCenterPage: React.FC = () => {
             {playingLog && (
                 <Modal
                     title="השמעת הקלטה"
-                    onClose={() => setPlayingLog(null)}
+                    onClose={() => {
+                        if (playingAudioUrl?.startsWith('blob:')) {
+                            URL.revokeObjectURL(playingAudioUrl);
+                        }
+                        setPlayingLog(null);
+                        setPlayingAudioUrl(null);
+                        setPlayingAudioLoading(false);
+                    }}
                     size="lg"
                 >
                     <div className="space-y-4 text-start">
                         <p className="text-sm text-slate-600">
                             שיחה מ־{formatDateTime(playingLog.startDate)} • {playingLog.caller} → {playingLog.callee}
                         </p>
-                        <audio
-                            key={playingLog.id}
-                            src={playingLog.file}
-                            controls
-                            className="w-full"
-                        />
+                        {playingAudioLoading && (
+                            <p className="text-sm text-slate-500">טוען הקלטה...</p>
+                        )}
+                        {playingAudioUrl && !playingAudioLoading && (
+                            <audio
+                                key={playingLog.uniqueId}
+                                src={playingAudioUrl}
+                                controls
+                                className="w-full"
+                            />
+                        )}
                     </div>
                 </Modal>
             )}

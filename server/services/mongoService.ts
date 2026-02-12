@@ -89,6 +89,7 @@ function serializeDates(obj: any): any {
     if (obj === undefined) return undefined;
     if (obj === null) return null;
     if (obj instanceof Date) return obj.toISOString();
+    if (Buffer.isBuffer(obj)) return obj;
     if (Array.isArray(obj)) {
         const arr = obj.map(serializeDates).filter((x: any) => x !== undefined);
         return arr;
@@ -3861,6 +3862,32 @@ export async function upsertCallLogByUniqueId(callLog: CallLog): Promise<CallLog
         return deserializeDates(serialized) as CallLog;
     } catch (error) {
         console.error('Error upserting call log:', error);
+        throw error;
+    }
+}
+
+export async function getCallLogByUniqueId(uniqueId: string): Promise<CallLog | null> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<CallLog>('callLogs');
+        const doc = await collection.findOne({ uniqueId });
+        return doc ? (deserializeDates(doc) as CallLog) : null;
+    } catch (error) {
+        console.error('Error fetching call log by uniqueId:', error);
+        throw error;
+    }
+}
+
+export async function updateCallLogRecordingData(uniqueId: string, recordingData: Buffer): Promise<void> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<CallLog>('callLogs');
+        await collection.updateOne(
+            { uniqueId },
+            { $set: { recordingData } }
+        );
+    } catch (error) {
+        console.error('Error updating call log recording data:', error);
         throw error;
     }
 }

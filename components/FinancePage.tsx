@@ -539,10 +539,11 @@ const AmortizationModal: React.FC<{
 
 const DebtPaymentModal: React.FC<{ 
     debt: Debt; 
-    onSavePayment: (debtId: string, payment: DebtPayment) => void; 
+    onSavePayment: (debtId: string, payment: DebtPayment) => void;
+    onSavePayments?: (debtId: string, payments: DebtPayment[]) => void;
     onClose: () => void;
     vatRate: number;
-}> = ({ debt, onSavePayment, onClose, vatRate }) => {
+}> = ({ debt, onSavePayment, onSavePayments, onClose, vatRate }) => {
     const debtOriginalAmount = debt.amount || 0;
     let debtGross = debtOriginalAmount;
     if (!debt.isVatExempt) {
@@ -562,38 +563,48 @@ const DebtPaymentModal: React.FC<{
     const [reference, setReference] = useState('');
     const [repaymentDate, setRepaymentDate] = useState<string>('');
     const [note, setNote] = useState<string>('');
+    const [paymentMode, setPaymentMode] = useState<'single' | 'installment'>('single');
+    const [generatedPayments, setGeneratedPayments] = useState<SupplierPayment[]>([]);
+
+    const toDebtPayment = (sp: SupplierPayment): DebtPayment => {
+        const status: TransactionStatus = sp.method === PaymentMethod.CHECK ? 'PENDING' : 'CLEARED';
+        return {
+            id: sp.id || `dp_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
+            amount: sp.amount,
+            date: sp.date || new Date(),
+            method: sp.method as PaymentMethod,
+            reference: sp.reference,
+            repaymentDate: sp.repaymentDate,
+            status,
+            statusHistory: [{ date: new Date(), status, changedBy: 'משתמש', reason: 'תשלום חוב' }],
+            note
+        };
+    };
+
+    const handleSaveInstallments = () => {
+        if (!generatedPayments.length || !onSavePayments) return;
+        const payments = generatedPayments.map(toDebtPayment);
+        onSavePayments(debt.id, payments);
+    };
 
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
-        if (amount <= 0) {
-            alert("אנא הזן סכום חיובי");
-            return;
-        }
+        if (paymentMode === 'installment') return;
+        if (amount <= 0) { alert("אנא הזן סכום חיובי"); return; }
         if (method === PaymentMethod.CHECK) {
             if (!reference) { alert("חובה להזין מספר צ'ק בשדה אסמכתא"); return; }
             if (!repaymentDate) { alert("חובה להזין תאריך פירעון עבור צ'ק"); return; }
         }
-
         const initialStatus: TransactionStatus = method === PaymentMethod.CHECK ? 'PENDING' : 'CLEARED';
-
         const newPayment: DebtPayment = { 
-            id: `dp_${Date.now()}`, 
-            amount, 
-            date: new Date(date), 
-            method,
-            reference,
-            repaymentDate: method === PaymentMethod.CHECK ? new Date(repaymentDate) : undefined,
-            status: initialStatus,
-            statusHistory: [{
-                date: new Date(),
-                status: initialStatus,
-                changedBy: 'משתמש',
-                reason: 'תשלום חוב'
-            }],
-            note 
+            id: `dp_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`, amount, date: new Date(date), method,
+            reference, repaymentDate: method === PaymentMethod.CHECK ? new Date(repaymentDate) : undefined,
+            status: initialStatus, statusHistory: [{ date: new Date(), status: initialStatus, changedBy: 'משתמש', reason: 'תשלום חוב' }], note 
         };
         onSavePayment(debt.id, newPayment);
     };
+
+    const isInstallmentMethod = method === PaymentMethod.CHECK || method === PaymentMethod.CREDIT_CARD;
 
     return (
         <div className="space-y-6 text-start">
@@ -612,38 +623,84 @@ const DebtPaymentModal: React.FC<{
                 <div className="grid grid-cols-2 gap-4">
                     <div>
                         <label className="block text-sm font-medium text-slate-700">סכום החזר</label>
-                        <input type="number" step="0.01" value={amount} onChange={e => setAmount(Number(e.target.value))} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" required />
+                        <input type="number" step="0.01" value={amount} onChange={e => setAmount(Number(e.target.value))} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" required={paymentMode === 'single'} disabled={paymentMode === 'installment'} />
                     </div>
                     <div>
                         <label className="block text-sm font-medium text-slate-700">אמצעי תשלום</label>
-                        <select value={method} onChange={e => setMethod(e.target.value as PaymentMethod)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm bg-white p-2 focus:ring-primary focus:border-primary sm:text-sm">
+                        <select value={method} onChange={e => { setMethod(e.target.value as PaymentMethod); setPaymentMode('single'); setGeneratedPayments([]); }} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm bg-white p-2 focus:ring-primary focus:border-primary sm:text-sm">
                             {Object.values(PaymentMethod).map(m => <option key={m} value={m}>{m}</option>)}
                         </select>
                     </div>
-                    <div>
-                        <label className="block text-sm font-medium text-slate-700">תאריך ביצוע</label>
-                        <input type="date" value={date} onChange={e => setDate(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" required />
-                    </div>
-                    <div>
-                        <label className="block text-sm font-medium text-slate-700">אסמכתא / מס' צ'ק</label>
-                        <input type="text" value={reference} onChange={e => setReference(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" placeholder={method === PaymentMethod.CHECK ? 'חובה' : ''} />
-                    </div>
+                    {isInstallmentMethod && (
+                        <div className="col-span-2">
+                            <label className="block text-[10px] font-bold text-slate-500 uppercase mb-2">סוג תשלום</label>
+                            <div className="flex gap-4">
+                                <label className="flex items-center gap-2 cursor-pointer">
+                                    <input type="radio" name="debtPaymentMode" checked={paymentMode === 'single'} onChange={() => { setPaymentMode('single'); setGeneratedPayments([]); }} className="text-primary" />
+                                    <span className="text-sm font-bold text-slate-700">תשלום בודד</span>
+                                </label>
+                                <label className="flex items-center gap-2 cursor-pointer">
+                                    <input type="radio" name="debtPaymentMode" checked={paymentMode === 'installment'} onChange={() => setPaymentMode('installment')} className="text-primary" />
+                                    <span className="text-sm font-bold text-slate-700">תשלומים בפריסה</span>
+                                </label>
+                            </div>
+                        </div>
+                    )}
+                    {paymentMode === 'single' && (
+                        <>
+                            <div>
+                                <label className="block text-sm font-medium text-slate-700">תאריך ביצוע</label>
+                                <input type="date" value={date} onChange={e => setDate(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" required />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-slate-700">אסמכתא / מס' צ'ק</label>
+                                <input type="text" value={reference} onChange={e => setReference(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" placeholder={method === PaymentMethod.CHECK ? 'חובה' : ''} />
+                            </div>
+                        </>
+                    )}
                 </div>
 
-                {method === PaymentMethod.CHECK && (
+                {paymentMode === 'single' && method === PaymentMethod.CHECK && (
                     <div className="bg-yellow-50 p-3 rounded border border-yellow-200">
                         <label className="block text-sm font-bold text-yellow-800">תאריך פירעון הצ'ק</label>
                         <input type="date" value={repaymentDate} onChange={e => setRepaymentDate(e.target.value)} className="mt-1 block w-full rounded-md border-yellow-300 shadow-sm focus:ring-yellow-500 p-2 sm:text-sm" required />
                     </div>
                 )}
 
-                <div>
-                    <label className="block text-sm font-medium text-slate-700">הערה</label>
-                    <input type="text" value={note} onChange={e => setNote(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" />
-                </div>
-                <div className="flex justify-end pt-2">
-                    <button type="submit" className="px-4 py-2 bg-primary text-white rounded hover:bg-indigo-700 text-sm font-bold shadow-sm">בצע תשלום</button>
-                </div>
+                {paymentMode === 'installment' && isInstallmentMethod && (
+                    <div className="space-y-4 mt-4">
+                        <InstallmentSeriesGenerator
+                            initialAmount={remaining}
+                            method={method as PaymentMethod.CHECK | typeof PaymentMethod.CREDIT_CARD}
+                            onGenerated={(payments) => setGeneratedPayments(payments)}
+                        />
+                        {generatedPayments.length > 0 && (
+                            <div className="flex flex-col gap-2">
+                                <div className="flex justify-between items-center">
+                                    <span className="text-sm font-bold text-slate-700">{generatedPayments.length} תשלומים נוצרו</span>
+                                    <button type="button" onClick={handleSaveInstallments} className="px-4 py-2 bg-primary text-white rounded hover:bg-indigo-700 text-sm font-bold shadow-sm">שמור פריסה</button>
+                                </div>
+                                <div className="max-h-32 overflow-y-auto text-xs text-slate-500 bg-slate-50 rounded p-2">
+                                    {generatedPayments.map((p, i) => (
+                                        <div key={p.id}>#{i + 1}: ₪{p.amount.toLocaleString()} — {p.repaymentDate ? new Date(p.repaymentDate).toLocaleDateString('he-IL') : '-'}</div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                )}
+
+                {paymentMode === 'single' && (
+                    <>
+                        <div>
+                            <label className="block text-sm font-medium text-slate-700">הערה</label>
+                            <input type="text" value={note} onChange={e => setNote(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" />
+                        </div>
+                        <div className="flex justify-end pt-2">
+                            <button type="submit" className="px-4 py-2 bg-primary text-white rounded hover:bg-indigo-700 text-sm font-bold shadow-sm">בצע תשלום</button>
+                        </div>
+                    </>
+                )}
             </form>
             <div className="flex justify-end pt-4 border-t border-slate-100">
                 <button type="button" onClick={onClose} className="px-4 py-2 bg-slate-200 text-slate-800 rounded hover:bg-slate-300">סגור</button>
@@ -654,10 +711,11 @@ const DebtPaymentModal: React.FC<{
 
 const ReceivableCollectionModal: React.FC<{ 
     receivable: Receivable; 
-    onSavePayment: (receivableId: string, payment: ReceivablePayment) => void; 
+    onSavePayment: (receivableId: string, payment: ReceivablePayment) => void;
+    onSavePayments?: (receivableId: string, payments: ReceivablePayment[]) => void;
     onClose: () => void;
     vatRate: number;
-}> = ({ receivable, onSavePayment, onClose, vatRate }) => {
+}> = ({ receivable, onSavePayment, onSavePayments, onClose, vatRate }) => {
     const originalAmount = receivable.amount || 0;
     let gross = originalAmount;
     if (!receivable.isVatExempt) {
@@ -677,38 +735,48 @@ const ReceivableCollectionModal: React.FC<{
     const [reference, setReference] = useState('');
     const [repaymentDate, setRepaymentDate] = useState<string>('');
     const [note, setNote] = useState<string>('');
+    const [paymentMode, setPaymentMode] = useState<'single' | 'installment'>('single');
+    const [generatedPayments, setGeneratedPayments] = useState<SupplierPayment[]>([]);
+
+    const toReceivablePayment = (sp: SupplierPayment): ReceivablePayment => {
+        const status: TransactionStatus = sp.method === PaymentMethod.CHECK ? 'PENDING' : 'CLEARED';
+        return {
+            id: sp.id || `rp_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
+            amount: sp.amount,
+            date: sp.date || new Date(),
+            method: sp.method as PaymentMethod,
+            reference: sp.reference,
+            repaymentDate: sp.repaymentDate,
+            status,
+            statusHistory: [{ date: new Date(), status, changedBy: 'משתמש', reason: 'גביית חוב לקוח' }],
+            note
+        };
+    };
 
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
-        if (amount <= 0) {
-            alert("אנא הזן סכום חיובי");
-            return;
-        }
+        if (paymentMode === 'installment') return;
+        if (amount <= 0) { alert("אנא הזן סכום חיובי"); return; }
         if (method === PaymentMethod.CHECK) {
             if (!reference) { alert("חובה להזין מספר צ'ק בשדה אסמכתא"); return; }
             if (!repaymentDate) { alert("חובה להזין תאריך פירעון עבור צ'ק"); return; }
         }
-
         const initialStatus: TransactionStatus = method === PaymentMethod.CHECK ? 'PENDING' : 'CLEARED';
-
         const newPayment: ReceivablePayment = { 
-            id: `rp_${Date.now()}`, 
-            amount, 
-            date: new Date(date), 
-            method,
-            reference,
-            repaymentDate: method === PaymentMethod.CHECK ? new Date(repaymentDate) : undefined,
-            status: initialStatus,
-            statusHistory: [{
-                date: new Date(),
-                status: initialStatus,
-                changedBy: 'משתמש',
-                reason: 'גביית חוב לקוח'
-            }],
-            note 
+            id: `rp_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`, amount, date: new Date(date), method,
+            reference, repaymentDate: method === PaymentMethod.CHECK ? new Date(repaymentDate) : undefined,
+            status: initialStatus, statusHistory: [{ date: new Date(), status: initialStatus, changedBy: 'משתמש', reason: 'גביית חוב לקוח' }], note 
         };
         onSavePayment(receivable.id, newPayment);
     };
+
+    const handleSaveInstallments = () => {
+        if (!generatedPayments.length || !onSavePayments) return;
+        const payments = generatedPayments.map(toReceivablePayment);
+        onSavePayments(receivable.id, payments);
+    };
+
+    const isInstallmentMethod = method === PaymentMethod.CHECK || method === PaymentMethod.CREDIT_CARD;
 
     return (
         <div className="space-y-6 text-start">
@@ -727,38 +795,84 @@ const ReceivableCollectionModal: React.FC<{
                 <div className="grid grid-cols-2 gap-4">
                     <div>
                         <label className="block text-sm font-medium text-slate-700">סכום שהתקבל</label>
-                        <input type="number" step="0.01" value={amount} onChange={e => setAmount(Number(e.target.value))} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" required />
+                        <input type="number" step="0.01" value={amount} onChange={e => setAmount(Number(e.target.value))} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" required={paymentMode === 'single'} disabled={paymentMode === 'installment'} />
                     </div>
                     <div>
                         <label className="block text-sm font-medium text-slate-700">אמצעי תשלום</label>
-                        <select value={method} onChange={e => setMethod(e.target.value as PaymentMethod)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm bg-white p-2 focus:ring-primary focus:border-primary sm:text-sm">
+                        <select value={method} onChange={e => { setMethod(e.target.value as PaymentMethod); setPaymentMode('single'); setGeneratedPayments([]); }} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm bg-white p-2 focus:ring-primary focus:border-primary sm:text-sm">
                             {Object.values(PaymentMethod).map(m => <option key={m} value={m}>{m}</option>)}
                         </select>
                     </div>
-                    <div>
-                        <label className="block text-sm font-medium text-slate-700">תאריך קבלה</label>
-                        <input type="date" value={date} onChange={e => setDate(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" required />
-                    </div>
-                    <div>
-                        <label className="block text-sm font-medium text-slate-700">אסמכתא / מס' צ'ק</label>
-                        <input type="text" value={reference} onChange={e => setReference(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" placeholder={method === PaymentMethod.CHECK ? 'חובה' : ''} />
-                    </div>
+                    {isInstallmentMethod && (
+                        <div className="col-span-2">
+                            <label className="block text-[10px] font-bold text-slate-500 uppercase mb-2">סוג תשלום</label>
+                            <div className="flex gap-4">
+                                <label className="flex items-center gap-2 cursor-pointer">
+                                    <input type="radio" name="recPaymentMode" checked={paymentMode === 'single'} onChange={() => { setPaymentMode('single'); setGeneratedPayments([]); }} className="text-primary" />
+                                    <span className="text-sm font-bold text-slate-700">תשלום בודד</span>
+                                </label>
+                                <label className="flex items-center gap-2 cursor-pointer">
+                                    <input type="radio" name="recPaymentMode" checked={paymentMode === 'installment'} onChange={() => setPaymentMode('installment')} className="text-primary" />
+                                    <span className="text-sm font-bold text-slate-700">תשלומים בפריסה</span>
+                                </label>
+                            </div>
+                        </div>
+                    )}
+                    {paymentMode === 'single' && (
+                        <>
+                            <div>
+                                <label className="block text-sm font-medium text-slate-700">תאריך קבלה</label>
+                                <input type="date" value={date} onChange={e => setDate(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" required />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-slate-700">אסמכתא / מס' צ'ק</label>
+                                <input type="text" value={reference} onChange={e => setReference(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" placeholder={method === PaymentMethod.CHECK ? 'חובה' : ''} />
+                            </div>
+                        </>
+                    )}
                 </div>
 
-                {method === PaymentMethod.CHECK && (
+                {paymentMode === 'single' && method === PaymentMethod.CHECK && (
                     <div className="bg-yellow-50 p-3 rounded border border-yellow-200">
                         <label className="block text-sm font-bold text-yellow-800">תאריך פירעון הצ'ק</label>
                         <input type="date" value={repaymentDate} onChange={e => setRepaymentDate(e.target.value)} className="mt-1 block w-full rounded-md border-yellow-300 shadow-sm focus:ring-yellow-500 p-2 sm:text-sm" required />
                     </div>
                 )}
 
-                <div>
-                    <label className="block text-sm font-medium text-slate-700">הערה</label>
-                    <input type="text" value={note} onChange={e => setNote(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" />
-                </div>
-                <div className="flex justify-end pt-2">
-                    <button type="submit" className="px-4 py-2 bg-primary text-white rounded hover:bg-indigo-700 text-sm font-bold shadow-sm">קלוט תשלום</button>
-                </div>
+                {paymentMode === 'installment' && isInstallmentMethod && (
+                    <div className="space-y-4 mt-4">
+                        <InstallmentSeriesGenerator
+                            initialAmount={remaining}
+                            method={method as PaymentMethod.CHECK | typeof PaymentMethod.CREDIT_CARD}
+                            onGenerated={(payments) => setGeneratedPayments(payments)}
+                        />
+                        {generatedPayments.length > 0 && (
+                            <div className="flex flex-col gap-2">
+                                <div className="flex justify-between items-center">
+                                    <span className="text-sm font-bold text-slate-700">{generatedPayments.length} תשלומים נוצרו</span>
+                                    <button type="button" onClick={handleSaveInstallments} className="px-4 py-2 bg-primary text-white rounded hover:bg-indigo-700 text-sm font-bold shadow-sm">שמור פריסה</button>
+                                </div>
+                                <div className="max-h-32 overflow-y-auto text-xs text-slate-500 bg-slate-50 rounded p-2">
+                                    {generatedPayments.map((p, i) => (
+                                        <div key={p.id}>#{i + 1}: ₪{p.amount.toLocaleString()} — {p.repaymentDate ? new Date(p.repaymentDate).toLocaleDateString('he-IL') : '-'}</div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                )}
+
+                {paymentMode === 'single' && (
+                    <>
+                        <div>
+                            <label className="block text-sm font-medium text-slate-700">הערה</label>
+                            <input type="text" value={note} onChange={e => setNote(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" />
+                        </div>
+                        <div className="flex justify-end pt-2">
+                            <button type="submit" className="px-4 py-2 bg-primary text-white rounded hover:bg-indigo-700 text-sm font-bold shadow-sm">קלוט תשלום</button>
+                        </div>
+                    </>
+                )}
             </form>
             <div className="flex justify-end pt-4 border-t border-slate-100">
                 <button type="button" onClick={onClose} className="px-4 py-2 bg-slate-200 text-slate-800 rounded hover:bg-slate-300">סגור</button>
@@ -2307,6 +2421,31 @@ const FinancePage: React.FC<FinancePageProps> = ({
         });
     };
 
+    const handleSaveDebtPayments = async (debtId: string, payments: DebtPayment[]) => {
+        try {
+            const debt = debts.find(d => d.id === debtId);
+            if (!debt) return;
+            const updatedPayments = [...(debt.payments || []), ...payments];
+            const totalPaid = updatedPayments.reduce((sum, p) => {
+                const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
+                if (p.status && invalidStatuses.includes(p.status)) return sum;
+                return sum + p.amount;
+            }, 0);
+            const amount = debt.amount || 0;
+            let gross = amount;
+            if (!debt.isVatExempt) gross = debt.includesVat ? amount : amount * (1 + vatRate / 100);
+            const updatedDebt = { ...debt, payments: updatedPayments, isPaid: totalPaid >= gross - 0.05 };
+            const saved = await mongoService.updateDebt(updatedDebt);
+            setDebts(prev => prev.map(d => d.id === debtId ? saved : d));
+            setIsPaymentModalOpen(false);
+            setSelectedDebtForPayment(null);
+            await refetchDebts();
+        } catch (error) {
+            console.error('Error saving debt payments to MongoDB:', error);
+            alert('שגיאה בשמירת תשלומי חוב למונגו. אנא נסה שוב.');
+        }
+    };
+
     const handleSaveDebtPayment = async (debtId: string, payment: DebtPayment) => {
         try {
             const debt = debts.find(d => d.id === debtId);
@@ -2338,6 +2477,31 @@ const FinancePage: React.FC<FinancePageProps> = ({
         } catch (error) {
             console.error('Error saving debt payment to MongoDB:', error);
             alert('שגיאה בשמירת תשלום חוב למונגו. אנא נסה שוב.');
+        }
+    };
+
+    const handleSaveReceivableCollections = async (receivableId: string, payments: ReceivablePayment[]) => {
+        try {
+            const receivable = receivables.find(r => r.id === receivableId);
+            if (!receivable) return;
+            const updatedPayments = [...(receivable.payments || []), ...payments];
+            const totalCollected = updatedPayments.reduce((sum, p) => {
+                const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
+                if (p.status && invalidStatuses.includes(p.status)) return sum;
+                return sum + p.amount;
+            }, 0);
+            const amount = receivable.amount || 0;
+            let gross = amount;
+            if (!receivable.isVatExempt) gross = receivable.includesVat ? amount : amount * (1 + vatRate / 100);
+            const updatedReceivable = { ...receivable, payments: updatedPayments, isPaid: totalCollected >= gross - 0.05 };
+            const saved = await mongoService.updateReceivable(updatedReceivable);
+            setReceivables(prev => prev.map(r => r.id === receivableId ? saved : r));
+            setIsPaymentModalOpen(false);
+            setSelectedReceivableForCollection(null);
+            await refetchReceivables();
+        } catch (error) {
+            console.error('Error saving receivable collections to MongoDB:', error);
+            alert('שגיאה בשמירת גבייות למונגו. אנא נסה שוב.');
         }
     };
 
@@ -4021,13 +4185,13 @@ const FinancePage: React.FC<FinancePageProps> = ({
 
             {isPaymentModalOpen && selectedDebtForPayment && (
                 <Modal title={`תשלום עבור: ${selectedDebtForPayment.name}`} onClose={() => setIsPaymentModalOpen(false)}>
-                    <DebtPaymentModal debt={selectedDebtForPayment} onSavePayment={handleSaveDebtPayment} onClose={() => setIsPaymentModalOpen(false)} vatRate={vatRate} />
+                    <DebtPaymentModal debt={selectedDebtForPayment} onSavePayment={handleSaveDebtPayment} onSavePayments={handleSaveDebtPayments} onClose={() => setIsPaymentModalOpen(false)} vatRate={vatRate} />
                 </Modal>
             )}
 
             {isPaymentModalOpen && selectedReceivableForCollection && (
                 <Modal title={`קליטת גבייה: ${selectedReceivableForCollection.name}`} onClose={() => setIsPaymentModalOpen(false)}>
-                    <ReceivableCollectionModal receivable={selectedReceivableForCollection} onSavePayment={handleSaveReceivableCollection} onClose={() => setIsPaymentModalOpen(false)} vatRate={vatRate} />
+                    <ReceivableCollectionModal receivable={selectedReceivableForCollection} onSavePayment={handleSaveReceivableCollection} onSavePayments={handleSaveReceivableCollections} onClose={() => setIsPaymentModalOpen(false)} vatRate={vatRate} />
                 </Modal>
             )}
 

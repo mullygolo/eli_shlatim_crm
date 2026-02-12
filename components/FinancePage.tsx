@@ -1672,15 +1672,13 @@ const FinancePage: React.FC<FinancePageProps> = ({
             });
     }, [activeTab, statusConfigs]);
 
-    // Available years for Variable Expenses Filter
+    // Available years for Variable Expenses Filter (fixed range: 10 years back, 2 years ahead)
     const vAvailableYears = useMemo(() => {
-        const years = new Set<number>();
-        variableExpenses.forEach(e => years.add(new Date(e.date).getFullYear()));
-        variableExpenses.forEach(e => e.checks?.forEach(c => c.repaymentDate && years.add(new Date(c.repaymentDate).getFullYear())));
-        debts.forEach(d => d.payments?.forEach(p => years.add(new Date(p.date).getFullYear())));
-        years.add(new Date().getFullYear());
-        return Array.from(years).sort((a, b) => b - a);
-    }, [variableExpenses, debts]);
+        const now = new Date().getFullYear();
+        const from = now - 10;
+        const to = now + 2;
+        return Array.from({ length: to - from + 1 }, (_, i) => from + i).sort((a, b) => b - a);
+    }, []);
 
     // Effect for Real-time PMT calculation in Loan Form
     useEffect(() => {

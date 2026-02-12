@@ -2931,16 +2931,22 @@ export async function getEquity(): Promise<EquityInvestment[]> {
 }
 
 export async function createEquity(equity: EquityInvestment): Promise<EquityInvestment> {
-    try {
-        const database = await getDb();
-        const collection = database.collection<EquityInvestment>('equity');
-        const serialized = serializeDates(equity);
-        await collection.insertOne(serialized);
-        return deserializeDates(serialized) as EquityInvestment;
-    } catch (error) {
-        console.error('Error creating equity:', error);
-        throw error;
+    const database = await getDb();
+    const collection = database.collection<EquityInvestment>('equity');
+    let toInsert = { ...serializeDates(equity) } as any;
+    const maxRetries = 2;
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+        try {
+            if (attempt > 0) toInsert = { ...toInsert, id: `eq_${Date.now()}_${Math.random().toString(36).slice(2, 11)}` };
+            await collection.insertOne(toInsert);
+            return deserializeDates(toInsert) as EquityInvestment;
+        } catch (error: any) {
+            if (error?.code === 11000 && attempt < maxRetries - 1) continue;
+            console.error('Error creating equity:', error);
+            throw error;
+        }
     }
+    throw new Error('Failed to create equity after retries');
 }
 
 export async function updateEquity(equity: EquityInvestment): Promise<EquityInvestment> {

@@ -2615,7 +2615,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
 
     const handleSaveInternal = async () => {
         if (activeTab === 'FIXED') {
-            const newItem = { ...fixedForm, id: editingId || `fe_${Date.now()}` } as FixedExpense;
+            const newItem = { ...fixedForm, id: editingId || `fe_${Date.now()}_${Math.random().toString(36).slice(2, 9)}` } as FixedExpense;
             if (editingId) {
                 const saved = await mongoService.updateFixedExpense(newItem);
                 setFixedExpenses(prev => prev.map(item => item.id === editingId ? saved : item));
@@ -2631,7 +2631,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
         } else if (activeTab === 'VARIABLE') {
             const newItem = { 
                 ...variableForm, 
-                id: editingId || `ve_${Date.now()}`, 
+                id: editingId || `ve_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`, 
                 date: new Date(variableForm.date || new Date()),
                 paymentMethod: variableForm.paymentMethod || PaymentMethod.BANK_TRANSFER,
                 paymentDetails: variableForm.paymentDetails || '',
@@ -2665,7 +2665,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
 
             const newItem = { 
                 ...loanForm, 
-                id: editingId || `ln_${Date.now()}`, 
+                id: editingId || `ln_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`, 
                 startDate: new Date(loanForm.startDate || new Date()),
                 schedule: schedule,
                 paymentsMade: schedule.filter(s => s.isPaid).length 
@@ -2681,7 +2681,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
             const attachments = debtForm.attachments ?? (debtForm.attachment ? [debtForm.attachment] : []);
             const newItem = { 
                 ...debtForm, 
-                id: editingId || `db_${Date.now()}`, 
+                id: editingId || `db_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`, 
                 createdAt: new Date(debtForm.createdAt || new Date()), 
                 dueDate: new Date(debtForm.dueDate || new Date()), 
                 payments: debtForm.payments || [], 
@@ -2700,7 +2700,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
         } else if (activeTab === 'RECEIVABLES') {
             const newItem = { 
                 ...receivableForm, 
-                id: editingId || `rec_${Date.now()}`, 
+                id: editingId || `rec_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`, 
                 createdAt: new Date(receivableForm.createdAt || new Date()), 
                 dueDate: new Date(receivableForm.dueDate || new Date()), 
                 payments: receivableForm.payments || [], 
@@ -2720,7 +2720,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
             if (!equityForm.investorName || !equityForm.amount) { 
                 throw new Error('חסרים שדות חובה'); 
             }
-            const newItem = { ...equityForm, id: editingId || `eq_${Date.now()}`, date: new Date(equityForm.date || new Date()) } as EquityInvestment;
+            const newItem = { ...equityForm, id: editingId || `eq_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`, date: new Date(equityForm.date || new Date()) } as EquityInvestment;
             if (editingId) {
                 const saved = await mongoService.updateEquity(newItem);
                 setEquity(prev => prev.map(item => item.id === editingId ? saved : item));

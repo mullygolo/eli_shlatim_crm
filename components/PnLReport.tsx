@@ -453,21 +453,38 @@ const PnLReport: React.FC<PnLReportProps> = ({
             });
         });
 
-        // 3. Process Variable Expenses
+        // 3. Process Variable Expenses (cash basis for installments: spread by repaymentDate)
         variableExpenses.forEach(ve => {
-            const date = ve.date instanceof Date ? ve.date : new Date(ve.date);
-            const key = getMonthKey(date);
-            if (!pnlMap[key]) return;
-
-            const amount = ve.amount;
-            const net = ve.isVatExempt ? amount : (ve.includesVat ? amount / (1 + vatRate / 100) : amount);
-            const vat = ve.isVatExempt ? 0 : net * (vatRate / 100);
-
-            pnlMap[key].variableExpenses += net;
-            pnlMap[key].variableItems.push({ name: ve.name, amount: net, date: ve.date, subtext: ve.category });
-            if (vat > 0) {
-                pnlMap[key].vatInput += vat;
-                pnlMap[key].vatInputItems.push({ name: `מע"מ תשומות (משתנות): ${ve.name}`, amount: vat, date: ve.date, subtext: ve.category });
+            const hasInstallments = ve.checks && ve.checks.length > 0;
+            if (hasInstallments) {
+                ve.checks!.forEach((check) => {
+                    if (!check.repaymentDate) return;
+                    const rd = new Date(check.repaymentDate);
+                    const key = getMonthKey(rd);
+                    if (!pnlMap[key]) return;
+                    const amount = check.amount;
+                    const net = ve.isVatExempt ? amount : (ve.includesVat ? amount / (1 + vatRate / 100) : amount);
+                    const vat = ve.isVatExempt ? 0 : (ve.includesVat ? amount - net : net * (vatRate / 100));
+                    pnlMap[key].variableExpenses += net;
+                    pnlMap[key].variableItems.push({ name: ve.name, amount: net, date: rd, subtext: ve.category ? `${ve.category} (פריסה)` : 'פריסה' });
+                    if (vat > 0) {
+                        pnlMap[key].vatInput += vat;
+                        pnlMap[key].vatInputItems.push({ name: `מע"מ תשומות (משתנות): ${ve.name}`, amount: vat, date: rd, subtext: ve.category ? `${ve.category} (פריסה)` : 'פריסה' });
+                    }
+                });
+            } else {
+                const date = ve.date instanceof Date ? ve.date : new Date(ve.date);
+                const key = getMonthKey(date);
+                if (!pnlMap[key]) return;
+                const amount = ve.amount;
+                const net = ve.isVatExempt ? amount : (ve.includesVat ? amount / (1 + vatRate / 100) : amount);
+                const vat = ve.isVatExempt ? 0 : net * (vatRate / 100);
+                pnlMap[key].variableExpenses += net;
+                pnlMap[key].variableItems.push({ name: ve.name, amount: net, date: ve.date, subtext: ve.category });
+                if (vat > 0) {
+                    pnlMap[key].vatInput += vat;
+                    pnlMap[key].vatInputItems.push({ name: `מע"מ תשומות (משתנות): ${ve.name}`, amount: vat, date: ve.date, subtext: ve.category });
+                }
             }
         });
 

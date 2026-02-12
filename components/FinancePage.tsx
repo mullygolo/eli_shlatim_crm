@@ -1509,62 +1509,76 @@ const CheckCenter: React.FC<{
     );
 };
 
-const CheckSeriesGenerator: React.FC<{ 
+const InstallmentSeriesGenerator: React.FC<{ 
     initialAmount: number; 
-    onGenerated: (checks: SupplierPayment[]) => void 
-}> = ({ initialAmount, onGenerated }) => {
+    method: PaymentMethod.CHECK | typeof PaymentMethod.CREDIT_CARD;
+    onGenerated: (payments: SupplierPayment[]) => void 
+}> = ({ initialAmount, method, onGenerated }) => {
+    const isCheck = method === PaymentMethod.CHECK;
     const [count, setCount] = useState(12);
     const [startDate, setStartDate] = useState(new Date().toISOString().split('T')[0]);
     const [startRef, setStartRef] = useState('');
-    const [amountPerCheck, setAmountPerCheck] = useState(initialAmount);
+    const safeCount = Math.max(1, count);
+    const [amountPerItem, setAmountPerItem] = useState(isCheck ? initialAmount : Math.round((initialAmount / safeCount) * 100) / 100);
 
     useEffect(() => {
-        setAmountPerCheck(initialAmount);
-    }, [initialAmount]);
+        const n = Math.max(1, count);
+        setAmountPerItem(isCheck ? initialAmount : Math.round((initialAmount / n) * 100) / 100);
+    }, [initialAmount, count, isCheck]);
 
     const handleGenerate = () => {
-        const checks: SupplierPayment[] = [];
+        const payments: SupplierPayment[] = [];
         const startNum = parseInt(startRef) || 1001;
         const baseDate = new Date(startDate);
 
         for (let i = 0; i < count; i++) {
             const dueDate = new Date(baseDate.getFullYear(), baseDate.getMonth() + i, baseDate.getDate());
-            checks.push({
-                id: `sp_fix_${Date.now()}_${i}`,
-                amount: amountPerCheck,
+            payments.push({
+                id: `sp_${isCheck ? 'fix' : 'var'}_${Date.now()}_${i}`,
+                amount: amountPerItem,
                 date: new Date(),
                 repaymentDate: dueDate,
-                method: PaymentMethod.CHECK,
-                reference: (startNum + i).toString(),
+                method,
+                reference: isCheck ? (startNum + i).toString() : (startRef || undefined),
                 status: 'PENDING',
                 statusHistory: []
             });
         }
-        onGenerated(checks);
+        onGenerated(payments);
     };
 
     return (
-        <div className="bg-indigo-50 p-4 rounded-lg border border-indigo-100 space-y-4">
-            <h4 className="font-bold text-indigo-900 text-sm">מחולל סדרת צ'קים מהיר</h4>
+        <div className={`p-4 rounded-lg border space-y-4 ${isCheck ? 'bg-indigo-50 border-indigo-100' : 'bg-amber-50 border-amber-100'}`}>
+            <h4 className={`font-bold text-sm ${isCheck ? 'text-indigo-900' : 'text-amber-900'}`}>
+                {isCheck ? 'מחולל סדרת צ\'קים מהיר' : 'מחולל פריסת תשלומים באשראי'}
+            </h4>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                 <div>
-                    <label className="block text-[10px] font-bold text-indigo-600 mb-1">סכום לכל צ'ק</label>
-                    <input type="number" value={amountPerCheck} onChange={e => setAmountPerCheck(Number(e.target.value))} className="w-full text-sm rounded border-indigo-200 font-bold p-1" />
+                    <label className={`block text-[10px] font-bold mb-1 ${isCheck ? 'text-indigo-600' : 'text-amber-700'}`}>
+                        {isCheck ? 'סכום לכל צ\'ק' : 'סכום לכל תשלום'}
+                    </label>
+                    <input type="number" value={amountPerItem} onChange={e => setAmountPerItem(Number(e.target.value))} className={`w-full text-sm rounded font-bold p-1 ${isCheck ? 'border-indigo-200' : 'border-amber-200'}`} />
                 </div>
                 <div>
-                    <label className="block text-[10px] font-bold text-indigo-600 mb-1">מס' תשלומים</label>
-                    <input type="number" value={count} onChange={e => setCount(Number(e.target.value))} className="w-full text-sm rounded border-indigo-200 p-1" />
+                    <label className={`block text-[10px] font-bold mb-1 ${isCheck ? 'text-indigo-600' : 'text-amber-700'}`}>מס' תשלומים</label>
+                    <input type="number" value={count} onChange={e => setCount(Number(e.target.value))} className={`w-full text-sm rounded p-1 ${isCheck ? 'border-indigo-200' : 'border-amber-200'}`} />
                 </div>
                 <div>
-                    <label className="block text-[10px] font-bold text-indigo-600 mb-1">פירעון ראשון</label>
-                    <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} className="w-full text-sm rounded border-indigo-200 p-1" />
+                    <label className={`block text-[10px] font-bold mb-1 ${isCheck ? 'text-indigo-600' : 'text-amber-700'}`}>
+                        {isCheck ? 'פירעון ראשון' : 'חיוב ראשון'}
+                    </label>
+                    <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} className={`w-full text-sm rounded p-1 ${isCheck ? 'border-indigo-200' : 'border-amber-200'}`} />
                 </div>
                 <div>
-                    <label className="block text-[10px] font-bold text-indigo-600 mb-1">מספר צ'ק התחלתי</label>
-                    <input type="text" value={startRef} onChange={e => setStartRef(e.target.value)} placeholder="1001" className="w-full text-sm rounded border-indigo-200 p-1" />
+                    <label className={`block text-[10px] font-bold mb-1 ${isCheck ? 'text-indigo-600' : 'text-amber-700'}`}>
+                        {isCheck ? 'מספר צ\'ק התחלתי' : '4 ספרות כרטיס (אופציונלי)'}
+                    </label>
+                    <input type="text" value={startRef} onChange={e => setStartRef(e.target.value)} placeholder={isCheck ? '1001' : '1234'} className={`w-full text-sm rounded p-1 ${isCheck ? 'border-indigo-200' : 'border-amber-200'}`} />
                 </div>
             </div>
-            <button type="button" onClick={handleGenerate} className="w-full bg-indigo-600 text-white py-2 rounded font-bold text-xs shadow-sm hover:bg-indigo-700">ייצר סדרת צ'קים</button>
+            <button type="button" onClick={handleGenerate} className={`w-full py-2 rounded font-bold text-xs shadow-sm text-white ${isCheck ? 'bg-indigo-600 hover:bg-indigo-700' : 'bg-amber-600 hover:bg-amber-700'}`}>
+                {isCheck ? 'ייצר סדרת צ\'קים' : 'ייצר פריסת תשלומים'}
+            </button>
         </div>
     );
 };
@@ -1645,6 +1659,8 @@ const FinancePage: React.FC<FinancePageProps> = ({
 
     const [fixedForm, setFixedForm] = useState<Partial<FixedExpense>>({});
     const [variableForm, setVariableForm] = useState<Partial<VariableExpense>>({});
+    const [variableCreditCardMode, setVariableCreditCardMode] = useState<'single' | 'installment'>('single');
+    const [fixedCreditCardMode, setFixedCreditCardMode] = useState<'single' | 'installment'>('single');
     const [loanForm, setLoanForm] = useState<Partial<Loan>>({});
     const [debtForm, setDebtForm] = useState<Partial<Debt>>({});
     const [receivableForm, setReceivableForm] = useState<Partial<Receivable>>({});
@@ -1812,29 +1828,31 @@ const FinancePage: React.FC<FinancePageProps> = ({
         const month = vMonthFilter;
         const displayItems: VariableDisplayItem[] = [];
 
-        // 1. Base Variable Expenses
+        // 1. Base Variable Expenses (skip main row if has installments - avoid double-counting)
         variableExpenses.forEach(e => {
-            const expenseDate = new Date(e.date);
-            const yearMatches = year === 'all' || expenseDate.getFullYear() === Number(year);
-            const monthMatches = month === 'all' || (expenseDate.getMonth() + 1) === Number(month);
-            
-            if (yearMatches && monthMatches) {
-                displayItems.push({
-                    id: e.id,
-                    originalId: e.id,
-                    name: e.name,
-                    category: e.category,
-                    amount: e.amount,
-                    date: expenseDate,
-                    paymentMethod: e.paymentMethod || PaymentMethod.BANK_TRANSFER,
-                    isInstallment: false,
-                    includesVat: e.includesVat,
-                    isVatExempt: e.isVatExempt,
-                    checksCount: e.checks?.length
-                });
+            const hasInstallments = e.checks && e.checks.length > 0;
+            if (!hasInstallments) {
+                const expenseDate = new Date(e.date);
+                const yearMatches = year === 'all' || expenseDate.getFullYear() === Number(year);
+                const monthMatches = month === 'all' || (expenseDate.getMonth() + 1) === Number(month);
+                if (yearMatches && monthMatches) {
+                    displayItems.push({
+                        id: e.id,
+                        originalId: e.id,
+                        name: e.name,
+                        category: e.category,
+                        amount: e.amount,
+                        date: expenseDate,
+                        paymentMethod: e.paymentMethod || PaymentMethod.BANK_TRANSFER,
+                        isInstallment: false,
+                        includesVat: e.includesVat,
+                        isVatExempt: e.isVatExempt,
+                        checksCount: 0
+                    });
+                }
             }
 
-            // 2. Future installments (checks) for this variable expense
+            // 2. Installments (checks) for this variable expense
             if (e.checks && e.checks.length > 0) {
                 const checksInFilter = e.checks.filter(c => {
                     if (!c.repaymentDate) return false;
@@ -2111,8 +2129,8 @@ const FinancePage: React.FC<FinancePageProps> = ({
 
     const handleAdd = (type: string) => {
         setEditingId(null);
-        if (type === 'FIXED') setFixedForm({ name: '', monthlyAmount: 0, paymentDay: 1, category: '', isActive: true, startDate: new Date(), paymentMethod: PaymentMethod.STANDING_ORDER, paymentDetails: '', includesVat: true, isVatExempt: false, description: '', checks: [] });
-        else if (type === 'VARIABLE') setVariableForm({ name: '', amount: 0, date: new Date(), category: '', includesVat: true, isVatExempt: false, description: '', paymentMethod: PaymentMethod.BANK_TRANSFER, paymentDetails: '', checks: [] });
+        if (type === 'FIXED') { setFixedForm({ name: '', monthlyAmount: 0, paymentDay: 1, category: '', isActive: true, startDate: new Date(), paymentMethod: PaymentMethod.STANDING_ORDER, paymentDetails: '', includesVat: true, isVatExempt: false, description: '', checks: [] }); setFixedCreditCardMode('single'); }
+        else if (type === 'VARIABLE') { setVariableForm({ name: '', amount: 0, date: new Date(), category: '', includesVat: true, isVatExempt: false, description: '', paymentMethod: PaymentMethod.BANK_TRANSFER, paymentDetails: '', checks: [] }); setVariableCreditCardMode('single'); }
         else if (type === 'LOANS') {
              setLoanForm({ lenderName: '', principalAmount: 0, interestRate: 0, monthlyPayment: 0, durationMonths: 12, paymentsMade: 0, startDate: new Date(), schedule: [] });
              setShowLoanPreview(false);
@@ -2133,7 +2151,8 @@ const FinancePage: React.FC<FinancePageProps> = ({
             startDate: expense.startDate ? new Date(expense.startDate) : new Date(), 
             endDate: expense.endDate ? new Date(expense.endDate) : undefined,
             checks: expense.checks || []
-        }); 
+        });
+        setFixedCreditCardMode((expense.paymentMethod === PaymentMethod.CREDIT_CARD && expense.checks?.length) ? 'installment' : 'single');
         setIsModalOpen(true); 
     };
 
@@ -2147,7 +2166,8 @@ const FinancePage: React.FC<FinancePageProps> = ({
             paymentMethod: expense.paymentMethod || PaymentMethod.BANK_TRANSFER,
             paymentDetails: expense.paymentDetails || '',
             checks: expense.checks || []
-        }); 
+        });
+        setVariableCreditCardMode((expense.paymentMethod === PaymentMethod.CREDIT_CARD && expense.checks?.length) ? 'installment' : 'single');
         setIsModalOpen(true); 
     };
 
@@ -3142,7 +3162,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                                     <td className="px-6 py-4"><span className={`${item.isDebtPayment ? 'bg-purple-50 text-purple-700 border-purple-100' : 'bg-orange-50 text-orange-700 border-orange-100'} px-3 py-1 rounded-full border text-[11px] font-bold`}>{item.category}</span></td>
                                                     <td className="px-6 py-4 text-slate-500 font-mono">₪{net.toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
                                                     <td className="px-6 py-4 font-black text-slate-900 font-mono">₪{gross.toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
-                                                    <td className="px-6 py-4 text-left"><div className="flex gap-2 justify-end opacity-0 group-hover:opacity-100">{!item.isInstallment ? <><button onClick={() => handleEditVariable(item.originalId)} className="text-primary hover:bg-blue-50 p-1.5 rounded"><EditIcon className="w-5 h-5"/></button><button onClick={() => handleDelete('VARIABLE', item.originalId)} className="text-red-500 p-1.5 rounded"><DeleteIcon className="w-5 h-5"/></button></> : <span className="text-[10px] text-slate-300 italic">מערכת</span>}</div></td>
+                                                    <td className="px-6 py-4 text-left"><div className="flex gap-2 justify-end opacity-0 group-hover:opacity-100">{item.isInstallment ? <button onClick={() => handleEditVariable(item.originalId)} className="text-primary hover:bg-blue-50 p-1.5 rounded" title="ערוך הוצאה מקורית"><EditIcon className="w-5 h-5"/></button> : <><button onClick={() => handleEditVariable(item.originalId)} className="text-primary hover:bg-blue-50 p-1.5 rounded"><EditIcon className="w-5 h-5"/></button><button onClick={() => handleDelete('VARIABLE', item.originalId)} className="text-red-500 p-1.5 rounded"><DeleteIcon className="w-5 h-5"/></button></>}</div></td>
                                                 </tr>
                                             );
                                         })}
@@ -3654,26 +3674,56 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                 <div><label className="block text-sm font-bold text-slate-700 mb-1">יום חיוב (1-31)</label><input type="number" min="1" max="31" value={fixedForm.paymentDay || ''} onChange={e => setFixedForm({...fixedForm, paymentDay: parseInt(e.target.value)})} className="block w-full border-slate-300 rounded-md shadow-sm focus:ring-primary focus:border-primary sm:text-sm p-2 bg-white" /></div>
                                 <div><label className="block text-sm font-bold text-slate-700 mb-1">סכום חודשי (נטו)</label><input type="number" value={fixedForm.monthlyAmount || ''} onChange={e => setFixedForm({...fixedForm, monthlyAmount: parseFloat(e.target.value)})} className="block w-full border-slate-300 rounded-md shadow-sm focus:ring-primary focus:border-primary sm:text-sm p-2 bg-white" /></div>
                                 <div className="grid grid-cols-2 gap-2 mt-4"><label className="flex items-center gap-2 cursor-pointer bg-slate-50 p-2 rounded border border-slate-200"><input type="checkbox" checked={fixedForm.includesVat} onChange={e => setFixedForm({...fixedForm, includesVat: e.target.checked})} className="h-4 w-4 text-primary border-gray-300 rounded focus:ring-primary" disabled={fixedForm.isVatExempt} /><span className={`text-sm font-bold ${fixedForm.isVatExempt ? 'text-slate-400' : 'text-slate-700'}`}>הסכום שהוזן כולל מע"מ</span></label><label className="flex items-center gap-2 cursor-pointer bg-amber-50 p-2 rounded border border-amber-200"><input type="checkbox" checked={fixedForm.isVatExempt} onChange={e => setFixedForm({...fixedForm, isVatExempt: e.target.checked})} className="h-4 w-4 text-amber-600 border-amber-300 rounded focus:ring-amber-500" /><span className="text-sm font-bold text-amber-800">הוצאה פטורה ממע"מ</span></label></div>
-                                <div><label className="block text-sm font-bold text-slate-700 mb-1">אמצעי תשלום</label><select value={fixedForm.paymentMethod} onChange={e => setFixedForm({...fixedForm, paymentMethod: e.target.value as PaymentMethod})} className="block w-full border-slate-300 rounded-md shadow-sm focus:ring-primary focus:border-primary sm:text-sm bg-white p-2">{Object.values(PaymentMethod).map(m => <option key={m} value={m}>{m}</option>)}</select></div>
+                                <div><label className="block text-sm font-bold text-slate-700 mb-1">אמצעי תשלום</label><select value={fixedForm.paymentMethod} onChange={e => {
+                                    const newMethod = e.target.value as PaymentMethod;
+                                    const wasInstallment = fixedForm.paymentMethod === PaymentMethod.CHECK || fixedForm.paymentMethod === PaymentMethod.CREDIT_CARD;
+                                    const isInstallment = newMethod === PaymentMethod.CHECK || newMethod === PaymentMethod.CREDIT_CARD;
+                                    let newChecks = fixedForm.checks;
+                                    if (wasInstallment && !isInstallment) { newChecks = []; setFixedCreditCardMode('single'); }
+                                    else if (wasInstallment && isInstallment && newMethod !== fixedForm.paymentMethod && fixedForm.checks?.length) {
+                                        newChecks = fixedForm.checks.map(c => ({ ...c, method: newMethod }));
+                                        if (newMethod === PaymentMethod.CREDIT_CARD) setFixedCreditCardMode('installment');
+                                    } else if (newMethod === PaymentMethod.CREDIT_CARD) setFixedCreditCardMode('single');
+                                    setFixedForm({ ...fixedForm, paymentMethod: newMethod, checks: newChecks || [] });
+                                }} className="block w-full border-slate-300 rounded-md shadow-sm focus:ring-primary focus:border-primary sm:text-sm bg-white p-2">{Object.values(PaymentMethod).map(m => <option key={m} value={m}>{m}</option>)}</select></div>
                                 <div><label className="block text-sm font-bold text-slate-700 mb-1">פרטי תשלום (כרטיס/חשבון)</label><input type="text" value={fixedForm.paymentDetails || ''} onChange={e => setFixedForm({...fixedForm, paymentDetails: e.target.value})} className="block w-full border-slate-300 rounded-md shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" placeholder="ויזה 1234, חשבון בנק..." /></div>
-                                {fixedForm.paymentMethod === PaymentMethod.CHECK && (
+                                {fixedForm.paymentMethod === PaymentMethod.CREDIT_CARD && (
+                                    <div className="md:col-span-2 mt-4">
+                                        <label className="block text-[10px] font-bold text-slate-500 uppercase mb-2">סוג תשלום</label>
+                                        <div className="flex gap-4">
+                                            <label className="flex items-center gap-2 cursor-pointer">
+                                                <input type="radio" name="fixedCreditCardMode" checked={fixedCreditCardMode === 'single'} onChange={() => { setFixedCreditCardMode('single'); setFixedForm({ ...fixedForm, checks: [] }); }} className="text-primary" />
+                                                <span className="text-sm font-bold text-slate-700">תשלום בודד</span>
+                                            </label>
+                                            <label className="flex items-center gap-2 cursor-pointer">
+                                                <input type="radio" name="fixedCreditCardMode" checked={fixedCreditCardMode === 'installment'} onChange={() => setFixedCreditCardMode('installment')} className="text-primary" />
+                                                <span className="text-sm font-bold text-slate-700">תשלומים בפריסה</span>
+                                            </label>
+                                        </div>
+                                    </div>
+                                )}
+                                {(fixedForm.paymentMethod === PaymentMethod.CHECK || (fixedForm.paymentMethod === PaymentMethod.CREDIT_CARD && fixedCreditCardMode === 'installment')) && (
                                     <div className="md:col-span-2 mt-4 space-y-4">
-                                        <CheckSeriesGenerator initialAmount={fixedForm.isVatExempt ? (fixedForm.monthlyAmount || 0) : (fixedForm.includesVat ? (fixedForm.monthlyAmount || 0) : (fixedForm.monthlyAmount || 0) * (1 + vatRate / 100))} onGenerated={(checks) => setFixedForm({ ...fixedForm, checks: [...(fixedForm.checks || []), ...checks] })} />
+                                        <InstallmentSeriesGenerator
+                                            initialAmount={fixedForm.isVatExempt ? (fixedForm.monthlyAmount || 0) : (fixedForm.includesVat ? (fixedForm.monthlyAmount || 0) : (fixedForm.monthlyAmount || 0) * (1 + vatRate / 100))}
+                                            method={fixedForm.paymentMethod as PaymentMethod.CHECK | typeof PaymentMethod.CREDIT_CARD}
+                                            onGenerated={(payments) => setFixedForm({ ...fixedForm, checks: [...(fixedForm.checks || []), ...payments] })}
+                                        />
                                         {fixedForm.checks && fixedForm.checks.length > 0 && (
                                             <div className="bg-slate-50 border border-slate-200 rounded-lg p-4">
-                                                <div className="flex justify-between items-center mb-3"><h4 className="text-sm font-bold text-slate-700">עריכת רשימת צ'קים ({fixedForm.checks.length})</h4><button type="button" onClick={() => setFixedForm({ ...fixedForm, checks: [] })} className="text-[10px] text-red-500 font-bold hover:underline">נקה הכל</button></div>
+                                                <div className="flex justify-between items-center mb-3"><h4 className="text-sm font-bold text-slate-700">{fixedForm.paymentMethod === PaymentMethod.CHECK ? 'עריכת רשימת צ\'קים' : 'עריכת פריסת תשלומים'} ({fixedForm.checks.length})</h4><button type="button" onClick={() => setFixedForm({ ...fixedForm, checks: [] })} className="text-[10px] text-red-500 font-bold hover:underline">נקה הכל</button></div>
                                                 <div className="max-h-60 overflow-y-auto space-y-2 custom-scrollbar pe-2">
                                                     {fixedForm.checks.map((c, i) => (
                                                         <div key={c.id || i} className="grid grid-cols-12 gap-2 items-center bg-white p-2 rounded shadow-sm border border-slate-100 group">
                                                             <div className="col-span-1 text-[10px] font-bold text-slate-400">#{i+1}</div>
-                                                            <div className="col-span-3"><label className="text-[9px] text-slate-400 block">מספר צ'ק</label><input type="text" value={c.reference} onChange={(e) => handleUpdateFixedFormCheck(i, 'reference', e.target.value)} className="w-full text-xs p-1 border border-slate-300 rounded" /></div>
+                                                            <div className="col-span-3"><label className="text-[9px] text-slate-400 block">{fixedForm.paymentMethod === PaymentMethod.CHECK ? 'מספר צ\'ק' : '4 ספרות'}</label><input type="text" value={c.reference || ''} onChange={(e) => handleUpdateFixedFormCheck(i, 'reference', e.target.value)} className="w-full text-xs p-1 border border-slate-300 rounded" placeholder={fixedForm.paymentMethod === PaymentMethod.CREDIT_CARD ? '1234' : undefined} /></div>
                                                             <div className="col-span-3"><label className="text-[9px] text-slate-400 block">סכום</label><input type="number" value={c.amount} onChange={(e) => handleUpdateFixedFormCheck(i, 'amount', e.target.value)} className="w-full text-xs p-1 border border-slate-300 rounded font-bold text-indigo-600" /></div>
-                                                            <div className="col-span-4"><label className="text-[9px] text-slate-400 block">תאריך פירעון</label><input type="date" value={c.repaymentDate ? new Date(c.repaymentDate).toISOString().split('T')[0] : ''} onChange={(e) => handleUpdateFixedFormCheck(i, 'repaymentDate', e.target.value)} className="w-full text-xs p-1 border border-slate-300 rounded" /></div>
+                                                            <div className="col-span-4"><label className="text-[9px] text-slate-400 block">{fixedForm.paymentMethod === PaymentMethod.CHECK ? 'תאריך פירעון' : 'תאריך חיוב'}</label><input type="date" value={c.repaymentDate ? new Date(c.repaymentDate).toISOString().split('T')[0] : ''} onChange={(e) => handleUpdateFixedFormCheck(i, 'repaymentDate', e.target.value)} className="w-full text-xs p-1 border border-slate-300 rounded" /></div>
                                                             <div className="col-span-1 text-center"><button type="button" onClick={() => handleRemoveCheckFromFixedForm(i)} className="text-red-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"><DeleteIcon className="w-4 h-4"/></button></div>
                                                         </div>
                                                     ))}
                                                 </div>
-                                                <button type="button" onClick={() => setFixedForm({ ...fixedForm, checks: [...(fixedForm.checks || []), { id: `sp_fix_${Date.now()}`, amount: fixedForm.monthlyAmount || 0, date: new Date(), repaymentDate: new Date(), method: PaymentMethod.CHECK, reference: '', status: 'PENDING' }] })} className="w-full mt-3 py-1.5 border border-dashed border-indigo-300 text-indigo-600 text-xs font-bold rounded hover:bg-indigo-50 transition-colors">+ הוסף צ'ק בודד לרשימה</button>
+                                                <button type="button" onClick={() => setFixedForm({ ...fixedForm, checks: [...(fixedForm.checks || []), { id: `sp_fix_${Date.now()}`, amount: fixedForm.monthlyAmount || 0, date: new Date(), repaymentDate: new Date(), method: fixedForm.paymentMethod as PaymentMethod, reference: '', status: 'PENDING' }] })} className="w-full mt-3 py-1.5 border border-dashed border-indigo-300 text-indigo-600 text-xs font-bold rounded hover:bg-indigo-50 transition-colors">+ הוסף תשלום בודד לרשימה</button>
                                             </div>
                                         )}
                                     </div>
@@ -3690,26 +3740,56 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                 <div><label className="block text-sm font-bold text-slate-700 mb-1">תאריך</label><input type="date" value={variableForm.date ? new Date(variableForm.date).toISOString().split('T')[0] : ''} onChange={e => setVariableForm({...variableForm, date: new Date(e.target.value)})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
                                 <div><label className="block text-sm font-bold text-slate-700 mb-1">סכום (נטו)</label><input type="number" value={variableForm.amount || ''} onChange={e => setVariableForm({...variableForm, amount: parseFloat(e.target.value)})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
                                 <div className="grid grid-cols-2 gap-2 mt-4"><label className="flex items-center gap-2 cursor-pointer bg-slate-50 p-2 rounded border border-slate-200"><input type="checkbox" checked={variableForm.includesVat} onChange={e => setVariableForm({...variableForm, includesVat: e.target.checked})} className="h-4 w-4 text-primary border-gray-300 rounded focus:ring-primary" disabled={variableForm.isVatExempt} /><span className={`text-sm font-bold ${variableForm.isVatExempt ? 'text-slate-400' : 'text-slate-700'}`}>הסכום שהוזן כולל מע"מ</span></label><label className="flex items-center gap-2 cursor-pointer bg-amber-50 p-2 rounded border border-amber-200"><input type="checkbox" checked={variableForm.isVatExempt} onChange={e => setVariableForm({...variableForm, isVatExempt: e.target.checked})} className="h-4 w-4 text-amber-600 border-amber-300 rounded focus:ring-amber-500" /><span className="text-sm font-bold text-amber-800">הוצאה פטורה ממע"מ</span></label></div>
-                                <div><label className="block text-sm font-bold text-slate-700 mb-1">אמצעי תשלום</label><select value={variableForm.paymentMethod} onChange={e => setVariableForm({...variableForm, paymentMethod: e.target.value as PaymentMethod})} className="mt-1 block w-full border-slate-300 rounded-md shadow-sm focus:border-primary focus:ring-primary sm:text-sm bg-white p-2">{Object.values(PaymentMethod).map(m => <option key={m} value={m}>{m}</option>)}</select></div>
+                                <div><label className="block text-sm font-bold text-slate-700 mb-1">אמצעי תשלום</label><select value={variableForm.paymentMethod} onChange={e => {
+                                    const newMethod = e.target.value as PaymentMethod;
+                                    const wasInstallment = variableForm.paymentMethod === PaymentMethod.CHECK || variableForm.paymentMethod === PaymentMethod.CREDIT_CARD;
+                                    const isInstallment = newMethod === PaymentMethod.CHECK || newMethod === PaymentMethod.CREDIT_CARD;
+                                    let newChecks = variableForm.checks;
+                                    if (wasInstallment && !isInstallment) { newChecks = []; setVariableCreditCardMode('single'); }
+                                    else if (wasInstallment && isInstallment && newMethod !== variableForm.paymentMethod && variableForm.checks?.length) {
+                                        newChecks = variableForm.checks.map(c => ({ ...c, method: newMethod }));
+                                        if (newMethod === PaymentMethod.CREDIT_CARD) setVariableCreditCardMode('installment');
+                                    } else if (newMethod === PaymentMethod.CREDIT_CARD) setVariableCreditCardMode('single');
+                                    setVariableForm({ ...variableForm, paymentMethod: newMethod, checks: newChecks || [] });
+                                }} className="mt-1 block w-full border-slate-300 rounded-md shadow-sm focus:border-primary focus:ring-primary sm:text-sm bg-white p-2">{Object.values(PaymentMethod).map(m => <option key={m} value={m}>{m}</option>)}</select></div>
                                 <div><label className="block text-sm font-bold text-slate-700 mb-1">פרטי תשלום (כרטיס/חשבון)</label><input type="text" value={variableForm.paymentDetails || ''} onChange={e => setVariableForm({...variableForm, paymentDetails: e.target.value})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" placeholder="ויזה 1234, חשבון בנק..." /></div>
-                                {variableForm.paymentMethod === PaymentMethod.CHECK && (
+                                {variableForm.paymentMethod === PaymentMethod.CREDIT_CARD && (
+                                    <div className="md:col-span-2 mt-4">
+                                        <label className="block text-[10px] font-bold text-slate-500 uppercase mb-2">סוג תשלום</label>
+                                        <div className="flex gap-4">
+                                            <label className="flex items-center gap-2 cursor-pointer">
+                                                <input type="radio" name="variableCreditCardMode" checked={variableCreditCardMode === 'single'} onChange={() => { setVariableCreditCardMode('single'); setVariableForm({ ...variableForm, checks: [] }); }} className="text-primary" />
+                                                <span className="text-sm font-bold text-slate-700">תשלום בודד</span>
+                                            </label>
+                                            <label className="flex items-center gap-2 cursor-pointer">
+                                                <input type="radio" name="variableCreditCardMode" checked={variableCreditCardMode === 'installment'} onChange={() => setVariableCreditCardMode('installment')} className="text-primary" />
+                                                <span className="text-sm font-bold text-slate-700">תשלומים בפריסה</span>
+                                            </label>
+                                        </div>
+                                    </div>
+                                )}
+                                {(variableForm.paymentMethod === PaymentMethod.CHECK || (variableForm.paymentMethod === PaymentMethod.CREDIT_CARD && variableCreditCardMode === 'installment')) && (
                                     <div className="md:col-span-2 mt-4 space-y-4">
-                                        <CheckSeriesGenerator initialAmount={variableForm.isVatExempt ? (variableForm.amount || 0) : (variableForm.includesVat ? (variableForm.amount || 0) : (variableForm.amount || 0) * (1 + vatRate / 100))} onGenerated={(checks) => setVariableForm({ ...variableForm, checks: [...(variableForm.checks || []), ...checks] })} />
+                                        <InstallmentSeriesGenerator
+                                            initialAmount={variableForm.isVatExempt ? (variableForm.amount || 0) : (variableForm.includesVat ? (variableForm.amount || 0) : (variableForm.amount || 0) * (1 + vatRate / 100))}
+                                            method={variableForm.paymentMethod as PaymentMethod.CHECK | typeof PaymentMethod.CREDIT_CARD}
+                                            onGenerated={(payments) => setVariableForm({ ...variableForm, checks: [...(variableForm.checks || []), ...payments] })}
+                                        />
                                         {variableForm.checks && variableForm.checks.length > 0 && (
                                             <div className="bg-slate-50 border border-slate-200 rounded-lg p-4">
-                                                <div className="flex justify-between items-center mb-3"><h4 className="text-sm font-bold text-slate-700">עריכת רשימת צ'קים ({variableForm.checks.length})</h4><button type="button" onClick={() => setVariableForm({ ...variableForm, checks: [] })} className="text-[10px] text-red-500 font-bold hover:underline">נקה הכל</button></div>
+                                                <div className="flex justify-between items-center mb-3"><h4 className="text-sm font-bold text-slate-700">{variableForm.paymentMethod === PaymentMethod.CHECK ? 'עריכת רשימת צ\'קים' : 'עריכת פריסת תשלומים'} ({variableForm.checks.length})</h4><button type="button" onClick={() => setVariableForm({ ...variableForm, checks: [] })} className="text-[10px] text-red-500 font-bold hover:underline">נקה הכל</button></div>
                                                 <div className="max-h-60 overflow-y-auto space-y-2 custom-scrollbar pe-2">
                                                     {variableForm.checks.map((c, i) => (
                                                         <div key={c.id || i} className="grid grid-cols-12 gap-2 items-center bg-white p-2 rounded shadow-sm border border-slate-100 group">
                                                             <div className="col-span-1 text-[10px] font-bold text-slate-400">#{i+1}</div>
-                                                            <div className="col-span-3"><label className="text-[9px] text-slate-400 block">מספר צ'ק</label><input type="text" value={c.reference} onChange={(e) => handleUpdateVariableFormCheck(i, 'reference', e.target.value)} className="w-full text-xs p-1 border border-slate-300 rounded" /></div>
+                                                            <div className="col-span-3"><label className="text-[9px] text-slate-400 block">{variableForm.paymentMethod === PaymentMethod.CHECK ? 'מספר צ\'ק' : '4 ספרות'}</label><input type="text" value={c.reference || ''} onChange={(e) => handleUpdateVariableFormCheck(i, 'reference', e.target.value)} className="w-full text-xs p-1 border border-slate-300 rounded" placeholder={variableForm.paymentMethod === PaymentMethod.CREDIT_CARD ? '1234' : undefined} /></div>
                                                             <div className="col-span-3"><label className="text-[9px] text-slate-400 block">סכום</label><input type="number" value={c.amount} onChange={(e) => handleUpdateVariableFormCheck(i, 'amount', e.target.value)} className="w-full text-xs p-1 border border-slate-300 rounded font-bold text-indigo-600" /></div>
-                                                            <div className="col-span-4"><label className="text-[9px] text-slate-400 block">תאריך פירעון</label><input type="date" value={c.repaymentDate ? new Date(c.repaymentDate).toISOString().split('T')[0] : ''} onChange={(e) => handleUpdateVariableFormCheck(i, 'repaymentDate', e.target.value)} className="w-full text-xs p-1 border border-slate-300 rounded" /></div>
+                                                            <div className="col-span-4"><label className="text-[9px] text-slate-400 block">{variableForm.paymentMethod === PaymentMethod.CHECK ? 'תאריך פירעון' : 'תאריך חיוב'}</label><input type="date" value={c.repaymentDate ? new Date(c.repaymentDate).toISOString().split('T')[0] : ''} onChange={(e) => handleUpdateVariableFormCheck(i, 'repaymentDate', e.target.value)} className="w-full text-xs p-1 border border-slate-300 rounded" /></div>
                                                             <div className="col-span-1 text-center"><button type="button" onClick={() => handleRemoveCheckFromVariableForm(i)} className="text-red-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"><DeleteIcon className="w-4 h-4"/></button></div>
                                                         </div>
                                                     ))}
                                                 </div>
-                                                <button type="button" onClick={() => setVariableForm({ ...variableForm, checks: [...(variableForm.checks || []), { id: `sp_var_${Date.now()}`, amount: variableForm.amount || 0, date: new Date(), repaymentDate: new Date(), method: PaymentMethod.CHECK, reference: '', status: 'PENDING' }] })} className="w-full mt-3 py-1.5 border border-dashed border-indigo-300 text-indigo-600 text-xs font-bold rounded hover:bg-indigo-50 transition-colors">+ הוסף צ'ק בודד לרשימה</button>
+                                                <button type="button" onClick={() => setVariableForm({ ...variableForm, checks: [...(variableForm.checks || []), { id: `sp_var_${Date.now()}`, amount: variableForm.amount || 0, date: new Date(), repaymentDate: new Date(), method: variableForm.paymentMethod as PaymentMethod, reference: '', status: 'PENDING' }] })} className="w-full mt-3 py-1.5 border border-dashed border-indigo-300 text-indigo-600 text-xs font-bold rounded hover:bg-indigo-50 transition-colors">+ הוסף תשלום בודד לרשימה</button>
                                             </div>
                                         )}
                                     </div>

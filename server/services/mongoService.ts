@@ -2087,29 +2087,31 @@ export async function getVariableExpensesPaginated(
         const month = filters.month || 'all';
         const displayItems: VariableDisplayItemServer[] = [];
 
-        // 1. Base Variable Expenses
+        // 1. Base Variable Expenses (skip main row if expense has installments - avoid double-counting)
         variableExpenses.forEach(e => {
-            const expenseDate = new Date(e.date);
-            const yearMatches = year === 'all' || expenseDate.getFullYear() === Number(year);
-            const monthMatches = month === 'all' || (expenseDate.getMonth() + 1) === Number(month);
-            
-            if (yearMatches && monthMatches) {
-                displayItems.push({
-                    id: e.id,
-                    originalId: e.id,
-                    name: e.name,
-                    category: e.category,
-                    amount: e.amount,
-                    date: expenseDate,
-                    paymentMethod: e.paymentMethod || PaymentMethod.BANK_TRANSFER,
-                    isInstallment: false,
-                    includesVat: e.includesVat,
-                    isVatExempt: e.isVatExempt,
-                    checksCount: e.checks?.length
-                });
+            const hasInstallments = e.checks && e.checks.length > 0;
+            if (!hasInstallments) {
+                const expenseDate = new Date(e.date);
+                const yearMatches = year === 'all' || expenseDate.getFullYear() === Number(year);
+                const monthMatches = month === 'all' || (expenseDate.getMonth() + 1) === Number(month);
+                if (yearMatches && monthMatches) {
+                    displayItems.push({
+                        id: e.id,
+                        originalId: e.id,
+                        name: e.name,
+                        category: e.category,
+                        amount: e.amount,
+                        date: expenseDate,
+                        paymentMethod: e.paymentMethod || PaymentMethod.BANK_TRANSFER,
+                        isInstallment: false,
+                        includesVat: e.includesVat,
+                        isVatExempt: e.isVatExempt,
+                        checksCount: 0
+                    });
+                }
             }
 
-            // 2. Future installments (checks) for this variable expense
+            // 2. Installments (checks) for this variable expense
             if (e.checks && e.checks.length > 0) {
                 const checksInFilter = e.checks.filter(c => {
                     if (!c.repaymentDate) return false;
@@ -2120,6 +2122,9 @@ export async function getVariableExpensesPaginated(
                 });
 
                 checksInFilter.forEach((check, idx) => {
+                    const pm = check.method === PaymentMethod.CHECK
+                        ? `צ'ק (מס' ${check.reference || '?'})`
+                        : (check.method || e.paymentMethod || '') + (check.reference ? ` (${check.reference})` : '');
                     displayItems.push({
                         id: `${e.id}_inst_${idx}`,
                         originalId: e.id,
@@ -2127,7 +2132,7 @@ export async function getVariableExpensesPaginated(
                         category: e.category,
                         amount: check.amount,
                         date: new Date(check.repaymentDate!),
-                        paymentMethod: `צ'ק (מס' ${check.reference || '?'})`,
+                        paymentMethod: pm,
                         isInstallment: true,
                         isVatExempt: true
                     });

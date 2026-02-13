@@ -350,7 +350,8 @@ export type ViewEventsChartResult =
     | { type: 'byUser'; data: ViewEventsChartRowByUser[] };
 
 export interface StatusHistoryEntry {
-    status: string;
+    status: string;       // legacy – label for fallback
+    statusId?: string;   // primary – id from OrderStatusConfiguration
     startDate: Date;
     endDate?: Date;
 }
@@ -372,7 +373,8 @@ export interface Order {
     contactId?: string;
     supplierId?: string; // Main supplier if applicable
     employeeId: string; // Sales rep
-    orderStatus: string; // Now dynamic based on configuration
+    orderStatus: string;      // legacy – label for fallback
+    orderStatusId?: string;   // primary – id from OrderStatusConfiguration
     paymentStatus: PaymentStatus;
     payments: CustomerPayment[]; // New field for collection
     paymentTerms: string;

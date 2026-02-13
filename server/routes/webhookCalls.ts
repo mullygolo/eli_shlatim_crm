@@ -98,7 +98,7 @@ function fetchAndStoreRecording(uniqueId: string, recordingUrl: string): void {
  *
  * Required: callid (or call_id)
  * Direction: call_direction, direction (values: inbound/outbound, in/out, 1/2)
- * Answer time (seconds until answer, 0 = no answer): answer_sec, answer_seconds, callee_answer_second, answer_time
+ * Answer time (seconds until answer, 0 = no answer): answer_sec, answer_seconds, callee_answer_second, answer_time, ring_seconds, wait_seconds
  * Forward (target of forward): forward, forward_number, forward_to, forwarded_to
  * Hangup: hangup_reason, hangup_by, hangupBy (e.g. CALLER, CALLEE, NORMAL_CLEARING)
  * Callee name: callee_name, calleeName, agent_name, extension_name
@@ -107,7 +107,7 @@ function fetchAndStoreRecording(uniqueId: string, recordingUrl: string): void {
 const WEBHOOK_EXPECTED_FIELDS = {
     required: ['callid', 'call_id'],
     direction: ['call_direction', 'direction', 'callDirection'],
-    answerTime: ['answer_sec', 'answer_seconds', 'callee_answer_second', 'answer_time', 'answer_time_sec'],
+    answerTime: ['answer_sec', 'answer_seconds', 'callee_answer_second', 'answer_time', 'answer_time_sec', 'ring_seconds', 'wait_seconds', 'queue_seconds', 'time_to_answer', 'answer_time_seconds', 'ring_time', 'wait_time'],
     forward: ['forward', 'forward_number', 'forward_to', 'forwarded_to'],
     hangup: ['hangup_reason', 'hangup_by', 'hangupBy'],
     calleeName: ['callee_name', 'calleeName', 'agent_name', 'extension_name'],
@@ -213,8 +213,11 @@ router.post('/calls', async (req: Request, res: Response) => {
             }
         }
 
-        const rawAnswer = firstOf(data, WEBHOOK_EXPECTED_FIELDS.answerTime);
-        const answerNum = rawAnswer !== undefined ? parseNum(rawAnswer as string | number) : undefined;
+        let rawAnswer = firstOf(data, WEBHOOK_EXPECTED_FIELDS.answerTime);
+        if (rawAnswer === undefined && data.call && typeof data.call === 'object') {
+            rawAnswer = firstOf(data.call as Record<string, unknown>, WEBHOOK_EXPECTED_FIELDS.answerTime);
+        }
+        const answerNum = rawAnswer !== undefined ? (typeof rawAnswer === 'number' ? (Number.isFinite(rawAnswer) ? Math.floor(rawAnswer) : undefined) : parseNum(rawAnswer as string)) : undefined;
         const answerSeconds = answerNum !== undefined && answerNum >= 0 ? answerNum : undefined;
 
         const rawForward = firstOf(data, WEBHOOK_EXPECTED_FIELDS.forward);

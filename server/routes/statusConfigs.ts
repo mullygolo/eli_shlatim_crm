@@ -1,7 +1,34 @@
 import { Router } from 'express';
-import { getStatusConfigs, updateStatusConfigs } from '../services/mongoService.js';
+import { getStatusConfigs, updateStatusConfigs, countOrdersByStatusId, transferOrdersToStatus } from '../services/mongoService.js';
+import { verifyToken } from '../middleware/auth.js';
 
 const router = Router();
+
+router.get('/:statusId/order-count', verifyToken, async (req, res) => {
+    try {
+        const count = await countOrdersByStatusId(req.params.statusId);
+        res.json({ count });
+    } catch (error) {
+        console.error('GET /api/status-configs/:statusId/order-count failed:', error);
+        res.status(500).json({ error: 'Failed to count orders' });
+    }
+});
+
+router.post('/transfer', verifyToken, async (req, res) => {
+    try {
+        const { fromStatusId, toStatusId } = req.body || {};
+        if (!fromStatusId || !toStatusId) {
+            res.status(400).json({ error: 'fromStatusId and toStatusId required' });
+            return;
+        }
+        const result = await transferOrdersToStatus(fromStatusId, toStatusId);
+        res.json(result);
+    } catch (error) {
+        console.error('POST /api/status-configs/transfer failed:', error);
+        const detail = error instanceof Error ? error.message : String(error);
+        res.status(500).json({ error: 'Failed to transfer orders', detail });
+    }
+});
 
 router.get('/', async (req, res) => {
     try {

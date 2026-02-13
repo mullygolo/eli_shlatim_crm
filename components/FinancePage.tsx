@@ -1787,9 +1787,10 @@ const FinancePage: React.FC<FinancePageProps> = ({
     // P&L report: same order set as Orders page (getOrdersPaginated with active-deal-only, cap 15k) so הכנסות/עלות המכר match
     useEffect(() => {
         if (activeTab !== 'PNL' || !statusConfigs?.length) return;
-        const activeDealLabels = statusConfigs.filter(c => c.isActiveDeal).map(c => c.label);
+        const activeDealConfigs = statusConfigs.filter(c => c.isActiveDeal);
+        const defaultStatusFilter = activeDealConfigs.length > 0 ? [...activeDealConfigs.map(c => c.id), ...activeDealConfigs.map(c => c.label)] : undefined;
         const filters = {
-            orderStatusFilter: activeDealLabels.length > 0 ? activeDealLabels : undefined,
+            orderStatusFilter: defaultStatusFilter,
             showCompletedOrders: true
         };
         mongoService.getOrdersPaginated(filters, 1, 15000)

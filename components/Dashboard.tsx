@@ -4,6 +4,7 @@ import DOMPurify from 'dompurify';
 import { Customer, Order, Activity, Employee, OrderStatusConfiguration, PaymentStatus, ManualEvent, WallPost, PaymentMethod } from '../types';
 import { TaskIcon, SettingsIcon, MegaphoneIcon, TruckIcon, CashIcon, CalendarPlusIcon, InstallationIcon, NoteIcon } from './icons'; 
 import { calculateOrderTotals, calculateDueDate } from '../utils/calculations';
+import { getStatusConfigForOrder, getOrderStatusLabel, getHistoryStatusConfig } from '../utils/statusHelpers';
 import { getDateStringIsrael } from '../utils/timezone';
 import Modal from './Modal';
 import { useAuth } from '../contexts/AuthContext';
@@ -491,7 +492,11 @@ const StrongNumberCard: React.FC<{
 
     const getLostEventDate = (o: Order): Date => {
         if (o.statusHistory && o.statusHistory.length > 0) {
-            const historyEntry = o.statusHistory.find(h => h.status === o.orderStatus);
+            const config = getStatusConfigForOrder(o, statusConfigs);
+            const historyEntry = o.statusHistory.find(h => {
+                const entryConfig = getHistoryStatusConfig(h, statusConfigs);
+                return config && entryConfig && entryConfig.id === config.id;
+            });
             if (historyEntry) return new Date(historyEntry.startDate);
             const sorted = [...o.statusHistory].sort((a, b) => new Date(b.startDate).getTime() - new Date(a.startDate).getTime());
             if (sorted.length > 0) return new Date(sorted[0].startDate);
@@ -543,16 +548,10 @@ const StrongNumberCard: React.FC<{
 
         // orders כאן = כבר מדובלל מההורה (orderNumber אחד לכל הזמנה לוגית, המעודכן ביותר)
         // Active deals for collection/leads/quotes/lost (all isActiveDeal)
-        const activeDeals = orders.filter(order => {
-             const config = statusConfigs.find(c => c.label === order.orderStatus);
-             return config ? config.isActiveDeal === true : false;
-        });
+        const activeDeals = orders.filter(order => getStatusConfigForOrder(order, statusConfigs)?.isActiveDeal === true);
 
         // Strong numbers: כל עסקאות מאושרות (isActiveDeal) – כולל שהסתיימו בהצלחה. חישוב לפי תאריך אישור העסקה (dealStartDate)
-        let activeDealsForStrongNumbers = orders.filter(order => {
-            const config = statusConfigs.find(c => c.label === order.orderStatus);
-            return config ? config.isActiveDeal === true : false;
-        });
+        let activeDealsForStrongNumbers = orders.filter(order => getStatusConfigForOrder(order, statusConfigs)?.isActiveDeal === true);
 
         // דדופליקציה לפי מספר הזמנה (כמו בשרת כש-dateFilterType=DEAL_DATE): שומרים רשומה אחת לכל מספר – לפי התאריך המאוחר ביותר בתאריך אישור העסקה
         const dateKeyForDedup = (o: Order) => o.dealStartDate || o.date;
@@ -586,12 +585,10 @@ const StrongNumberCard: React.FC<{
         });
 
         // Use the isLead flag configuration to count new leads – נתונים מדובללים (תואם ללוח הזמנות)
-        const leadStatuses = new Set(statusConfigs.filter(c => c.isLead).map(c => c.label));
-        const untouchedLeads = orders.filter(o => leadStatuses.has(o.orderStatus));
+        const untouchedLeads = orders.filter(o => getStatusConfigForOrder(o, statusConfigs)?.isLead);
         
         // Use the isQuote flag configuration to count open quotes (deduplicated by orderNumber, like Orders page)
-        const quoteStatuses = new Set(statusConfigs.filter(c => c.isQuote).map(c => c.label));
-        const openQuotesRaw = orders.filter(o => quoteStatuses.has(o.orderStatus));
+        const openQuotesRaw = orders.filter(o => getStatusConfigForOrder(o, statusConfigs)?.isQuote);
         const quoteDedupMap = new Map<string, Order>();
         for (const order of openQuotesRaw) {
             const raw = (order.orderNumber != null && order.orderNumber !== '') ? String(order.orderNumber).trim() : '';
@@ -609,7 +606,6 @@ const StrongNumberCard: React.FC<{
         const openQuotes = Array.from(quoteDedupMap.values());
 
         // Lost Deals: event-based (when order entered "Lost" status). Support multiple periods + previous period for comparison.
-        const lostStatuses = new Set(statusConfigs.filter(c => c.isLost).map(c => c.label));
         const getRangeForPeriod = (period: LostDealsPeriod): { start: Date; end: Date } => {
             const y = now.getFullYear(), m = now.getMonth();
             if (period === 'THIS_MONTH') return { start: new Date(y, m, 1), end: new Date(y, m + 1, 0, 23, 59, 59, 999) };
@@ -630,8 +626,8 @@ const StrongNumberCard: React.FC<{
         const inRange = (d: Date, r: { start: Date; end: Date }) => d.getTime() >= r.start.getTime() && d.getTime() <= r.end.getTime();
         const rangeCurrent = getRangeForPeriod(lostDealsPeriod);
         const rangePrevious = getPreviousRangeForPeriod(lostDealsPeriod);
-        const lostRaw = orders.filter(o => lostStatuses.has(o.orderStatus) && inRange(getLostEventDate(o), rangeCurrent));
-        const lostPrevRaw = orders.filter(o => lostStatuses.has(o.orderStatus) && inRange(getLostEventDate(o), rangePrevious));
+        const lostRaw = orders.filter(o => getStatusConfigForOrder(o, statusConfigs)?.isLost && inRange(getLostEventDate(o), rangeCurrent));
+        const lostPrevRaw = orders.filter(o => getStatusConfigForOrder(o, statusConfigs)?.isLost && inRange(getLostEventDate(o), rangePrevious));
         // Deduplicate by order number so the same logical order (e.g. 030226001) is not shown multiple times; keep the one with latest lost event date
         const dedupeByOrderNumber = (list: Order[]) => {
             const byNumber = new Map<string, Order>();
@@ -675,7 +671,7 @@ const StrongNumberCard: React.FC<{
 
             // Logic for "Upon Completion"
             if (order.paymentTerms === 'עם סיום העבודה') {
-                const config = statusConfigs.find(c => c.label === order.orderStatus);
+                const config = getStatusConfigForOrder(order, statusConfigs);
                 // If not completed yet, skip collection stats (it's not due)
                 if (!config?.isCompleted) return;
             }
@@ -1280,7 +1276,7 @@ const StrongNumberCard: React.FC<{
                                                 <td className="px-3 py-2.5 text-slate-600 whitespace-nowrap">{getOrderDisplayDate(order, 'lead').toLocaleDateString('he-IL')}</td>
                                                 <td className="px-3 py-2.5 font-medium text-primary whitespace-nowrap">{order.orderNumber}</td>
                                                 <td className="px-3 py-2.5 text-slate-700 min-w-[200px] max-w-[360px] line-clamp-2 break-words align-top" title={order.description}>{order.description || '—'}</td>
-                                                <td className="px-3 py-2.5">{order.orderStatus || '—'}</td>
+                                                <td className="px-3 py-2.5">{getOrderStatusLabel(order, statusConfigs)}</td>
                                             </tr>
                                         ))
                                     )}
@@ -1480,10 +1476,7 @@ const Dashboard: React.FC<DashboardProps> = ({
     const currentMonthlyRevenue = useMemo(() => {
          const now = new Date();
          const monthStr = getDateStringIsrael(now).slice(0, 7);
-         const activeDeals = ordersDeduped.filter(order => {
-             const config = statusConfigs.find(c => c.label === order.orderStatus);
-             return config ? config.isActiveDeal === true : false;
-         });
+         const activeDeals = ordersDeduped.filter(order => getStatusConfigForOrder(order, statusConfigs)?.isActiveDeal === true);
          const dateKeyForDedup = (o: Order) => o.dealStartDate || o.date;
          const seenByOrderNumber = new Map<string, Order>();
          for (const order of activeDeals) {

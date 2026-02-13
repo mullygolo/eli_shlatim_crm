@@ -16,6 +16,24 @@ interface Totalable {
     payments?: CustomerPayment[];
 }
 
+/** Supplier cost using same formula as Payables report (cost*quantity for line items, cost for services; excludes cost<=0). Matches "סה״כ עלות לספקים" in Reports. */
+export const calculateOrderSupplierCostPayablesStyle = (order: Totalable): number => {
+    const lineItems = order?.lineItems || [];
+    const additionalServices = order?.additionalServices || [];
+    const fromItems = lineItems.reduce((sum, item) => {
+        const cost = item?.cost ?? 0;
+        if (!cost || cost <= 0) return sum;
+        const qty = item.quantity || 1;
+        return sum + cost * qty;
+    }, 0);
+    const fromServices = additionalServices.reduce((sum, service) => {
+        const cost = service?.cost ?? 0;
+        if (!cost || cost <= 0) return sum;
+        return sum + cost;
+    }, 0);
+    return fromItems + fromServices;
+};
+
 export const calculateOrderTotals = (order: Totalable) => {
     // Defensive checks
     const lineItems = order?.lineItems || [];

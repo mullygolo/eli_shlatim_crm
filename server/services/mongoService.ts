@@ -14,7 +14,8 @@ import {
 } from '../types.js';
 import { hashPassword } from '../utils/password.js';
 import { getTodayRangeIsrael, getDateStringIsrael, getMonthRangeIsrael, getDayRangeIsrael } from '../utils/timezone.js';
-import { calculateOrderTotals, calculateDueDate } from '../utils/calculations.js';
+import { calculateOrderTotals, calculateDueDate, calculateOrderSupplierCostPayablesStyle } from '../utils/calculations.js';
+import { getStatusConfigForOrder, getOrderStatusLabel, getStatusConfigByIdOrLabel } from '../utils/statusHelpers.js';
 
 // MongoDB Connection Configuration
 const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://daniel_db_user:danny123@elishlatim.geyfv2c.mongodb.net/elishlatim?retryWrites=true&w=majority&appName=Compass';
@@ -355,13 +356,10 @@ export async function getCustomersPaginated(
             : [];
         const ordersForPage = orderDocs.map(deserializeDates) as Order[];
         
-        const activeDealLabels = new Set(
-            statusConfigs.filter(c => c.isActiveDeal).map(c => c.label)
-        );
-        
         const debtByCustomerId = new Map<string, number>();
         for (const order of ordersForPage) {
-            if (!order.customerId || !activeDealLabels.has(order.orderStatus)) continue;
+            const config = getStatusConfigForOrder(order, statusConfigs);
+            if (!order.customerId || !config?.isActiveDeal) continue;
             const { totalAmount, totalPaid } = calculateOrderTotals(order);
             const gross = totalAmount * (1 + (order.vatRate ?? vatRate) / 100);
             const remaining = Math.max(0, gross - totalPaid);
@@ -429,13 +427,8 @@ export async function getRelevantOrdersForCustomers(customerIds: string[]): Prom
     if (unique.length === 0) return result;
     try {
         const statusConfigs = await getStatusConfigs();
-        const relevantLabels = new Set(
-            statusConfigs
-                .filter(c => (c.isLead || c.isActiveDeal || c.isQuote) && !c.isLost)
-                .map(c => (c.label || '').trim())
-                .filter(Boolean)
-        );
-        if (relevantLabels.size === 0) {
+        const relevantConfigs = statusConfigs.filter(c => (c.isLead || c.isActiveDeal || c.isQuote) && !c.isLost);
+        if (relevantConfigs.length === 0) {
             unique.forEach(id => { result[id] = []; });
             return result;
         }
@@ -443,16 +436,17 @@ export async function getRelevantOrdersForCustomers(customerIds: string[]): Prom
         const collection = database.collection<Order>('orders');
         const docs = await collection
             .find({ customerId: { $in: unique } })
-            .project({ id: 1, orderNumber: 1, orderStatus: 1, customerId: 1 })
+            .project({ id: 1, orderNumber: 1, orderStatus: 1, orderStatusId: 1, customerId: 1 })
             .sort({ date: -1 })
             .limit(1000)
             .toArray();
         unique.forEach(id => { result[id] = []; });
         for (const doc of docs) {
-            const o = doc as { id: string; orderNumber: string; orderStatus: string; customerId: string };
-            const statusTrimmed = (o.orderStatus || '').trim();
-            if (o.customerId && result[o.customerId] && relevantLabels.has(statusTrimmed)) {
-                result[o.customerId].push({ id: o.id, orderNumber: o.orderNumber || '', orderStatus: statusTrimmed });
+            const o = doc as { id: string; orderNumber: string; orderStatus?: string; orderStatusId?: string; customerId: string };
+            const config = getStatusConfigForOrder(o, statusConfigs);
+            if (o.customerId && result[o.customerId] && config && (config.isLead || config.isActiveDeal || config.isQuote) && !config.isLost) {
+                const label = getOrderStatusLabel(o, statusConfigs);
+                result[o.customerId].push({ id: o.id, orderNumber: o.orderNumber || '', orderStatus: label });
             }
         }
         return result;
@@ -670,14 +664,14 @@ async function streamOrdersSummaryTotals(
     for await (const doc of cursor) {
         const order = deserializeDates(doc) as Order;
         if (isCollectionMode && !isCollectionCenterView) {
-            const config = statusConfigs.find(c => c.label === order.orderStatus);
+            const config = getStatusConfigForOrder(order, statusConfigs);
             if (!config || !config.isActiveDeal) continue;
         }
         if (filters.customerFilter && filters.customerFilter.length > 0) {
             if (!order.customerId || !filters.customerFilter.includes(order.customerId)) continue;
         }
         if (!filters.showCompletedOrders && !isCollectionMode && !isCollectionCenterView) {
-            const config = statusConfigs.find(c => c.label === order.orderStatus);
+            const config = getStatusConfigForOrder(order, statusConfigs);
             if (config?.isCompleted) continue;
         }
         const raw = (order.orderNumber != null && order.orderNumber !== '') ? String(order.orderNumber).trim() : '';
@@ -686,13 +680,14 @@ async function streamOrdersSummaryTotals(
         if (seenByOrderNumber.has(key)) continue;
         seenByOrderNumber.add(key);
 
-        const { totalAmount, profit, totalCost, totalPaid } = calculateOrderTotals(order);
+        const { totalAmount, profit, totalPaid } = calculateOrderTotals(order);
+        const supplierCostPayablesStyle = calculateOrderSupplierCostPayablesStyle(order);
         const currentOrderVat = order.vatRate ?? vatRate;
         summaryTotals.totalAmount += totalAmount;
         summaryTotals.totalProfit += profit;
-        summaryTotals.totalCost += totalCost;
+        summaryTotals.totalCost += supplierCostPayablesStyle;
         summaryTotals.totalAmountInclVat += totalAmount * (1 + currentOrderVat / 100);
-        const statusConfig = statusConfigs.find(c => c.label === order.orderStatus);
+        const statusConfig = getStatusConfigForOrder(order, statusConfigs);
         const isActiveDeal = statusConfig ? statusConfig.isActiveDeal : true;
         if (isActiveDeal) {
             const dueWithVat = totalAmount * (1 + currentOrderVat / 100);
@@ -704,7 +699,7 @@ async function streamOrdersSummaryTotals(
 }
 
 /** Build MongoDB query for orders (shared by getOrdersPaginated and getPayableItems so both use same order set). */
-function buildOrdersQuery(filters: any, customers: Customer[]): { query: any; dateFieldForSort: string; dateFilterType: string } {
+function buildOrdersQuery(filters: any, customers: Customer[], statusConfigs?: OrderStatusConfiguration[]): { query: any; dateFieldForSort: string; dateFilterType: string } {
     const query: any = {};
     const sortBy = filters.sortBy === 'dueDate' || filters.sortBy === 'updatedAt' ? filters.sortBy : 'date';
     const isCollectionMode = filters.isCollectionMode === true || sortBy === 'dueDate';
@@ -716,7 +711,23 @@ function buildOrdersQuery(filters: any, customers: Customer[]): { query: any; da
         query.paymentStatus = { $in: filters.paymentStatusFilter };
     }
     if (filters.orderStatusFilter && filters.orderStatusFilter.length > 0) {
-        query.orderStatus = { $in: filters.orderStatusFilter };
+        const ids = statusConfigs
+            ? filters.orderStatusFilter.filter((f: string) => statusConfigs.some(c => c.id === f))
+            : [];
+        const labels = statusConfigs
+            ? filters.orderStatusFilter.filter((f: string) => statusConfigs.some(c => c.label === f))
+            : filters.orderStatusFilter;
+        if (ids.length && !labels.length) {
+            query.orderStatusId = { $in: ids };
+        } else if (labels.length && !ids.length) {
+            query.orderStatus = { $in: labels };
+        } else if (ids.length || labels.length) {
+            const statusOr: any[] = [];
+            if (ids.length) statusOr.push({ orderStatusId: { $in: ids } });
+            if (labels.length) statusOr.push({ orderStatus: { $in: labels } });
+            query.$and = query.$and || [];
+            query.$and.push(statusOr.length === 1 ? statusOr[0] : { $or: statusOr });
+        }
     }
     if (filters.customerFilter && filters.customerFilter.length > 0) {
         query.customerId = { $in: filters.customerFilter };
@@ -802,7 +813,7 @@ function postFilterAndDedupeOrders(
     let orders = allMatchingOrders;
     if (isCollectionMode && !isCollectionCenterView) {
         orders = orders.filter(order => {
-            const config = statusConfigs.find(c => c.label === order.orderStatus);
+            const config = getStatusConfigForOrder(order, statusConfigs);
             return config ? config.isActiveDeal : false;
         });
     }
@@ -812,7 +823,7 @@ function postFilterAndDedupeOrders(
     }
     if (!filters.showCompletedOrders && !isCollectionMode && !isCollectionCenterView) {
         orders = orders.filter(order => {
-            const config = statusConfigs.find(c => c.label === order.orderStatus);
+            const config = getStatusConfigForOrder(order, statusConfigs);
             return !config?.isCompleted;
         });
     }
@@ -854,7 +865,7 @@ async function getFilteredOrderSet(
     statusConfigs: OrderStatusConfiguration[],
     customers: Customer[]
 ): Promise<{ orders: Order[]; allMatchingDocs: any[] }> {
-    const { query, dateFieldForSort, dateFilterType } = buildOrdersQuery(filters, customers);
+    const { query, dateFieldForSort, dateFilterType } = buildOrdersQuery(filters, customers, statusConfigs);
     const allMatchingDocs = await collection
         .find(query)
         .sort({ [dateFieldForSort]: -1 })
@@ -872,14 +883,22 @@ export async function getOrdersPaginated(filters: any, page: number = 1, limit: 
         const collection = database.collection<Order>('orders');
         const [statusConfigs, customers] = await Promise.all([getStatusConfigs(), getCustomers()]);
 
-const sortBy = filters.sortBy === 'dueDate' || filters.sortBy === 'updatedAt' ? filters.sortBy : 'date';
-        const { orders: allMatchingOrders, allMatchingDocs } = await getFilteredOrderSet(collection, filters, statusConfigs, customers);
+        const sortBy = filters.sortBy === 'dueDate' || filters.sortBy === 'updatedAt' ? filters.sortBy : 'date';
+        // When orderStatusFilter is empty: "מועד תשלום" overrides default – show all isActiveDeal (incl. completed) with balance due; otherwise active-only
+        const effectiveFilters = { ...filters };
+        if (!effectiveFilters.orderStatusFilter || effectiveFilters.orderStatusFilter.length === 0) {
+            const configs = sortBy === 'dueDate'
+                ? statusConfigs.filter(c => c.isActiveDeal)
+                : statusConfigs.filter(c => c.isActiveDeal && !c.isCompleted);
+            effectiveFilters.orderStatusFilter = [...configs.map(c => c.id), ...configs.map(c => c.label)];
+        }
+        const { orders: allMatchingOrders, allMatchingDocs } = await getFilteredOrderSet(collection, effectiveFilters, statusConfigs, customers);
 
         // When sorting by due date, show only orders with balance due (יתרה לתשלום > 0)
         let ordersToUse = allMatchingOrders;
         if (sortBy === 'dueDate') {
             ordersToUse = allMatchingOrders.filter(order => {
-                const config = statusConfigs.find(c => c.label === order.orderStatus);
+                const config = getStatusConfigForOrder(order, statusConfigs);
                 if (!config?.isActiveDeal) return false;
                 const { totalAmount, totalPaid } = calculateOrderTotals(order);
                 const currentVat = order.vatRate ?? vatRate;
@@ -893,18 +912,19 @@ const sortBy = filters.sortBy === 'dueDate' || filters.sortBy === 'updatedAt' ? 
 
         // Calculate summary totals from the set we will display (ordersToUse)
         let summaryTotals: { totalAmount: number; totalProfit: number; totalBalance: number; totalCost: number; totalAmountInclVat: number; totalBalanceInclVat: number };
-        if (allMatchingDocs.length >= ORDERS_PAGINATED_LOAD_LIMIT && !filters.searchTerm && sortBy !== 'dueDate') {
-            const { query } = buildOrdersQuery(filters, customers);
-            summaryTotals = await streamOrdersSummaryTotals(collection, query, dateFieldForSort, dateFilterType, filters, statusConfigs, vatRate);
+        if (allMatchingDocs.length >= ORDERS_PAGINATED_LOAD_LIMIT && !effectiveFilters.searchTerm && sortBy !== 'dueDate') {
+            const { query } = buildOrdersQuery(effectiveFilters, customers, statusConfigs);
+            summaryTotals = await streamOrdersSummaryTotals(collection, query, dateFieldForSort, dateFilterType, effectiveFilters, statusConfigs, vatRate);
         } else {
             summaryTotals = ordersToUse.reduce((acc, order) => {
-                const { totalAmount, profit, totalCost, totalPaid } = calculateOrderTotals(order);
+                const { totalAmount, profit, totalPaid } = calculateOrderTotals(order);
+                const supplierCostPayablesStyle = calculateOrderSupplierCostPayablesStyle(order);
                 const currentOrderVat = order.vatRate ?? vatRate;
                 acc.totalAmount += totalAmount;
                 acc.totalProfit += profit;
-                acc.totalCost += totalCost;
+                acc.totalCost += supplierCostPayablesStyle;
                 acc.totalAmountInclVat += totalAmount * (1 + currentOrderVat / 100);
-                const statusConfig = statusConfigs.find(c => c.label === order.orderStatus);
+                const statusConfig = getStatusConfigForOrder(order, statusConfigs);
                 const isActiveDeal = statusConfig ? statusConfig.isActiveDeal : true;
                 if (isActiveDeal) {
                     const dueWithVat = totalAmount * (1 + currentOrderVat / 100);
@@ -1027,12 +1047,13 @@ export async function getPayableItems(
             return new Date();
         };
 
-        // Same order set as Orders page: use order filters if provided, else default to "all active deal statuses" (no date filter)
-        const activeDealLabels = statusConfigs.filter(c => c.isActiveDeal).map(c => c.label);
+        // Same order set as Orders page: use order filters if provided, else default to "all active deal statuses" (ids + labels for migrated + legacy)
+        const activeDealConfigs = statusConfigs.filter(c => c.isActiveDeal);
+        const defaultStatusFilter = [...activeDealConfigs.map(c => c.id), ...activeDealConfigs.map(c => c.label)];
         const orderFiltersForReport: any = {
             orderStatusFilter: filters.orderStatusFilter && filters.orderStatusFilter.length > 0
                 ? filters.orderStatusFilter
-                : activeDealLabels,
+                : defaultStatusFilter,
             showCompletedOrders: true,
             dateFilterType: filters.dateFilterType || 'ORDER_DATE',
             startDateFilter: filters.startDateFilter,
@@ -1042,7 +1063,7 @@ export async function getPayableItems(
         };
         // When using default (no client orderStatusFilter), use isCollectionMode so post-filter keeps only active deals if query had no status
         if (!filters.orderStatusFilter || filters.orderStatusFilter.length === 0) {
-            orderFiltersForReport.isCollectionMode = activeDealLabels.length > 0 ? false : true;
+            orderFiltersForReport.isCollectionMode = activeDealConfigs.length > 0 ? false : true;
         }
 
         const { orders: activeOrdersCapped } = await getFilteredOrderSet(collection, orderFiltersForReport, statusConfigs, customers);
@@ -1096,7 +1117,7 @@ export async function getPayableItems(
                 let timeStatus: PayableItem['timeStatus'] = 'צפוי';
                 
                 if (effectivePaymentTerms === 'עם סיום העבודה') {
-                    const config = statusConfigs.find(c => c.label === order.orderStatus);
+                    const config = getStatusConfigForOrder(order, statusConfigs);
                     if (!config?.isCompleted) {
                         timeStatus = 'ממתין לסיום';
                     } else {
@@ -1903,6 +1924,69 @@ export async function updateStatusConfigs(configs: OrderStatusConfiguration[]): 
         return configs;
     } catch (error) {
         console.error('Error updating status configs:', error);
+        throw error;
+    }
+}
+
+/** Count orders with this status (by orderStatusId or orderStatus label for legacy) */
+export async function countOrdersByStatusId(statusId: string): Promise<number> {
+    try {
+        const database = await getDb();
+        const statusConfigs = await getStatusConfigs();
+        const config = statusConfigs.find(c => c.id === statusId);
+        const ordersCol = database.collection<Order>('orders');
+        const query: Record<string, unknown> = { $or: [{ orderStatusId: statusId }] };
+        if (config?.label) {
+            (query.$or as Record<string, unknown>[]).push({ orderStatus: config.label });
+        }
+        return ordersCol.countDocuments(query);
+    } catch (error) {
+        console.error('Error counting orders by status:', error);
+        throw error;
+    }
+}
+
+/** Transfer all orders from one status to another, then safe to delete source status */
+export async function transferOrdersToStatus(
+    fromStatusId: string,
+    toStatusId: string
+): Promise<{ updated: number }> {
+    try {
+        const database = await getDb();
+        const statusConfigs = await getStatusConfigs();
+        const toConfig = statusConfigs.find(c => c.id === toStatusId);
+        const fromConfig = statusConfigs.find(c => c.id === fromStatusId);
+        if (!toConfig) throw new Error('סטטוס היעד לא נמצא');
+        if (fromStatusId === toStatusId) return { updated: 0 };
+
+        const ordersCol = database.collection<Order>('orders');
+        const query: Record<string, unknown> = {
+            $or: [{ orderStatusId: fromStatusId }],
+        };
+        if (fromConfig?.label) {
+            (query.$or as Record<string, unknown>[]).push({ orderStatus: fromConfig.label });
+        }
+
+        const orders = await ordersCol.find(query).toArray();
+        if (orders.length === 0) return { updated: 0 };
+
+        const bulkOps = orders.map((o: any) => ({
+            updateOne: {
+                filter: { id: o.id },
+                update: {
+                    $set: {
+                        orderStatus: toConfig.label,
+                        orderStatusId: toStatusId,
+                        updatedAt: new Date(),
+                    },
+                },
+            },
+        }));
+
+        const result = await ordersCol.bulkWrite(bulkOps);
+        return { updated: result.modifiedCount };
+    } catch (error) {
+        console.error('Error transferring orders:', error);
         throw error;
     }
 }
@@ -4489,12 +4573,12 @@ export async function getPerformanceMetrics(
     const orders = await ordersCol.find(orderQuery).sort({ date: -1 }).limit(20000).toArray();
     const ordersList = orders.map(d => deserializeDates(d) as Order);
 
-    const leadLabels = new Set(statusConfigs.filter(c => c.isLead).map(c => c.label));
-    const quoteLabels = new Set(statusConfigs.filter(c => c.isQuote).map(c => c.label));
-    const activeDealLabels = new Set(statusConfigs.filter(c => c.isActiveDeal).map(c => c.label));
-    const completedLabels = new Set(statusConfigs.filter(c => c.isCompleted).map(c => c.label));
-    const lostLabels = new Set(statusConfigs.filter(c => c.isLost).map(c => c.label));
-    const openStatusLabels = new Set([...leadLabels, ...quoteLabels, ...activeDealLabels, ...completedLabels]);
+    const leadConfigs = statusConfigs.filter(c => c.isLead);
+    const quoteConfigs = statusConfigs.filter(c => c.isQuote);
+    const activeDealConfigsRep = statusConfigs.filter(c => c.isActiveDeal);
+    const completedConfigs = statusConfigs.filter(c => c.isCompleted);
+    const openLabels = [...leadConfigs, ...quoteConfigs, ...activeDealConfigsRep, ...completedConfigs].map(c => c.label);
+    const openIds = [...leadConfigs, ...quoteConfigs, ...activeDealConfigsRep, ...completedConfigs].map(c => c.id);
 
     const now = new Date();
     const todayStr = getDateStringIsrael(now);
@@ -4522,7 +4606,7 @@ export async function getPerformanceMetrics(
         const created = order.createdAt ? new Date(order.createdAt) : new Date(order.date);
         const orderDate = order.date instanceof Date ? order.date : new Date(order.date);
         const { totalAmount, profit } = calculateOrderTotals(order);
-        const config = statusConfigs.find(c => c.label === order.orderStatus);
+        const config = getStatusConfigForOrder(order, statusConfigs);
         const isActive = config?.isActiveDeal ?? false;
         const isCompleted = config?.isCompleted ?? false;
         const isLost = config?.isLost ?? false;
@@ -4530,7 +4614,8 @@ export async function getPerformanceMetrics(
         businessTotalOrders += 1;
         businessTotalAmount += totalAmount;
         businessTotalProfit += profit;
-        statusDistMap.set(order.orderStatus, (statusDistMap.get(order.orderStatus) ?? 0) + 1);
+        const statusLabel = getOrderStatusLabel(order, statusConfigs);
+        statusDistMap.set(statusLabel, (statusDistMap.get(statusLabel) ?? 0) + 1);
 
         const monthKey = `${orderDate.getFullYear()}-${String(orderDate.getMonth() + 1).padStart(2, '0')}`;
         const monthEntry = salesByMonthMap.get(monthKey) ?? { orderCount: 0, totalAmount: 0, totalProfit: 0 };
@@ -4563,7 +4648,7 @@ export async function getPerformanceMetrics(
                 }
             }
         }
-        if (leadLabels.has(order.orderStatus)) empLeadsCount.set(eid, (empLeadsCount.get(eid) ?? 0) + 1);
+        if (config?.isLead) empLeadsCount.set(eid, (empLeadsCount.get(eid) ?? 0) + 1);
         if (order.type === OrderType.SERVICE_CALL) empServiceCallOpened.set(eid, (empServiceCallOpened.get(eid) ?? 0) + 1);
 
         const cid = order.customerId;
@@ -4626,7 +4711,8 @@ export async function getPerformanceMetrics(
             const byStatus = statusChangeByStatusByUser.get(uid)!;
             byStatus[newStatus] = (byStatus[newStatus] ?? 0) + 1;
             statusChangeByStatusByUser.set(uid, byStatus);
-            if (lostLabels.has(newStatus)) lostByUser.set(uid, (lostByUser.get(uid) ?? 0) + 1);
+            const cfg = getStatusConfigByIdOrLabel(newStatus, statusConfigs);
+            if (cfg?.isLost) lostByUser.set(uid, (lostByUser.get(uid) ?? 0) + 1);
             const arr = statusChangeEventsByOrder.get(a.entityId) ?? [];
             arr.push({ userId: uid, timestamp: ts, newStatus });
             statusChangeEventsByOrder.set(a.entityId, arr);
@@ -4634,7 +4720,7 @@ export async function getPerformanceMetrics(
 
         let points = ACTIVITY_SCORE_POINTS[a.action ?? ''] ?? 0;
         if (a.action === 'status_change' && meta.newStatus != null) {
-            const cfg = statusConfigs.find(c => c.label === String(meta.newStatus));
+            const cfg = getStatusConfigByIdOrLabel(String(meta.newStatus), statusConfigs);
             if (cfg?.isActiveDeal || cfg?.isCompleted) points = ACTIVITY_SCORE_POINTS.close_deal ?? 20;
         }
         if (!activityScoreByUser.has(uid)) activityScoreByUser.set(uid, { score: 0, actionCounts: {} });
@@ -4683,9 +4769,16 @@ export async function getPerformanceMetrics(
         workHoursByEmp.set(r.employeeId, (workHoursByEmp.get(r.employeeId) ?? 0) + h);
     }
 
-    const leadOrActiveLabels = [...leadLabels, ...activeDealLabels];
+    const leadOrActiveLabels = [...leadConfigs, ...activeDealConfigsRep].map(c => c.label);
+    const leadOrActiveIds = [...leadConfigs, ...activeDealConfigsRep].map(c => c.id);
+    const redFlagsQuery = leadOrActiveLabels.length > 0
+        ? { $or: [
+            { orderStatus: { $in: leadOrActiveLabels } },
+            { orderStatusId: { $in: leadOrActiveIds } }
+        ] }
+        : { _id: { $exists: false } };
     const allOrdersForRedFlags = leadOrActiveLabels.length > 0
-        ? await ordersCol.find({ orderStatus: { $in: leadOrActiveLabels } }).limit(5000).toArray()
+        ? await ordersCol.find(redFlagsQuery).limit(5000).toArray()
         : [];
     const lastActivityByOrder = new Map<string, Date>();
     for (const a of activitiesList) {
@@ -4713,7 +4806,7 @@ export async function getPerformanceMetrics(
     const redFlags: { orderId: string; orderNumber: string; description: string; orderStatus: string; employeeName: string; hoursSinceActivity: number; flag?: string }[] = [];
     for (const doc of allOrdersForRedFlags) {
         const order = deserializeDates(doc) as Order;
-        const config = statusConfigs.find(c => c.label === order.orderStatus);
+        const config = getStatusConfigForOrder(order, statusConfigs);
         const isOpen = config && (config.isLead || config.isActiveDeal);
         if (!isOpen) continue;
         const lastTs = lastActivityByOrder.get(order.id);
@@ -4726,7 +4819,7 @@ export async function getPerformanceMetrics(
             orderId: order.id,
             orderNumber: order.orderNumber || '',
             description: order.description || '',
-            orderStatus: order.orderStatus || '',
+            orderStatus: getOrderStatusLabel(order, statusConfigs),
             employeeName: emp?.name ?? order.employeeId ?? '',
             hoursSinceActivity: Math.round(hoursSince * 10) / 10,
             flag: 'ללא פעילות מעל 48 שעות'
@@ -4740,12 +4833,12 @@ export async function getPerformanceMetrics(
     const businessDealsThisMonth = ordersList.filter(o => {
         const d = o.date instanceof Date ? o.date : new Date(o.date);
         if (d < monthStart || d > monthEnd) return false;
-        const config = statusConfigs.find(c => c.label === o.orderStatus);
+        const config = getStatusConfigForOrder(o, statusConfigs);
         return config?.isActiveDeal || config?.isCompleted;
     }).length;
-    const leadsInRange = ordersList.filter(o => leadLabels.has(o.orderStatus)).length;
+    const leadsInRange = ordersList.filter(o => getStatusConfigForOrder(o, statusConfigs)?.isLead).length;
     const dealsInRange = ordersList.filter(o => {
-        const config = statusConfigs.find(c => c.label === o.orderStatus);
+        const config = getStatusConfigForOrder(o, statusConfigs);
         return config?.isActiveDeal || config?.isCompleted;
     }).length;
     const businessConversion = leadsInRange > 0 ? dealsInRange / leadsInRange : undefined;
@@ -4772,7 +4865,12 @@ export async function getPerformanceMetrics(
         const closingList = empClosingTimes.get(eid) ?? [];
         const avgClosing = closingList.length > 0 ? closingList.reduce((s, h) => s + h, 0) / closingList.length : null;
         const profitPct = totalAmount > 0 ? (totalProfit / totalAmount) * 100 : undefined;
-        const currentOpenQuery: Record<string, unknown> = { employeeId: eid, orderStatus: { $in: Array.from(openStatusLabels) } };
+        const currentOpenQuery: Record<string, unknown> = openLabels.length > 0
+            ? { employeeId: eid, $or: [
+                { orderStatus: { $in: openLabels } },
+                { orderStatusId: { $in: openIds } }
+            ] }
+            : { employeeId: eid };
         const currentOpen = await ordersCol.countDocuments(currentOpenQuery);
         return {
             employeeId: eid,

@@ -454,6 +454,18 @@ export async function updateStatusConfigs(configs: OrderStatusConfiguration[]): 
     });
 }
 
+export async function getOrderCountByStatusId(statusId: string): Promise<number> {
+    const res = await apiRequest<{ count: number }>(`/status-configs/${encodeURIComponent(statusId)}/order-count`);
+    return res?.count ?? 0;
+}
+
+export async function transferOrdersToStatus(fromStatusId: string, toStatusId: string): Promise<{ updated: number }> {
+    return apiRequest<{ updated: number }>('/status-configs/transfer', {
+        method: 'POST',
+        body: JSON.stringify({ fromStatusId, toStatusId }),
+    });
+}
+
 // ==================== FIXED EXPENSES ====================
 export async function getFixedExpenses(): Promise<FixedExpense[]> {
     return apiRequest<FixedExpense[]>('/finance/fixed-expenses');

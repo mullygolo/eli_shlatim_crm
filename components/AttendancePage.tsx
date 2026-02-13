@@ -4,6 +4,7 @@ import { Employee, AttendanceRecord, Order, OrderStatusConfiguration, Attendance
 import { ClockIcon, EditIcon, PlusIcon, ImportIcon, DownloadIcon, DeleteIcon } from './icons';
 import Modal from './Modal';
 import { calculateOrderTotals, getEmployeeSalaryAtDate } from '../utils/calculations';
+import { getStatusConfigForOrder } from '../utils/statusHelpers';
 import { getJewishHoliday } from '../utils/holidays';
 import { useAuth } from '../contexts/AuthContext';
 import * as mongoService from '../services/mongoService';
@@ -1026,7 +1027,7 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
             const targetIds = emp.bonusBasisEmployeeIds && emp.bonusBasisEmployeeIds.length > 0 ? emp.bonusBasisEmployeeIds : [emp.id];
             const relevantOrders = orders.filter(o => {
                 const d = new Date(o.dealStartDate || o.date);
-                const isWon = statusConfigs.find(c => c.label === o.orderStatus)?.isActiveDeal; 
+                const isWon = getStatusConfigForOrder(o, statusConfigs)?.isActiveDeal; 
                 return targetIds.includes(o.employeeId) && d.getMonth() + 1 === month && d.getFullYear() === year && isWon && o.paymentStatus === 'שולם'; 
             });
             const totalSales = relevantOrders.reduce((sum, o) => sum + calculateOrderTotals(o).totalAmount, 0);

@@ -8,6 +8,7 @@ import VatSettingsSection from './VatSettingsSection';
 import TipTapEditor from './TipTapEditor';
 import LogsAndAuditTab from './LogsAndAuditTab';
 import UsageAndViewsTab from './UsageAndViewsTab';
+import * as mongoService from '../services/mongoService';
 
 interface SettingsPageProps {
     statusConfigs: OrderStatusConfiguration[];
@@ -24,6 +25,7 @@ interface SettingsPageProps {
     orders: Order[];
     vatRateHistory?: any[];
     onNavigateToOrder?: (orderId: string) => void;
+    onRefetchData?: () => Promise<void>;
 }
 
 const StatusForm: React.FC<{
@@ -244,13 +246,17 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
     setAttendanceRecords,
     orders,
     vatRateHistory,
-    onNavigateToOrder
+    onNavigateToOrder,
+    onRefetchData
 }) => {
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingConfig, setEditingConfig] = useState<OrderStatusConfiguration | null>(null);
     const [activeTab, setActiveTab] = useState<'statuses' | 'employees' | 'general' | 'logs' | 'usage'>('statuses');
     const [localSystemMessage, setLocalSystemMessage] = useState(systemMessage);
     const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+    const [transferDeleteModal, setTransferDeleteModal] = useState<{ config: OrderStatusConfiguration; orderCount: number } | null>(null);
+    const [transferTargetId, setTransferTargetId] = useState<string>('');
+    const [transferInProgress, setTransferInProgress] = useState(false);
     
     // Update local state when prop changes
     useEffect(() => {
@@ -267,15 +273,55 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
         setIsModalOpen(true);
     };
 
-    const handleDelete = (id: string) => {
+    const handleDelete = async (id: string) => {
         const config = statusConfigs.find(c => c.id === id);
-        if (config?.isLead) {
+        if (!config) return;
+        if (config.isLead) {
             alert("לא ניתן למחוק סטטוס שמוגדר כ'ליד'. הגדר סטטוס אחר כליד לפני המחיקה.");
             return;
         }
-        if (window.confirm(`האם אתה בטוח שברצונך למחוק את הסטטוס "${config?.label}"?`)) {
+        try {
+            const count = await mongoService.getOrderCountByStatusId(id);
+            if (count > 0) {
+                const others = statusConfigs.filter(c => c.id !== id);
+                if (others.length === 0) {
+                    alert('לא ניתן למחוק – זה הסטטוס היחידי במערכת.');
+                    return;
+                }
+                setTransferDeleteModal({ config, orderCount: count });
+                setTransferTargetId(others[0]?.id || '');
+                return;
+            }
+        } catch (e) {
+            console.error('Failed to count orders:', e);
+            alert('שגיאה בבדיקת הזמנות. נסה שוב.');
+            return;
+        }
+        if (window.confirm(`האם אתה בטוח שברצונך למחוק את הסטטוס "${config.label}"?`)) {
             setStatusConfigs(prev => prev.filter(c => c.id !== id));
-            addActivity(`סטטוס נמחק: ${config?.label}`, { entityType: 'settings', action: 'delete', metadata: { label: config?.label, configId: id } });
+            addActivity(`סטטוס נמחק: ${config.label}`, { entityType: 'settings', action: 'delete', metadata: { label: config.label, configId: id } });
+        }
+    };
+
+    const handleTransferAndDelete = async () => {
+        if (!transferDeleteModal || !transferTargetId || transferTargetId === transferDeleteModal.config.id) return;
+        setTransferInProgress(true);
+        try {
+            const { updated } = await mongoService.transferOrdersToStatus(transferDeleteModal.config.id, transferTargetId);
+            setStatusConfigs(prev => prev.filter(c => c.id !== transferDeleteModal.config.id));
+            addActivity(`סטטוס "${transferDeleteModal.config.label}" נמחק לאחר העברת ${updated} הזמנות`, {
+                entityType: 'settings',
+                action: 'delete',
+                metadata: { label: transferDeleteModal.config.label, configId: transferDeleteModal.config.id, transferredCount: updated }
+            });
+            setTransferDeleteModal(null);
+            setTransferTargetId('');
+            if (onRefetchData) await onRefetchData();
+        } catch (e) {
+            console.error('Transfer failed:', e);
+            alert((e instanceof Error ? e.message : 'שגיאה בהעברת הזמנות') + '. נסה שוב.');
+        } finally {
+            setTransferInProgress(false);
         }
     };
 
@@ -438,6 +484,51 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
                             </tbody>
                         </table>
                     </div>
+
+                    {transferDeleteModal && (
+                        <Modal title="העבר הזמנות ומחיקת סטטוס" onClose={() => !transferInProgress && setTransferDeleteModal(null)} size="lg">
+                            <div className="space-y-4" dir="rtl">
+                                <p className="text-slate-700">
+                                    יש <strong>{transferDeleteModal.orderCount}</strong> הזמנות בסטטוס &quot;{transferDeleteModal.config.label}&quot;.
+                                    העבר אותן לסטטוס אחר ואז מחק.
+                                </p>
+                                <div>
+                                    <label className="block text-sm font-medium text-slate-700 mb-1">העבר לסטטוס:</label>
+                                    <select
+                                        value={transferTargetId}
+                                        onChange={e => setTransferTargetId(e.target.value)}
+                                        disabled={transferInProgress}
+                                        className="w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary"
+                                    >
+                                        {statusConfigs
+                                            .filter(c => c.id !== transferDeleteModal.config.id)
+                                            .sort((a, b) => a.orderIndex - b.orderIndex)
+                                            .map(c => (
+                                                <option key={c.id} value={c.id}>{c.label}</option>
+                                            ))}
+                                    </select>
+                                </div>
+                                <div className="flex gap-2 justify-end pt-2">
+                                    <button
+                                        type="button"
+                                        onClick={() => setTransferDeleteModal(null)}
+                                        disabled={transferInProgress}
+                                        className="px-4 py-2 rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                                    >
+                                        ביטול
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={handleTransferAndDelete}
+                                        disabled={transferInProgress || !transferTargetId}
+                                        className="px-4 py-2 rounded-lg bg-red-600 text-white hover:bg-red-700 disabled:opacity-50"
+                                    >
+                                        {transferInProgress ? 'מעביר...' : 'העבר ומחק'}
+                                    </button>
+                                </div>
+                            </div>
+                        </Modal>
+                    )}
                 </>
             )}
 

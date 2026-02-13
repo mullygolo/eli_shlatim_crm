@@ -10,9 +10,11 @@ interface MultiSelectFilterProps {
     options: Option[];
     selectedValues: string[];
     onChange: (selected: string[]) => void;
+    /** When provided and nothing selected, show this instead of "הכל" */
+    emptyLabel?: string;
 }
 
-const MultiSelectFilter: React.FC<MultiSelectFilterProps> = ({ label, options, selectedValues, onChange }) => {
+const MultiSelectFilter: React.FC<MultiSelectFilterProps> = ({ label, options, selectedValues, onChange, emptyLabel }) => {
     const [isOpen, setIsOpen] = useState(false);
     const [searchQuery, setSearchQuery] = useState('');
     const wrapperRef = useRef<HTMLDivElement>(null);
@@ -70,7 +72,7 @@ const MultiSelectFilter: React.FC<MultiSelectFilterProps> = ({ label, options, s
     
     const getButtonText = () => {
         if (selectedValues.length === 0) {
-            return `הכל`;
+            return emptyLabel ?? 'הכל';
         }
         if (selectedValues.length === 1) {
              const selectedOption = options.find(o => o.value === selectedValues[0]);

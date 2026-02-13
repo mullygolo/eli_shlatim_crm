@@ -523,6 +523,7 @@ export async function executeImport(
             isImportPlaceholder: true as const
         };
 
+        const statusConfig = status ? statusConfigs.find(c => c.label === status) : undefined;
         const order: Order = {
             id: `ord_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
             orderNumber: first.orderNumber.trim(),
@@ -533,6 +534,7 @@ export async function executeImport(
             customerId: customer.id,
             employeeId,
             orderStatus: status,
+            orderStatusId: statusConfig?.id,
             paymentStatus: PaymentStatus.PAID,
             payments: [autoPayment],
             paymentTerms: 'תשלום מיידי',
@@ -542,7 +544,7 @@ export async function executeImport(
             additionalServices: [],
             attachments: [],
             timeline,
-            statusHistory: status ? [{ status, startDate: date }] : []
+            statusHistory: status ? [{ status, statusId: statusConfig?.id, startDate: date }] : []
         };
 
         try {
@@ -560,10 +562,10 @@ export async function executeImport(
         if (!existingOrder) return;
         const csvDate = task.groupRows.map(r => r.date).find(d => d) || (existingOrder.date && new Date(existingOrder.date)) || new Date();
         const statusLabel = (task.groupRows.map(r => (r.status || '').trim()).find(Boolean) || '').trim();
-        const newStatus = statusLabel && statusConfigs.some(c => c.label === statusLabel)
-            ? statusLabel
-            : (statusConfigs.length > 0 ? statusConfigs.sort((a, b) => a.orderIndex - b.orderIndex)[0].label : '');
-        const statusChanged = newStatus && existingOrder.orderStatus !== newStatus;
+        const matchingConfig = statusLabel ? statusConfigs.find(c => c.label === statusLabel) : undefined;
+        const newStatus = matchingConfig?.label ?? (statusConfigs.length > 0 ? statusConfigs.sort((a, b) => a.orderIndex - b.orderIndex)[0].label : '');
+        const newStatusId = matchingConfig?.id ?? (statusConfigs.length > 0 ? statusConfigs.sort((a, b) => a.orderIndex - b.orderIndex)[0].id : undefined);
+        const statusChanged = newStatus && (existingOrder.orderStatus !== newStatus || existingOrder.orderStatusId !== newStatusId);
         const hasNoRealPayments = !existingOrder.payments?.length ||
             existingOrder.payments.every((p: { isImportPlaceholder?: boolean; notes?: string }) =>
                 p.isImportPlaceholder || p.notes === 'תקבול אוטומטי מייבוא');
@@ -573,8 +575,9 @@ export async function executeImport(
         orderUpdates.dealStartDate = csvDate;
         if (statusChanged) {
             const newStatusHistory = [...(existingOrder.statusHistory || [])];
-            newStatusHistory.push({ status: newStatus, startDate: csvDate });
+            newStatusHistory.push({ status: newStatus, statusId: newStatusId, startDate: csvDate });
             orderUpdates.orderStatus = newStatus;
+            orderUpdates.orderStatusId = newStatusId;
             orderUpdates.statusHistory = newStatusHistory;
         }
         if (hasNoRealPayments) {

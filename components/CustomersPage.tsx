@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { Customer, Contact, Order, PaymentMethod, CustomerPayment, TimelineEvent, OrderStatusConfiguration, PaymentStatus, CallLog } from '../types';
+import { getStatusConfigForOrder, getOrderStatusLabel } from '../utils/statusHelpers';
 import { PlusIcon, EditIcon, DeleteIcon, ImportIcon, WhatsAppIcon, EmailIcon, PhoneIcon, CashIcon } from './icons';
 import Modal from './Modal';
 import { CUSTOMER_CATEGORIES, PAYMENT_TERMS_OPTIONS } from '../constants';
@@ -1324,7 +1325,7 @@ const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, custo
                                         const currentVat = o.vatRate ?? vatRate;
                                         const gross = totalAmount * (1 + currentVat / 100);
                                         const remaining = Math.max(0, gross - totalPaid);
-                                        const orderStatusConfig = statusConfigs.find(c => c.label === o.orderStatus);
+                                        const orderStatusConfig = getStatusConfigForOrder(o, statusConfigs);
                                         const contact = editableCustomer.contacts.find(c => c.id === o.contactId);
                                         const isActiveDeal = orderStatusConfig?.isActiveDeal;
                                         
@@ -1361,7 +1362,7 @@ const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, custo
                                                 </td>
                                                 <td className="px-4 py-3">
                                                     <span className={`px-2 py-1 rounded-full text-[10px] font-black uppercase tracking-tighter ${orderStatusConfig?.color || 'bg-slate-100 text-slate-600'}`}>
-                                                        {o.orderStatus}
+                                                        {getOrderStatusLabel(o, statusConfigs)}
                                                     </span>
                                                 </td>
                                                 <td className="px-4 py-3">

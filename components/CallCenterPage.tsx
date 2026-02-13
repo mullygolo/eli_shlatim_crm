@@ -750,7 +750,7 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
                                     <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-600">
                                         {formatDuration(log.durationSeconds)}
                                     </td>
-                                    <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-600">
+                                    <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-600" title={log.answerSeconds == null && isAnswered(log.status) ? 'המרכזיה לא שלחה זמן מענה. ודא שה-webhook כולל שדה answer_sec / answer_time.' : undefined}>
                                         {log.answerSeconds != null ? `${log.answerSeconds} sec` : '—'}
                                     </td>
                                     <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-600">

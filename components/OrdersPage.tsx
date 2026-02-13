@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { Order, Customer, Supplier, Employee, PaymentStatus, LineItem, LineItemUnit, Attachment, Contact, PaymentMethod, AdditionalService, TimelineEvent, AttachmentCategory, OrderType, OrderStatusConfiguration, CustomerPayment, FieldChange, SalesHistoryEntry, AdHocProduct, PriceListProduct, WallPost } from '../types';
 import { PAYMENT_STATUSES_ORDERED, PAYMENT_TERMS_OPTIONS, CUSTOMER_CATEGORIES } from '../constants';
-import { PlusIcon, EditIcon, DeleteIcon, WhatsAppIcon, EmailIcon, PhoneIcon, NoteIcon, TaskIcon, LogIcon, SettingsIcon, LockIcon, CashIcon, DownloadIcon, TruckIcon, InstallationIcon } from './icons';
+import { PlusIcon, EditIcon, DeleteIcon, WhatsAppIcon, EmailIcon, PhoneIcon, NoteIcon, TaskIcon, LogIcon, SettingsIcon, LockIcon, CashIcon, DownloadIcon, TruckIcon, InstallationIcon, CustomersIcon } from './icons';
 import Modal from './Modal';
 import ProductSelectorModal from './ProductSelectorModal';
 import SendItemToSuppliersModal from './SendItemToSuppliersModal';
@@ -12,6 +12,7 @@ import OrdersImportModal from './OrdersImportModal';
 import SearchableSelect from './SearchableSelect';
 import AutoResizeTextarea from './AutoResizeTextarea';
 import { calculateOrderTotals, calculateDueDate, getLineItemEffectiveQuantity } from '../utils/calculations';
+import { getStatusConfigForOrder, getOrderStatusLabel, getStatusConfigByIdOrLabel } from '../utils/statusHelpers';
 import MultiSelectFilter from './MultiSelectFilter';
 import * as mongoService from '../services/mongoService';
 import { getProducts } from '../services/priceListService';
@@ -41,6 +42,8 @@ interface OrdersPageProps {
     statusConfigs: OrderStatusConfiguration[];
     getNextOrderNumber: () => string;
     vatRate: number;
+    onNavigateToPage?: (page: import('../types').Page) => void;
+    setSelectedCustomerId?: (id: string | null) => void;
 }
 
 const getProfitMarginColor = (markup: number): string => {
@@ -701,7 +704,9 @@ const OrderForm: React.FC<{
     setHeaderContent?: (node: React.ReactNode) => void;
     readOnly?: boolean;
     lockedByUserName?: string;
-}> = ({ order, initialCustomerId, initialNewCustomerPhone, customers, setCustomers, suppliers, setSuppliers, employees, onSave, onDraftCreate, onCancel, addActivity, onSwitchOrder, statusConfigs, getNextOrderNumber, vatRate, setHeaderContent, readOnly, lockedByUserName }) => {
+    onNavigateToPage?: (page: import('../types').Page) => void;
+    setSelectedCustomerId?: (id: string | null) => void;
+}> = ({ order, initialCustomerId, initialNewCustomerPhone, customers, setCustomers, suppliers, setSuppliers, employees, onSave, onDraftCreate, onCancel, addActivity, onSwitchOrder, statusConfigs, getNextOrderNumber, vatRate, setHeaderContent, readOnly, lockedByUserName, onNavigateToPage, setSelectedCustomerId }) => {
     
     // Find Dynamic Initial Status
     const initialStatus = useMemo(() => statusConfigs.find(c => c.isLead)?.label || 'ליד חדש', [statusConfigs]);
@@ -2187,7 +2192,7 @@ const OrderForm: React.FC<{
         if (dealStartDateString) {
             finalDealStartDate = new Date(dealStartDateString);
         } else {
-             const statusConfig = statusConfigs.find(c => c.label === formData.orderStatus);
+             const statusConfig = getStatusConfigForOrder(formData, statusConfigs);
              if (statusConfig?.isActiveDeal && !finalDealStartDate) {
                  finalDealStartDate = new Date();
              }
@@ -2213,7 +2218,7 @@ const OrderForm: React.FC<{
                 user: loggedInUserName,
                 type: 'LOG'
             });
-            updatedFormData.statusHistory = [{ status: updatedFormData.orderStatus, startDate: new Date() }];
+            updatedFormData.statusHistory = [{ status: updatedFormData.orderStatus, statusId: getStatusConfigForOrder(updatedFormData, statusConfigs)?.id, startDate: new Date() }];
         } else {
              const diff = generateDiff(originalOrder, { ...updatedFormData, id: order.id, orderNumber: order.orderNumber, date: new Date(dateString) } as Order);
              
@@ -2228,14 +2233,16 @@ const OrderForm: React.FC<{
                  });
              }
 
-             if (originalOrder.orderStatus !== updatedFormData.orderStatus) {
+             if (originalOrder.orderStatus !== updatedFormData.orderStatus || originalOrder.orderStatusId !== updatedFormData.orderStatusId) {
+                 const statusConfig = getStatusConfigForOrder(updatedFormData, statusConfigs);
                  const newStatusHistory = updatedFormData.statusHistory ? [...updatedFormData.statusHistory] : [];
-                 newStatusHistory.push({ status: updatedFormData.orderStatus, startDate: new Date() });
+                 newStatusHistory.push({ status: updatedFormData.orderStatus, statusId: statusConfig?.id, startDate: new Date() });
                  updatedFormData.statusHistory = newStatusHistory;
              }
         }
         
         const finalCreatedAt = (isAdmin && createdAtString) ? new Date(createdAtString) : (formData.createdAt ?? new Date());
+        const statusConfigForSave = getStatusConfigForOrder(updatedFormData, statusConfigs);
         const finalOrder = {
             ...updatedFormData,
             id: order?.id || `ord_${Date.now()}`,
@@ -2244,6 +2251,7 @@ const OrderForm: React.FC<{
             createdAt: finalCreatedAt,
             dealStartDate: updatedFormData.dealStartDate, 
             timeline: finalTimeline,
+            orderStatusId: statusConfigForSave?.id,
         };
 
         // Save sales history and ad-hoc products
@@ -2364,7 +2372,7 @@ const OrderForm: React.FC<{
         onSave(finalOrder);
     };
     
-    const currentStatusConfig = statusConfigs.find(c => c.label === formData.orderStatus);
+    const currentStatusConfig = getStatusConfigForOrder(formData, statusConfigs);
     const isActiveDeal = currentStatusConfig ? (currentStatusConfig.isActiveDeal || currentStatusConfig.isCompleted) : false;
     const hasDealDate = !!formData.dealStartDate;
     const iDealActiveAndDated = isActiveDeal && hasDealDate;
@@ -2634,11 +2642,26 @@ const OrderForm: React.FC<{
                             </div>
                             <div className="space-y-4">
                                 {selectedContact && (
-                                    <div className="bg-white p-4 rounded-lg border border-slate-200 shadow-sm">
-                                        <h5 className="text-sm font-semibold text-slate-800 mb-2">פרטי איש קשר</h5>
-                                        <p className="text-xs text-slate-700"><strong>תפקיד:</strong> {selectedContact.role}</p>
-                                        <p className="text-xs text-slate-700"><strong>טלפון:</strong> {selectedContact.phone}</p>
-                                        <p className="text-xs text-slate-700"><strong>מייל:</strong> {selectedContact.email}</p>
+                                    <div className="bg-white p-4 rounded-lg border border-slate-200 shadow-sm flex items-start gap-3">
+                                        {onNavigateToPage && setSelectedCustomerId && selectedCustomer && (
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    setSelectedCustomerId(selectedCustomer.id);
+                                                    onNavigateToPage('Customers');
+                                                }}
+                                                className="shrink-0 p-2 rounded-lg hover:bg-slate-100 text-primary transition-colors"
+                                                title="פתח כרטיס לקוח"
+                                            >
+                                                <CustomersIcon className="h-8 w-8" />
+                                            </button>
+                                        )}
+                                        <div className="flex-1 min-w-0">
+                                            <h5 className="text-sm font-semibold text-slate-800 mb-2">פרטי איש קשר</h5>
+                                            <p className="text-xs text-slate-700"><strong>תפקיד:</strong> {selectedContact.role}</p>
+                                            <p className="text-xs text-slate-700"><strong>טלפון:</strong> {selectedContact.phone}</p>
+                                            <p className="text-xs text-slate-700"><strong>מייל:</strong> {selectedContact.email}</p>
+                                        </div>
                                     </div>
                                 )}
                             </div>
@@ -3659,7 +3682,7 @@ function getOrdersViewFromStorage(): Partial<{
     return {};
 }
 
-const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLocal, customers, setCustomers, suppliers, setSuppliers, employees, addActivity, initialOpenOrderId, onOrderOpened, openNewOrderRequest, onClearedOpenNewOrderRequest, openNewOrderWithCustomerId, openNewOrderWithPhone, onClearedNewOrderPrefill, statusConfigs, getNextOrderNumber, vatRate }) => {
+const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLocal, customers, setCustomers, suppliers, setSuppliers, employees, addActivity, initialOpenOrderId, onOrderOpened, openNewOrderRequest, onClearedOpenNewOrderRequest, openNewOrderWithCustomerId, openNewOrderWithPhone, onClearedNewOrderPrefill, statusConfigs, getNextOrderNumber, vatRate, onNavigateToPage, setSelectedCustomerId }) => {
     const { user } = useAuth();
     const { trackViewStart, trackViewEnd } = useViewTracker();
     const isAdmin = user?.roleType === 'ADMIN';
@@ -3708,7 +3731,23 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
     const customerOptions = useMemo(() => customers.map(c => ({ value: c.id, label: c.name })), [customers]);
     const supplierOptions = useMemo(() => suppliers.map(s => ({ value: s.id, label: s.name })), [suppliers]);
     const employeeOptions = useMemo(() => employees.map(e => ({ value: e.id, label: e.name })), [employees]);
-    const orderStatusOptions = useMemo(() => (statusConfigs || []).map(s => ({ value: s.label, label: s.label })), [statusConfigs]);
+    const orderStatusOptions = useMemo(() => (statusConfigs || []).map(s => ({ value: s.id, label: s.label })), [statusConfigs]);
+    // Migrate saved filter from labels to ids (once statusConfigs available)
+    const orderStatusFilterMigratedRef = useRef(false);
+    useEffect(() => {
+        if (!statusConfigs?.length || orderStatusFilterMigratedRef.current) return;
+        orderStatusFilterMigratedRef.current = true;
+        setOrderStatusFilter(prev => {
+            const ids = new Set(statusConfigs.map(c => c.id));
+            const hasLegacyLabels = prev.some(f => !ids.has(f));
+            if (!hasLegacyLabels) return prev;
+            const migrated = prev.flatMap(f => {
+                const c = statusConfigs.find(x => x.id === f || x.label === f);
+                return c ? [c.id] : [];
+            });
+            return [...new Set(migrated)];
+        });
+    }, [statusConfigs]);
     const paymentStatusOptions = useMemo(() => PAYMENT_STATUSES_ORDERED.map(s => ({ value: s, label: s })), []);
 
     // Generate available years (current year and last 5 years)
@@ -3740,6 +3779,9 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
 
     const handleEditOrder = async (order: Order) => {
         setOrderLockedByOther(null);
+        setEditingOrder(order);
+        trackViewStart(`order_${order.id}`, 'order', order.id, order.orderNumber);
+        setIsModalOpen(true);
         if (order.id && user?.id) {
             try {
                 const result = await mongoService.acquireOrderLock(order.id, user.name || undefined);
@@ -3750,9 +3792,15 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                 setOrderLockedByOther({ userName: 'משתמש אחר' });
             }
         }
-        setEditingOrder(order);
-        trackViewStart(`order_${order.id}`, 'order', order.id, order.orderNumber);
-        setIsModalOpen(true);
+        // Always fetch latest from server – single source of truth (fixes mismatch between Dashboard/Orders)
+        try {
+            const freshOrder = await mongoService.getOrderById(order.id);
+            setEditingOrder(freshOrder);
+            setOrdersLocal(prev => prev.map(o => o.id === freshOrder.id ? freshOrder : o));
+            setPaginatedOrders(prev => prev.map(o => o.id === freshOrder.id ? freshOrder : o));
+        } catch (err) {
+            console.error('Failed to fetch fresh order:', err);
+        }
     };
 
     // Debounce search: update debouncedSearchTerm 350ms after user stops typing
@@ -3800,11 +3848,12 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
         setCurrentPage(1); // Reset to first page
     };
 
-    const handleStatusChange = async (orderId: string, newStatus: string, orderSnapshot?: Order) => {
+    const handleStatusChange = async (orderId: string, newStatusIdOrLabel: string, orderSnapshot?: Order) => {
         const originalOrder = orderSnapshot ?? paginatedOrders.find(o => o.id === orderId) ?? orders.find(o => o.id === orderId);
-        if (!originalOrder || originalOrder.orderStatus === newStatus) return;
+        const config = statusConfigs.find(c => c.id === newStatusIdOrLabel || c.label === newStatusIdOrLabel);
+        const newStatus = config?.label ?? newStatusIdOrLabel;
+        if (!originalOrder || (originalOrder.orderStatus === newStatus && originalOrder.orderStatusId === config?.id)) return;
         pendingStatusUpdateIdsRef.current.add(orderId);
-        const config = statusConfigs.find(c => c.label === newStatus);
         const isNowActiveDeal = config ? config.isActiveDeal : false;
         let newDealStartDate = originalOrder.dealStartDate;
         if (isNowActiveDeal && !newDealStartDate) {
@@ -3820,10 +3869,11 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                 { field: 'orderStatus', label: 'סטטוס', oldValue: originalOrder.orderStatus, newValue: newStatus, action: 'UPDATED' }
             ]
         };
-        const newStatusHistoryEntry = { status: newStatus, startDate: new Date() };
+        const newStatusHistoryEntry = { status: newStatus, statusId: config?.id, startDate: new Date() };
         const updatedOrder: Order = {
             ...originalOrder,
             orderStatus: newStatus,
+            orderStatusId: config?.id,
             employeeId: user?.id ?? originalOrder.employeeId,
             dealStartDate: newDealStartDate,
             timeline: [logEvent, ...originalOrder.timeline],
@@ -3938,7 +3988,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
             let deduped = Array.from(byKey.values());
             if (sortBy === 'dueDate') {
                 deduped = deduped.filter(order => {
-                    const config = statusConfigs?.find(c => c.label === order.orderStatus);
+                    const config = getStatusConfigForOrder(order, statusConfigs);
                     if (!config?.isActiveDeal && !config?.isCompleted) return false;
                     const { totalAmount, totalPaid } = calculateOrderTotals(order);
                     const currentVat = order.vatRate ?? (vatRate ?? 0);
@@ -3973,7 +4023,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                     acc.totalAmount += t.totalAmount;
                     acc.totalCost += t.totalCost;
                     acc.totalProfit += t.profit;
-                    const config = statusConfigs?.find(c => c.label === order.orderStatus);
+                    const config = getStatusConfigForOrder(order, statusConfigs);
                     const isActiveDeal = config ? (config.isActiveDeal || config.isCompleted) : false;
                     if (isActiveDeal) {
                         const dueWithVat = t.totalAmount * (1 + (vatRate || 0) / 100);
@@ -4123,12 +4173,12 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
     };
 
     const getStatusBadge = (status: string) => {
-        const config = statusConfigs.find(c => c.label === status);
+        const config = getStatusConfigByIdOrLabel(status, statusConfigs);
         return config ? config.color : 'bg-slate-100 text-slate-800';
     };
 
     const calculateStatusDuration = (order: Order): string | null => {
-        const targetStatus = order.orderStatus;
+        const targetStatus = getOrderStatusLabel(order, statusConfigs);
         const now = new Date();
         // Fallback for orders without statusHistory (e.g. imported): use createdAt or date as start
         if (!order.statusHistory || order.statusHistory.length === 0) {
@@ -4177,7 +4227,8 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
     /** מספר הכניסה לסטטוס הנוכחי (1 = פעם ראשונה, 2 = חזרה שנייה, וכו') */
     const getStatusVisitIndex = (order: Order): number => {
         if (!order.statusHistory || order.statusHistory.length === 0) return order.orderStatus ? 1 : 0;
-        return order.statusHistory.filter(e => e.status === order.orderStatus).length;
+        const label = getOrderStatusLabel(order, statusConfigs);
+        return order.statusHistory.filter(e => e.status === label || e.status === order.orderStatus || e.statusId === order.orderStatusId).length;
     };
 
     const getStatusVisitLabel = (visitIndex: number): string | null => {
@@ -4231,7 +4282,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
 
     const buildOrderRow = (order: Order): (string | number)[] => {
         const { totalAmount, profit, totalCost, totalPaid } = calculateOrderTotals(order);
-        const statusConfig = statusConfigs.find(c => c.label === order.orderStatus);
+        const statusConfig = getStatusConfigForOrder(order, statusConfigs);
         const isActiveDeal = statusConfig ? (statusConfig.isActiveDeal || statusConfig.isCompleted) : false;
         const currentOrderVat = order.vatRate ?? vatRate;
         const totalDueWithVat = totalAmount * (1 + currentOrderVat / 100);
@@ -4248,7 +4299,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
             .filter(Boolean) as string[];
         return [
             displayDate ? new Date(displayDate).toLocaleDateString('he-IL') : '—',
-            order.orderStatus || '—',
+            getOrderStatusLabel(order, statusConfigs),
             order.orderNumber || '—',
             (order.description || '').replace(/\n/g, ' '),
             getCustomerName(order.customerId),
@@ -4300,7 +4351,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
             const exportedSum = ordersToExport.reduce(
                 (acc, order) => {
                     const { totalAmount, profit, totalCost, totalPaid } = calculateOrderTotals(order);
-                    const statusConfig = statusConfigs.find(c => c.label === order.orderStatus);
+                    const statusConfig = getStatusConfigForOrder(order, statusConfigs);
                     const isActiveDeal = statusConfig ? (statusConfig.isActiveDeal || statusConfig.isCompleted) : false;
                     const currentOrderVat = order.vatRate ?? vatRate;
                     const totalDueWithVat = totalAmount * (1 + currentOrderVat / 100);
@@ -4386,7 +4437,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                                 <div className="col-span-2"><MultiSelectFilter label="לקוח" options={customerOptions} selectedValues={customerFilter} onChange={(v) => { setCustomerFilter(v); if (v.length === 0) setCustomerIsImportPlaceholderOnly(false); }} /></div>
                                 <div className="col-span-2"><MultiSelectFilter label="עובד" options={employeeOptions} selectedValues={employeeFilter} onChange={setEmployeeFilter} /></div>
                                 <div className="col-span-2"><MultiSelectFilter label="ספק" options={supplierOptions} selectedValues={supplierFilter} onChange={setSupplierFilter} /></div>
-                                <div className="col-span-2"><MultiSelectFilter label="סטטוס" options={orderStatusOptions} selectedValues={orderStatusFilter} onChange={setOrderStatusFilter} /></div>
+                                <div className="col-span-2"><MultiSelectFilter label="סטטוס" options={orderStatusOptions} selectedValues={orderStatusFilter} onChange={setOrderStatusFilter} emptyLabel="עסקאות פעילות בלבד (ללא שהסתיימו)" /></div>
                                 <div className="col-span-2"><label className="block text-[10px] font-black text-slate-400 uppercase mb-1">חיפוש</label><input type="text" placeholder="חיפוש..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)} className="w-full text-xs p-2 border-slate-300 rounded-md min-h-[44px]" /></div>
                                 <div className="col-span-2"><label className="flex items-center gap-2 text-xs font-medium text-slate-600 cursor-pointer"><input type="checkbox" checked={customerIsImportPlaceholderOnly} onChange={e => setCustomerIsImportPlaceholderOnly(e.target.checked)} className="rounded border-slate-300 text-primary" /> הזמנות עם לקוח מייבוא</label></div>
                             </div>
@@ -4452,7 +4503,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                                 <MultiSelectFilter label="ספק" options={supplierOptions} selectedValues={supplierFilter} onChange={setSupplierFilter} />
                             </div>
                             <div>
-                                <MultiSelectFilter label="סטטוס" options={orderStatusOptions} selectedValues={orderStatusFilter} onChange={setOrderStatusFilter} />
+                                <MultiSelectFilter label="סטטוס" options={orderStatusOptions} selectedValues={orderStatusFilter} onChange={setOrderStatusFilter} emptyLabel="עסקאות פעילות בלבד (ללא שהסתיימו)" />
                             </div>
                             <div className="lg:col-span-2">
                                 <label className="block text-[10px] font-black text-slate-400 uppercase mb-1">חיפוש חופשי</label>
@@ -4526,7 +4577,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
             <div className="md:hidden space-y-3 pb-4">
                 {filteredOrders.map((order) => {
                     const { totalAmount, totalPaid } = calculateOrderTotals(order);
-                    const statusConfig = statusConfigs.find(c => c.label === order.orderStatus);
+                    const statusConfig = getStatusConfigForOrder(order, statusConfigs);
                     const isActiveDeal = statusConfig ? (statusConfig.isActiveDeal || statusConfig.isCompleted) : false;
                     const currentOrderVat = order.vatRate ?? vatRate;
                     const totalDueWithVat = totalAmount * (1 + currentOrderVat / 100);
@@ -4541,7 +4592,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                         >
                             <div className="flex justify-between items-start gap-2">
                                 <span className="font-bold text-primary">{order.orderNumber}</span>
-                                <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${getStatusBadge(order.orderStatus)}`}>{order.orderStatus}</span>
+                                <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${getStatusBadge(getOrderStatusLabel(order, statusConfigs))}`}>{getOrderStatusLabel(order, statusConfigs)}</span>
                             </div>
                             <p className="text-sm text-slate-600 mt-1 truncate">{getCustomerName(order.customerId)}</p>
                             <div className="flex flex-wrap items-center gap-2 mt-2 text-xs text-slate-500">
@@ -4581,7 +4632,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                             const profitColorClass = getProfitMarginColor(itemMarkup);
                             const customer = customers.find(c => c.id === order.customerId);
                             const primaryContact = customer?.contacts.find(c => c.isBillingContact) || customer?.contacts[0];
-                            const statusConfig = statusConfigs.find(c => c.label === order.orderStatus);
+                            const statusConfig = getStatusConfigForOrder(order, statusConfigs);
                             const isActiveDeal = statusConfig ? (statusConfig.isActiveDeal || statusConfig.isCompleted) : false;
                             
                             const currentOrderVat = order.vatRate ?? vatRate;
@@ -4644,9 +4695,9 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                                     </td>
                                     <td className="px-4 py-4 whitespace-nowrap text-sm" onClick={e => e.stopPropagation()}>
                                         <div className="relative">
-                                            <select value={order.orderStatus} onChange={(e) => { const v = e.target.value; if (v !== order.orderStatus) setPendingStatusChange({ orderId: order.id, order, newStatus: v }); }} className={`appearance-none w-full cursor-pointer px-2 py-1 text-xs leading-5 font-semibold rounded-full focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary text-center ${getStatusBadge(order.orderStatus)}`} aria-label={`שנה סטטוס עבור הזמנה ${order.orderNumber}`}>
+                                            <select value={order.orderStatusId ?? getStatusConfigForOrder(order, statusConfigs)?.id ?? ''} onChange={(e) => { const v = e.target.value; const currentId = order.orderStatusId ?? getStatusConfigForOrder(order, statusConfigs)?.id; if (v && v !== currentId) setPendingStatusChange({ orderId: order.id, order, newStatus: v }); }} className={`appearance-none w-full cursor-pointer px-2 py-1 text-xs leading-5 font-semibold rounded-full focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary text-center ${getStatusBadge(getOrderStatusLabel(order, statusConfigs))}`} aria-label={`שנה סטטוס עבור הזמנה ${order.orderNumber}`}>
                                                 {statusConfigs.sort((a,b) => a.orderIndex - b.orderIndex).map(config => (
-                                                    <option key={config.id} value={config.label}>{config.label}</option>
+                                                    <option key={config.id} value={config.id}>{config.label}</option>
                                                 ))}
                                             </select>
                                             <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center px-1 text-inherit">
@@ -4884,13 +4935,15 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                         setHeaderContent={setOrderFormHeaderContent}
                         readOnly={!!orderLockedByOther}
                         lockedByUserName={orderLockedByOther?.userName}
+                        onNavigateToPage={onNavigateToPage}
+                        setSelectedCustomerId={setSelectedCustomerId}
                     />
                 </Modal>
             )}
             {pendingStatusChange && (
                 <Modal title="שינוי סטטוס הזמנה" onClose={() => !statusChangeSaving && setPendingStatusChange(null)} size="lg">
                     <p className="text-slate-700 mb-4">
-                        האם לשנות את סטטוס ההזמנה <strong>{pendingStatusChange.order.orderNumber}</strong> ל־<strong>{pendingStatusChange.newStatus}</strong>?
+                        האם לשנות את סטטוס ההזמנה <strong>{pendingStatusChange.order.orderNumber}</strong> ל־<strong>{getStatusConfigByIdOrLabel(pendingStatusChange.newStatus, statusConfigs)?.label ?? pendingStatusChange.newStatus}</strong>?
                     </p>
                     <div className="flex gap-3 justify-end">
                         <button

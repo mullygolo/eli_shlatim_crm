@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { Order, FixedExpense, VariableExpense, Loan, Employee, AttendanceRecord, OrderStatusConfiguration, Debt, Receivable, TransactionStatus, PayrollOverrideMap } from '../types';
 import { calculateOrderTotals, getEmployeeSalaryAtDate } from '../utils/calculations';
+import { getStatusConfigForOrder } from '../utils/statusHelpers';
 import Modal from './Modal';
 
 interface PnLReportProps {
@@ -120,10 +121,9 @@ const PnLReport: React.FC<PnLReportProps> = ({
         let supplierDebtIncl = 0;
         let supplierDebtExcl = 0;
 
-        // Match status by trimmed label; exclude unknown status / אבוד / non-active
-        const getStatusConfig = (statusLabel: string) => statusConfigs.find(c => (c.label || '').trim() === (statusLabel || '').trim());
+        // Match status by id or label; exclude unknown status / אבוד / non-active
         canonicalOrders.forEach(order => {
-            const config = getStatusConfig(order.orderStatus);
+            const config = getStatusConfigForOrder(order, statusConfigs);
             if (!config || config.isLost || !config.isActiveDeal) return;
 
             const { totalAmount, totalPaid } = calculateOrderTotals(order);
@@ -234,9 +234,8 @@ const PnLReport: React.FC<PnLReportProps> = ({
         }
 
         // 1. Process Orders (Income & COGS & VAT) — uses canonicalOrders (one per orderNumber, latest date)
-        const getStatusConfig = (statusLabel: string) => statusConfigs.find(c => (c.label || '').trim() === (statusLabel || '').trim());
         canonicalOrders.forEach((order) => {
-            const config = getStatusConfig(order.orderStatus);
+            const config = getStatusConfigForOrder(order, statusConfigs);
             const skipStatus = !config || config.isLost || !config.isActiveDeal;
             if (skipStatus) return;
 
@@ -278,7 +277,7 @@ const PnLReport: React.FC<PnLReportProps> = ({
         // 1a. Process Customer Payments (VAT Output - Cash Flow Basis)
         // מקור: תשלומי לקוח (order.payments) – אותם נתונים כמו בעמוד הזמנות
         canonicalOrders.forEach((order) => {
-            const config = getStatusConfig(order.orderStatus);
+            const config = getStatusConfigForOrder(order, statusConfigs);
             if (!config || config.isLost || !config.isActiveDeal) return;
             
             const currentVat = order.vatRate ?? vatRate;
@@ -311,7 +310,7 @@ const PnLReport: React.FC<PnLReportProps> = ({
         
         // 1b. Process Supplier Payments (VAT Input - Cash Flow Basis)
         canonicalOrders.forEach(order => {
-            const config = getStatusConfig(order.orderStatus);
+            const config = getStatusConfigForOrder(order, statusConfigs);
             if (!config || config.isLost || !config.isActiveDeal) return;
             
             const currentVat = order.vatRate ?? vatRate;

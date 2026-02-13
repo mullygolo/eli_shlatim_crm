@@ -492,6 +492,8 @@ return <CustomersPage
                             statusConfigs={statusConfigs}
                             getNextOrderNumber={getNextOrderNumber}
                             vatRate={vatRate}
+                            onNavigateToPage={setCurrentPage}
+                            setSelectedCustomerId={setSelectedCustomerId}
                         />;
             case 'Suppliers':
                 return <SuppliersPage 
@@ -576,6 +578,7 @@ return <CustomersPage
                             orders={orders}
                             vatRateHistory={vatRateHistory}
                             onNavigateToOrder={handleNavigateToOrder}
+                            onRefetchData={loadBackgroundData}
                         />;
             case 'PriceList':
                 return <PriceListPage suppliers={suppliers} />;

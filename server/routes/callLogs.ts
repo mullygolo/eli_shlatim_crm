@@ -220,9 +220,9 @@ router.post('/sync', verifyToken, async (req, res) => {
             const status = durationSeconds > 0 ? 'ANSWER' : 'NOANSWER';
 
             // Answer time (seconds until answered) – try common API field names (0 = no answer / forwarded)
-            const rawAnswer = pbxAny.callee_answer_second ?? pbxAny.answer_sec ?? pbxAny.answer_seconds ?? pbxAny.answer_time ?? pbxAny.answer_time_sec;
-            const answerSecondsVal = rawAnswer != null && rawAnswer !== '' ? parseInt(String(rawAnswer), 10) : undefined;
-            const answerSecondsSync = Number.isFinite(answerSecondsVal) && (answerSecondsVal as number) >= 0 ? (answerSecondsVal as number) : undefined;
+            const rawAnswer = pbxAny.callee_answer_second ?? pbxAny.answer_sec ?? pbxAny.answer_seconds ?? pbxAny.answer_time ?? pbxAny.answer_time_sec ?? pbxAny.ring_seconds ?? pbxAny.wait_seconds ?? pbxAny.queue_seconds ?? pbxAny.time_to_answer ?? pbxAny.ring_time ?? pbxAny.wait_time;
+            const parsed = rawAnswer != null && rawAnswer !== '' ? (typeof rawAnswer === 'number' ? Math.floor(rawAnswer) : parseInt(String(rawAnswer), 10)) : undefined;
+            const answerSecondsSync = Number.isFinite(parsed) && (parsed as number) >= 0 ? (parsed as number) : undefined;
 
             // Hangup and callee name – map if API returns them
             const hangupRaw = pbxAny.hangup_reason ?? pbxAny.hangup_by ?? pbxAny.hangupBy;

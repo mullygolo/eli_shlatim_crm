@@ -718,12 +718,15 @@ export interface CallLog {
     file: string;
     caller: string;
     callee: string;
+    calleeName?: string;
     startDate: Date;
     endDate?: Date;
     durationSeconds: number;
+    answerSeconds?: number;
     status: string;
     direction: 'incoming' | 'outgoing' | 'unknown';
     hangupReason?: string;
+    forward?: string;
     /** Recording audio stored in MongoDB (Buffer). Not sent to client; use hasStoredRecording + GET /recording/:uniqueId. */
     recordingData?: Buffer;
 }

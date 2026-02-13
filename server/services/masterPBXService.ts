@@ -14,6 +14,19 @@ export interface MasterPBXCallLog {
     forward?: string;
     incoming_call_charges?: string;
     outgoing_call_charges?: string;
+    /** Optional: we map when present for display */
+    call_direction?: string;
+    direction?: string;
+    callee_answer_second?: number | string;
+    answer_sec?: number | string;
+    answer_seconds?: number | string;
+    answer_time?: number | string;
+    hangup_reason?: string;
+    hangup_by?: string;
+    callee_name?: string;
+    calleeName?: string;
+    agent_name?: string;
+    extension_name?: string;
 }
 
 export interface MasterPBXCallLogResponse {
@@ -65,8 +78,27 @@ export async function fetchCallLogsFromMasterPBX(
         throw new Error(`MasterPBX API returned status: ${result.status}, message: ${result.message}`);
     }
 
-    console.log(`[MasterPBX] Fetched ${result.data?.length || 0} call logs`);
-    return result.data || [];
+    const logs = result.data || [];
+    if (logs.length > 0) {
+        const first = logs[0] as unknown as Record<string, unknown>;
+        console.log('[MasterPBX] First record keys:', Object.keys(first));
+        console.log('[MasterPBX] Sample (charges, answer time, hangup, callee name):', {
+            incoming_call_charges: first.incoming_call_charges,
+            outgoing_call_charges: first.outgoing_call_charges,
+            callee_answer_second: first.callee_answer_second,
+            answer_sec: first.answer_sec,
+            answer_seconds: first.answer_seconds,
+            hangup_reason: first.hangup_reason,
+            hangup_by: first.hangup_by,
+            callee_name: first.callee_name,
+            calleeName: first.calleeName,
+            caller: first.caller,
+            callee: first.callee,
+            forward: first.forward,
+        });
+    }
+    console.log(`[MasterPBX] Fetched ${logs.length} call logs`);
+    return logs;
 }
 
 /**

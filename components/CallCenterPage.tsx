@@ -223,9 +223,12 @@ const CallCenterPage: React.FC = () => {
                         <thead className="bg-slate-50">
                             <tr>
                                 <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">תאריך ושעה</th>
+                                <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">כיוון</th>
                                 <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">מתקשר</th>
                                 <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">נציג</th>
                                 <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">משך</th>
+                                <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">זמן מענה</th>
+                                <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">מי ניתק</th>
                                 <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">סטטוס</th>
                                 <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">פעולה</th>
                             </tr>
@@ -236,14 +239,27 @@ const CallCenterPage: React.FC = () => {
                                     <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-700">
                                         {formatDateTime(log.startDate)}
                                     </td>
+                                    <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-600">
+                                        {log.direction === 'incoming' ? 'נכנס' : log.direction === 'outgoing' ? 'יוצא' : '—'}
+                                    </td>
                                     <td className="px-4 py-3 whitespace-nowrap text-sm font-medium text-slate-900">
                                         {log.caller || '—'}
                                     </td>
                                     <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-600">
-                                        {log.callee || '—'}
+                                        {log.forward != null
+                                            ? `הפניה${log.forward ? ` (${log.forward})` : ''}`
+                                            : [log.callee, log.calleeName].filter(Boolean).join(' ') || '—'}
                                     </td>
                                     <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-600">
                                         {formatDuration(log.durationSeconds)}
+                                    </td>
+                                    <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-600">
+                                        {log.answerSeconds != null ? `${log.answerSeconds} sec` : '—'}
+                                    </td>
+                                    <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-600">
+                                        {log.hangupReason
+                                            ? (log.hangupReason.toUpperCase() === 'CALLER' ? 'מתקשר' : log.hangupReason.toUpperCase() === 'CALLEE' ? 'נציג' : log.hangupReason)
+                                            : '—'}
                                     </td>
                                     <td className="px-4 py-3 whitespace-nowrap">
                                         <span

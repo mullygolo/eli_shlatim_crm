@@ -66,6 +66,74 @@ export function getTodayRangeIsrael(): { start: Date; end: Date } {
 }
 
 /**
+ * Whether the given date (year, month 1-12, day) is in Israel DST (summer time).
+ * Israel DST: from last Friday of March to last Sunday of October.
+ */
+function isIsraelDST(year: number, month: number, day: number): boolean {
+    if (month > 4 && month < 10) return true;  // May–September
+    if (month < 3 || month > 10) return false; // Nov–Feb
+    if (month === 4) return day >= 1;          // April: assume DST (simplified)
+    // March: DST starts last Friday
+    if (month === 3) {
+        const lastDay = new Date(year, 3, 0).getDate();
+        let lastFriday = lastDay;
+        const dow = new Date(year, 2, lastDay).getDay();
+        lastFriday = lastDay - ((dow + 2) % 7);
+        if (lastFriday < 1) lastFriday += 7;
+        return day >= lastFriday;
+    }
+    // October: DST ends last Sunday
+    const lastDay = new Date(year, 10, 0).getDate();
+    let lastSunday = lastDay;
+    const dow = new Date(year, 9, lastDay).getDay();
+    lastSunday = lastDay - dow;
+    if (lastSunday < 1) lastSunday += 7;
+    return day < lastSunday;
+}
+
+/**
+ * Parse a date/time string from the PBX as Israel local time and return a Date (stored as UTC).
+ * Supports: "YYYY-MM-DDTHH:mm:ss", "YYYY-MM-DD HH:mm:ss", "YYYY-MM-DD HH:mm", "DD.MM.YYYY HH:mm", etc.
+ * Use this when the PBX sends times in Israel time without timezone.
+ */
+export function parseDateTimeAsIsrael(s: string | undefined): Date | undefined {
+    if (!s || typeof s !== 'string') return undefined;
+    const trimmed = s.trim();
+    if (!trimmed) return undefined;
+    // Normalize: replace dots and spaces for date part, keep time
+    const match = trimmed.match(
+        /(\d{4})-(\d{2})-(\d{2})[T\s](\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?/i
+    ) || trimmed.match(
+        /(\d{1,2})[./](\d{1,2})[./](\d{4})[\sT](\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?/i
+    );
+    if (!match) {
+        const fallback = new Date(trimmed);
+        if (!isNaN(fallback.getTime())) return fallback;
+        return undefined;
+    }
+    let y: number, m: number, d: number, h: number, min: number, sec: number;
+    if (match[1].length === 4 && parseInt(match[1], 10) > 1900) {
+        y = parseInt(match[1], 10);
+        m = parseInt(match[2], 10);
+        d = parseInt(match[3], 10);
+        h = parseInt(match[4], 10);
+        min = parseInt(match[5], 10);
+        sec = parseInt(match[6] || '0', 10);
+    } else {
+        d = parseInt(match[1], 10);
+        m = parseInt(match[2], 10);
+        y = parseInt(match[3], 10);
+        h = parseInt(match[4], 10);
+        min = parseInt(match[5], 10);
+        sec = parseInt(match[6] || '0', 10);
+    }
+    const offset = isIsraelDST(y, m, d) ? '+03:00' : '+02:00';
+    const iso = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}T${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}:${String(sec).padStart(2, '0')}${offset}`;
+    const date = new Date(iso);
+    return isNaN(date.getTime()) ? undefined : date;
+}
+
+/**
  * Get yesterday's date string in Israel timezone
  */
 export function getYesterdayStringIsrael(): string {

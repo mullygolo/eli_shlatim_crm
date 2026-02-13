@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { getCallLogs, getCallLogByUniqueId, upsertCallLogByUniqueId } from '../services/mongoService.js';
 import { verifyToken } from '../middleware/auth.js';
 import { fetchCallLogsFromMasterPBX } from '../services/masterPBXService.js';
+import { parseDateTimeAsIsrael } from '../utils/timezone.js';
 import type { CallLog } from '../types.js';
 
 const router = Router();
@@ -41,8 +42,12 @@ router.get('/recording/:uniqueId', verifyToken, async (req, res) => {
 
 /**
  * POST /api/call-logs/sync
- * Sync call history from MasterPBX API for a date range
+ * Sync call history from MasterPBX API for a date range.
  * Body: { startDate: "YYYY-MM-DD", endDate: "YYYY-MM-DD", number?: string }
+ *
+ * Expected API fields (we map when present): tenant_id, start_date, end_date, caller, callee,
+ * forward, incoming_call_charges, outgoing_call_charges; optional: callee_answer_second,
+ * answer_sec, answer_seconds, answer_time, hangup_reason, hangup_by, callee_name, calleeName, agent_name, extension_name.
  */
 router.post('/sync', verifyToken, async (req, res) => {
     try {
@@ -76,41 +81,71 @@ router.post('/sync', verifyToken, async (req, res) => {
             // Use tenant_id + start_date + caller + callee as unique identifier
             const uniqueId = `${pbxLog.tenant_id}_${pbxLog.start_date}_${pbxLog.caller}_${pbxLog.callee}`;
 
-            // Parse dates
-            const startDateObj = new Date(pbxLog.start_date);
-            const endDateObj = new Date(pbxLog.end_date);
+            // Parse dates as Israel time (PBX sends local Israel time)
+            const startDateObj = parseDateTimeAsIsrael(pbxLog.start_date) ?? new Date(pbxLog.start_date);
+            const endDateObj = parseDateTimeAsIsrael(pbxLog.end_date) ?? new Date(pbxLog.end_date);
 
             // Calculate duration in seconds
             const durationSeconds = Math.floor((endDateObj.getTime() - startDateObj.getTime()) / 1000);
 
-            // Determine direction: if caller is extension-like (short number) and callee is external, it's outgoing
-            // If caller is external and callee is extension-like, it's incoming
-            // This is heuristic - MasterPBX doesn't provide direction field
-            const callerIsExtension = /^\d{2,4}$/.test(pbxLog.caller);
-            const calleeIsExtension = /^\d{2,4}$/.test(pbxLog.callee);
+            // Determine direction: use charges when available; support comma as decimal separator and alternate keys
+            const parseCharge = (v: unknown): number => {
+                const s = String(v ?? '0').trim().replace(',', '.');
+                const n = parseFloat(s);
+                return Number.isFinite(n) ? n : 0;
+            };
+            const pbxAny = pbxLog as unknown as Record<string, unknown>;
+            const apiDir = pbxAny.call_direction ?? pbxAny.direction ?? pbxAny.callDirection;
+            const apiDirStr = apiDir != null && apiDir !== '' ? String(apiDir).trim().toLowerCase() : '';
             let direction: 'incoming' | 'outgoing' | 'unknown' = 'unknown';
-            if (callerIsExtension && !calleeIsExtension) {
-                direction = 'outgoing';
-            } else if (!callerIsExtension && calleeIsExtension) {
+            if (apiDirStr === 'inbound' || apiDirStr === 'incoming' || apiDirStr === 'in' || apiDirStr === '1') {
                 direction = 'incoming';
+            } else if (apiDirStr === 'outbound' || apiDirStr === 'outgoing' || apiDirStr === 'out' || apiDirStr === '2') {
+                direction = 'outgoing';
+            }
+            if (direction === 'unknown') {
+                const outCh = parseCharge(pbxAny.outgoing_call_charges ?? pbxAny.outgoingCallCharges ?? 0);
+                const inCh = parseCharge(pbxAny.incoming_call_charges ?? pbxAny.incomingCallCharges ?? 0);
+                const callerIsExtension = /^\d{2,5}$/.test(String(pbxLog.caller));
+                const calleeIsExtension = /^\d{2,5}$/.test(String(pbxLog.callee));
+                if (outCh > 0 && inCh <= 0) direction = 'outgoing';
+                else if (inCh > 0 && outCh <= 0) direction = 'incoming';
+                else if (callerIsExtension && !calleeIsExtension) direction = 'outgoing';
+                else if (!callerIsExtension && calleeIsExtension) direction = 'incoming';
+                else if (outCh > 0 && inCh > 0) direction = outCh >= inCh ? 'outgoing' : 'incoming';
+                else if (durationSeconds > 0) direction = 'incoming';
             }
 
             // Determine status - MasterPBX doesn't provide call_status, infer from duration
             // If duration > 0, likely answered; if 0 or very short, might be missed
             const status = durationSeconds > 0 ? 'ANSWER' : 'NOANSWER';
 
+            // Answer time (seconds until answered) – try common API field names (0 = no answer / forwarded)
+            const rawAnswer = pbxAny.callee_answer_second ?? pbxAny.answer_sec ?? pbxAny.answer_seconds ?? pbxAny.answer_time ?? pbxAny.answer_time_sec;
+            const answerSecondsVal = rawAnswer != null && rawAnswer !== '' ? parseInt(String(rawAnswer), 10) : undefined;
+            const answerSecondsSync = Number.isFinite(answerSecondsVal) && (answerSecondsVal as number) >= 0 ? (answerSecondsVal as number) : undefined;
+
+            // Hangup and callee name – map if API returns them
+            const hangupRaw = pbxAny.hangup_reason ?? pbxAny.hangup_by ?? pbxAny.hangupBy;
+            const hangupReasonSync = hangupRaw != null && String(hangupRaw).trim() !== '' ? String(hangupRaw).trim() : undefined;
+            const calleeNameRaw = pbxAny.callee_name ?? pbxAny.calleeName ?? pbxAny.agent_name ?? pbxAny.extension_name;
+            const calleeNameSync = calleeNameRaw != null && String(calleeNameRaw).trim() !== '' ? String(calleeNameRaw).trim() : undefined;
+
             const callLog: CallLog = {
                 id: `call_${Date.now()}_${uniqueId}`,
                 uniqueId,
-                file: '', // Recording path not available in call log response - would need separate API call with callid
+                file: '',
                 caller: pbxLog.caller,
                 callee: pbxLog.callee,
+                calleeName: calleeNameSync,
                 startDate: startDateObj,
                 endDate: endDateObj,
                 durationSeconds: Math.max(0, durationSeconds),
+                answerSeconds: answerSecondsSync,
                 status,
                 direction,
-                hangupReason: undefined,
+                hangupReason: hangupReasonSync,
+                forward: pbxLog.forward?.trim() || undefined,
             };
 
             try {

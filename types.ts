@@ -723,12 +723,19 @@ export interface CallLog {
     file: string;
     caller: string;
     callee: string;
+    /** Display name of extension/agent when extension answered. */
+    calleeName?: string;
     startDate: Date;
     endDate?: Date;
     durationSeconds: number;
+    /** Seconds until call was answered (answer time). */
+    answerSeconds?: number;
     status: string;
     direction: 'incoming' | 'outgoing' | 'unknown';
+    /** Who hung up (e.g. CALLER, CALLEE). */
     hangupReason?: string;
+    /** Forward target when call was forwarded; if set, show "הפניה" in agent column. */
+    forward?: string;
     /** True when the recording binary is stored in MongoDB (use GET /api/call-logs/recording/:uniqueId to play). */
     hasStoredRecording?: boolean;
 }

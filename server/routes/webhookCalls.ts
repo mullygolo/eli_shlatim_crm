@@ -1,14 +1,9 @@
 import { Router, Request, Response } from 'express';
 import { upsertCallLogByUniqueId, updateCallLogRecordingData } from '../services/mongoService.js';
+import { parseDateTimeAsIsrael } from '../utils/timezone.js';
 import type { CallLog } from '../types.js';
 
 const router = Router();
-
-function parseDateTime(s: string | undefined): Date | undefined {
-    if (!s || typeof s !== 'string') return undefined;
-    const d = new Date(s);
-    return isNaN(d.getTime()) ? undefined : d;
-}
 
 function parseNum(s: string | number | undefined): number {
     if (s === undefined || s === null) return 0;
@@ -25,11 +20,20 @@ function normalizeStatus(s: string): string {
     return u || 'UNKNOWN';
 }
 
+/** Get first non-null/undefined value from data for given keys. */
+function firstOf(data: Record<string, unknown>, keys: string[]): string | number | undefined {
+    for (const k of keys) {
+        const v = data[k];
+        if (v !== undefined && v !== null && v !== '') return v as string | number;
+    }
+    return undefined;
+}
+
 /** Map PBX direction (call_direction / direction) to our enum. */
 function normalizeDirection(raw: string | undefined): 'incoming' | 'outgoing' | 'unknown' {
-    const v = (raw || '').toLowerCase();
-    if (v === 'inbound' || v === 'incoming') return 'incoming';
-    if (v === 'outbound' || v === 'outgoing') return 'outgoing';
+    const v = (raw || '').toString().trim().toLowerCase();
+    if (v === 'inbound' || v === 'incoming' || v === 'in' || v === '1') return 'incoming';
+    if (v === 'outbound' || v === 'outgoing' || v === 'out' || v === '2') return 'outgoing';
     return 'unknown';
 }
 
@@ -73,6 +77,27 @@ function fetchAndStoreRecording(uniqueId: string, recordingUrl: string): void {
 }
 
 /**
+ * Expected webhook fields (for display and debugging).
+ * CRM uses the first non-empty value from each group. All except callid can be in body or body.data.
+ *
+ * Required: callid (or call_id)
+ * Direction: call_direction, direction (values: inbound/outbound, in/out, 1/2)
+ * Answer time (seconds until answer, 0 = no answer): answer_sec, answer_seconds, callee_answer_second, answer_time
+ * Forward (target of forward): forward, forward_number, forward_to, forwarded_to
+ * Hangup: hangup_reason, hangup_by, hangupBy (e.g. CALLER, CALLEE, NORMAL_CLEARING)
+ * Callee name: callee_name, calleeName, agent_name, extension_name
+ * Recording: file, sound_file, recording, recording_url (URL) or sound_file_base64, recording_base64 (base64)
+ */
+const WEBHOOK_EXPECTED_FIELDS = {
+    required: ['callid', 'call_id'],
+    direction: ['call_direction', 'direction', 'callDirection'],
+    answerTime: ['answer_sec', 'answer_seconds', 'callee_answer_second', 'answer_time', 'answer_time_sec'],
+    forward: ['forward', 'forward_number', 'forward_to', 'forwarded_to'],
+    hangup: ['hangup_reason', 'hangup_by', 'hangupBy'],
+    calleeName: ['callee_name', 'calleeName', 'agent_name', 'extension_name'],
+};
+
+/**
  * GET /api/webhook/calls – sanity check that the URL is reachable.
  * Use in browser or PBX "test" to verify. Real data arrives via POST.
  */
@@ -80,16 +105,16 @@ router.get('/calls', (_req: Request, res: Response) => {
     res.status(200).json({
         ok: true,
         message: 'Webhook endpoint ready. Use POST to send call data.',
-        expects: 'JSON with callid (and optionally file, data, caller, callee, call_status, call_sec, etc.)'
+        expects: WEBHOOK_EXPECTED_FIELDS,
+        required: ['callid or call_id'],
+        optional: 'direction, answer_sec, forward, hangup_reason, callee_name, file/sound_file, start_date, caller, callee, call_status, call_sec, end_date',
     });
 });
 
 /**
  * POST /api/webhook/calls
  * Receives PBX webhook payload. No auth – PBX calls from external server.
- * Expects JSON: { file?: string, data?: { 
- * , start_date, caller, callee, call_status, call_sec, end_date?, hangup_reason?, direction? } }
- * or flat: { file, callid, start_date, ... }
+ * Supports nested body.data or flat body. See WEBHOOK_EXPECTED_FIELDS for all supported field names.
  */
 /** Log which recording-related fields the PBX sent and in what format (for debugging). */
 function logRecordingFields(body: Record<string, unknown>, data: Record<string, unknown>): void {
@@ -116,35 +141,66 @@ function logRecordingFields(body: Record<string, unknown>, data: Record<string, 
     }
 }
 
+/** Log direction, forward, answer time, hangup, callee name – to see what PBX sends. */
+function logPbxPayloadSummary(data: Record<string, unknown>): void {
+    const summary: Record<string, unknown> = {};
+    for (const key of [...WEBHOOK_EXPECTED_FIELDS.direction, ...WEBHOOK_EXPECTED_FIELDS.forward, ...WEBHOOK_EXPECTED_FIELDS.answerTime, ...WEBHOOK_EXPECTED_FIELDS.hangup, ...WEBHOOK_EXPECTED_FIELDS.calleeName]) {
+        if (data[key] !== undefined && data[key] !== null) summary[key] = data[key];
+    }
+    if (Object.keys(summary).length > 0) {
+        console.log('[Webhook /calls] PBX payload (direction, forward, answer, hangup, callee name):', JSON.stringify(summary));
+    }
+    console.log('[Webhook /calls] All keys in data:', Object.keys(data || {}));
+}
+
 router.post('/calls', async (req: Request, res: Response) => {
     try {
         const body = req.body as Record<string, unknown>;
         const data = (body.data as Record<string, unknown>) || body;
         logRecordingFields(body, data);
+        logPbxPayloadSummary(data);
         const file = getRecordingUrl(body, data);
         const callid = String(data.callid ?? data.call_id ?? '').trim();
-        console.log('[Webhook /calls] POST received', { hasBody: !!body, keys: Object.keys(body || {}), callid: callid || '(missing)' });
+        console.log('[Webhook /calls] POST received', { hasBody: !!body, callid: callid || '(missing)' });
         if (!callid) {
             console.warn('[Webhook /calls] Rejected: missing callid. Body sample:', JSON.stringify(body || {}).slice(0, 500));
             return res.status(400).json({ error: 'Missing callid', ok: false });
         }
 
-        const startDate = parseDateTime(data.start_date as string);
-        const endDate = parseDateTime(data.end_date as string);
-        const direction = normalizeDirection((data.call_direction ?? data.direction) as string);
+        const startDate = parseDateTimeAsIsrael(data.start_date as string);
+        const endDate = parseDateTimeAsIsrael(data.end_date as string);
+        const direction = normalizeDirection(firstOf(data, WEBHOOK_EXPECTED_FIELDS.direction) as string);
+
+        const rawAnswer = firstOf(data, WEBHOOK_EXPECTED_FIELDS.answerTime);
+        const answerNum = rawAnswer !== undefined ? parseNum(rawAnswer as string | number) : undefined;
+        const answerSeconds = answerNum !== undefined && answerNum >= 0 ? answerNum : undefined;
+
+        const rawForward = firstOf(data, WEBHOOK_EXPECTED_FIELDS.forward);
+        const forwardStr = rawForward !== undefined ? String(rawForward).trim() : undefined;
+        const hasForwardKey = WEBHOOK_EXPECTED_FIELDS.forward.some((k) => data[k] !== undefined && data[k] !== null);
+        const forward = hasForwardKey ? (forwardStr ?? String(data.forward ?? data.forward_number ?? data.forward_to ?? data.forwarded_to ?? '').trim()) : undefined;
+
+        const rawHangup = firstOf(data, WEBHOOK_EXPECTED_FIELDS.hangup);
+        const hangupReason = rawHangup !== undefined ? String(rawHangup).trim() : undefined;
+
+        const rawCalleeName = firstOf(data, WEBHOOK_EXPECTED_FIELDS.calleeName);
+        const calleeName = rawCalleeName !== undefined ? String(rawCalleeName).trim() : undefined;
 
         const callLog: CallLog = {
             id: `call_${Date.now()}_${callid}`,
             uniqueId: callid,
             file,
-            caller: String(data.caller ?? '').trim(),
-            callee: String(data.callee ?? '').trim(),
+            caller: String(data.caller ?? data.caller_id ?? '').trim(),
+            callee: String(data.callee ?? data.callee_id ?? '').trim(),
+            calleeName: calleeName || undefined,
             startDate: startDate ?? new Date(),
             endDate: endDate,
-            durationSeconds: parseNum((data.call_sec ?? data.duration_seconds) as string | number | undefined),
+            durationSeconds: parseNum((data.call_sec ?? data.duration_seconds ?? data.duration) as string | number | undefined),
+            answerSeconds,
             status: normalizeStatus(String(data.call_status ?? data.status ?? '')),
             direction,
-            hangupReason: data.hangup_reason != null ? String(data.hangup_reason) : undefined,
+            hangupReason: hangupReason || undefined,
+            forward,
         };
 
         await upsertCallLogByUniqueId(callLog);

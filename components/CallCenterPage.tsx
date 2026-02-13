@@ -1,8 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { CallLog } from '../types';
+import { createPortal } from 'react-dom';
+import { CallLog, type Customer, type Contact } from '../types';
 import { PhoneIcon, ImportIcon } from './icons';
 import Modal from './Modal';
-import { getCallLogsPaginated, getCallLogsStats, getCallLogsAgents, inferCallLogDirection, syncCallLogs, getCallLogRecordingBlob, matchPhones, matchSupplierPhones, getRelevantOrdersForCustomers, type RelevantOrderSummary, type CallLogsStatsResult, type CallLogsAgentItem } from '../services/mongoService';
+import CustomerSyncBadges from './CustomerSyncBadges';
+import { getCallLogsPaginated, getCallLogsStats, getCallLogsAgents, inferCallLogDirection, syncCallLogs, getCallLogRecordingBlob, matchPhones, matchSupplierPhones, getRelevantOrdersForCustomers, getCustomersPaginated, getCustomerById, updateCustomer, type RelevantOrderSummary, type CallLogsStatsResult, type CallLogsAgentItem, type CustomerPhoneMatch, type SupplierPhoneMatch } from '../services/mongoService';
 
 const normalizePhone = (s: string): string => (s || '').replace(/\D/g, '');
 
@@ -86,10 +88,18 @@ function getWebhookCallsUrl(): string {
     return `${base || ''}/api/webhook/calls`;
 }
 
+/** Format customer for display: contact name · customer name when contact exists, else customer name. */
+const formatCustomerDisplay = (m: CustomerPhoneMatch): string =>
+    m.contactName ? `${m.contactName} · ${m.customerName}` : m.customerName;
+
+/** Format supplier badge text: include contact name when present. */
+const formatSupplierDisplay = (s: SupplierPhoneMatch): string =>
+    s.contactName ? `ספק: ${s.supplierName} (איש קשר: ${s.contactName})` : `ספק: ${s.supplierName}`;
+
 const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSelectedCustomerId, onNewOrderWithCustomer, onNewOrderWithPhone, onNewCustomerWithPhone, onNavigateToOrder }) => {
     const [logs, setLogs] = useState<CallLog[]>([]);
-    const [phoneMatches, setPhoneMatches] = useState<Record<string, { customerId: string; customerName: string }[]>>({});
-    const [supplierMatches, setSupplierMatches] = useState<Record<string, { supplierId: string; supplierName: string }[]>>({});
+    const [phoneMatches, setPhoneMatches] = useState<Record<string, CustomerPhoneMatch[]>>({});
+    const [supplierMatches, setSupplierMatches] = useState<Record<string, SupplierPhoneMatch[]>>({});
     const [relevantOrdersByCustomer, setRelevantOrdersByCustomer] = useState<Record<string, RelevantOrderSummary[]>>({});
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
@@ -103,6 +113,7 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
     const [openCustomerDropdownLogId, setOpenCustomerDropdownLogId] = useState<string | null>(null);
     const customerDropdownRef = useRef<HTMLDivElement>(null);
     const [openOrdersDropdownLogId, setOpenOrdersDropdownLogId] = useState<string | null>(null);
+    const [ordersDropdownAnchor, setOrdersDropdownAnchor] = useState<{ top: number; left: number; width: number; height: number; customerId: string } | null>(null);
     const ordersDropdownRef = useRef<HTMLDivElement>(null);
     const [playingAudioLoading, setPlayingAudioLoading] = useState(false);
     const [showSyncModal, setShowSyncModal] = useState(false);
@@ -112,6 +123,16 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
     const [syncStartDate, setSyncStartDate] = useState('');
     const [syncEndDate, setSyncEndDate] = useState('');
     const [webhookCopied, setWebhookCopied] = useState(false);
+    const [addContactForPhone, setAddContactForPhone] = useState<string | null>(null);
+    const [addContactSearchTerm, setAddContactSearchTerm] = useState('');
+    const [addContactDebouncedSearchTerm, setAddContactDebouncedSearchTerm] = useState('');
+    const [addContactSearchResults, setAddContactSearchResults] = useState<Customer[]>([]);
+    const [addContactSearchLoading, setAddContactSearchLoading] = useState(false);
+    const [addContactSelectedId, setAddContactSelectedId] = useState<string | null>(null);
+    const [addContactName, setAddContactName] = useState('');
+    const [addContactEmail, setAddContactEmail] = useState('');
+    const [addContactSaving, setAddContactSaving] = useState(false);
+    const addContactSearchInputRef = useRef<HTMLInputElement>(null);
 
     // Summary stats: date range and agent filter (default 'all' so all calls are visible)
     const [datePreset, setDatePreset] = useState<DatePreset>('all');
@@ -211,6 +232,66 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
             .catch(() => setSupplierMatches({}));
     }, [logs]);
 
+    useEffect(() => {
+        if (!addContactForPhone) {
+            setAddContactSearchTerm('');
+            setAddContactDebouncedSearchTerm('');
+            setAddContactSearchResults([]);
+            setAddContactSelectedId(null);
+            setAddContactName('');
+            setAddContactEmail('');
+            return;
+        }
+        setAddContactSearchTerm('');
+        setAddContactDebouncedSearchTerm('');
+        setAddContactSearchResults([]);
+        setAddContactSelectedId(null);
+        setAddContactName('');
+        setAddContactEmail('');
+    }, [addContactForPhone]);
+
+    useEffect(() => {
+        if (!addContactForPhone) return;
+        const t = setTimeout(() => setAddContactDebouncedSearchTerm(addContactSearchTerm), 350);
+        return () => clearTimeout(t);
+    }, [addContactForPhone, addContactSearchTerm]);
+
+    useEffect(() => {
+        setAddContactName('');
+        setAddContactEmail('');
+    }, [addContactSelectedId]);
+
+    useEffect(() => {
+        if (!addContactForPhone) return;
+        const term = addContactDebouncedSearchTerm.trim();
+        if (term.length === 0) {
+            setAddContactSearchResults([]);
+            setAddContactSearchLoading(false);
+            return;
+        }
+        const ac = new AbortController();
+        setAddContactSearchLoading(true);
+        getCustomersPaginated({ searchTerm: term }, 1, 20, { signal: ac.signal })
+            .then((res) => {
+                setAddContactSearchResults(res.customers || []);
+                setAddContactSelectedId(null);
+            })
+            .catch((err) => {
+                if (err?.name !== 'AbortError') setAddContactSearchResults([]);
+            })
+            .finally(() => {
+                if (!ac.signal.aborted) setAddContactSearchLoading(false);
+            });
+        return () => ac.abort();
+    }, [addContactForPhone, addContactDebouncedSearchTerm]);
+
+    useEffect(() => {
+        if (addContactForPhone && addContactSearchInputRef.current) {
+            const t = setTimeout(() => addContactSearchInputRef.current?.focus(), 100);
+            return () => clearTimeout(t);
+        }
+    }, [addContactForPhone]);
+
     const fetchRelevantOrders = React.useCallback(() => {
         const customerIds = [...new Set(Object.values(phoneMatches).flat().map(m => m.customerId))];
         if (customerIds.length === 0) {
@@ -251,6 +332,7 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
             if (!inCustomer && !inOrders) {
                 setOpenCustomerDropdownLogId(null);
                 setOpenOrdersDropdownLogId(null);
+                setOrdersDropdownAnchor(null);
             }
         };
         document.addEventListener('mousedown', handleClickOutside);
@@ -596,8 +678,8 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
                                             const supplierBlock = supplierList.length > 0 && (
                                                 <div className="flex flex-wrap items-center gap-1 mb-1">
                                                     {supplierList.map((s) => (
-                                                        <span key={s.supplierId} className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-800 border border-amber-200" title="מתקשר מזוהה כספק">
-                                                            ספק: {s.supplierName}
+                                                        <span key={s.supplierId} className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-800 border border-amber-200" title={s.contactName ? `מתקשר מזוהה כספק – איש קשר: ${s.contactName}` : 'מתקשר מזוהה כספק'}>
+                                                            {formatSupplierDisplay(s)}
                                                         </span>
                                                     ))}
                                                 </div>
@@ -609,13 +691,17 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
                                                         <div className="inline-flex flex-col gap-1">
                                                             {supplierBlock}
                                                             {hasPhone && (
-                                                                <span className="inline-flex flex-wrap items-center gap-1">
-                                                                    {canNewCustomerFromPhone && (
-                                                                        <button type="button" onClick={() => onNewCustomerWithPhone!(phone)} className="text-xs px-2 py-1 rounded bg-emerald-100 text-emerald-800 hover:bg-emerald-200">לקוח חדש</button>
-                                                                    )}
-                                                                    {canNewOrderFromPhone && (
-                                                                        <button type="button" onClick={() => onNewOrderWithPhone!(phone)} className="text-xs px-2 py-1 rounded bg-primary/10 text-primary hover:bg-primary/20">הזמנה חדשה</button>
-                                                                    )}
+                                                                <span className="inline-flex flex-col gap-0.5">
+                                                                    <span className="inline-flex flex-wrap items-center gap-1">
+                                                                        {canNewCustomerFromPhone && (
+                                                                            <button type="button" onClick={() => onNewCustomerWithPhone!(phone)} className="text-xs px-2 py-1 rounded bg-emerald-100 text-emerald-800 hover:bg-emerald-200">לקוח חדש</button>
+                                                                        )}
+                                                                        {canNewOrderFromPhone && (
+                                                                            <button type="button" onClick={() => onNewOrderWithPhone!(phone)} className="text-xs px-2 py-1 rounded bg-primary/10 text-primary hover:bg-primary/20">הזמנה חדשה</button>
+                                                                        )}
+                                                                        <button type="button" onClick={() => setAddContactForPhone(phone)} className="text-xs px-2 py-1 rounded bg-slate-100 text-slate-700 hover:bg-slate-200 border border-slate-300">שייך ללקוח</button>
+                                                                    </span>
+                                                                    <span className="text-[10px] text-slate-500" title="אם המספר שייך לאיש קשר של לקוח קיים, בחר שייך ללקוח או עדכן את כרטיס הלקוח">ייתכן איש קשר – הוסף את המספר בכרטיס הלקוח</span>
                                                                 </span>
                                                             )}
                                                         </div>
@@ -623,14 +709,20 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
                                                 }
                                                 if (!hasPhone) return '—';
                                                 return (
-                                                    <span className="inline-flex flex-wrap items-center gap-1">
-                                                        {canNewCustomerFromPhone && (
-                                                            <button type="button" onClick={() => onNewCustomerWithPhone!(phone)} className="text-xs px-2 py-1 rounded bg-emerald-100 text-emerald-800 hover:bg-emerald-200">לקוח חדש</button>
+                                                    <span className="inline-flex flex-col gap-0.5">
+                                                        <span className="inline-flex flex-wrap items-center gap-1">
+                                                            {canNewCustomerFromPhone && (
+                                                                <button type="button" onClick={() => onNewCustomerWithPhone!(phone)} className="text-xs px-2 py-1 rounded bg-emerald-100 text-emerald-800 hover:bg-emerald-200">לקוח חדש</button>
+                                                            )}
+                                                            {canNewOrderFromPhone && (
+                                                                <button type="button" onClick={() => onNewOrderWithPhone!(phone)} className="text-xs px-2 py-1 rounded bg-primary/10 text-primary hover:bg-primary/20">הזמנה חדשה</button>
+                                                            )}
+                                                            <button type="button" onClick={() => setAddContactForPhone(phone)} className="text-xs px-2 py-1 rounded bg-slate-100 text-slate-700 hover:bg-slate-200 border border-slate-300">שייך ללקוח</button>
+                                                            {!canNewCustomerFromPhone && !canNewOrderFromPhone && '—'}
+                                                        </span>
+                                                        {(canNewCustomerFromPhone || canNewOrderFromPhone) && (
+                                                            <span className="text-[10px] text-slate-500" title="אם המספר שייך לאיש קשר של לקוח קיים, בחר שייך ללקוח או עדכן את כרטיס הלקוח">ייתכן איש קשר – הוסף את המספר בכרטיס הלקוח</span>
                                                         )}
-                                                        {canNewOrderFromPhone && (
-                                                            <button type="button" onClick={() => onNewOrderWithPhone!(phone)} className="text-xs px-2 py-1 rounded bg-primary/10 text-primary hover:bg-primary/20">הזמנה חדשה</button>
-                                                        )}
-                                                        {!canNewCustomerFromPhone && !canNewOrderFromPhone && '—'}
                                                     </span>
                                                 );
                                             }
@@ -643,36 +735,33 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
                                                         {supplierBlock}
                                                         <div className="inline-flex flex-wrap items-center gap-1">
                                                         {canOpen ? (
-                                                            <button type="button" onClick={() => { setSelectedCustomerId(m.customerId); onNavigateToPage!('Customers'); }} className="text-primary hover:underline truncate text-start" title={m.customerName}>{m.customerName}</button>
+                                                            <button type="button" onClick={() => { setSelectedCustomerId(m.customerId); onNavigateToPage!('Customers'); }} className="text-primary hover:underline truncate text-start" title={formatCustomerDisplay(m)}>{formatCustomerDisplay(m)}</button>
                                                         ) : (
-                                                            <span className="truncate" title={m.customerName}>{m.customerName}</span>
+                                                            <span className="truncate" title={formatCustomerDisplay(m)}>{formatCustomerDisplay(m)}</span>
                                                         )}
                                                         {canNewOrder && (
                                                             <button type="button" onClick={() => onNewOrderWithCustomer(m.customerId)} className="text-xs px-2 py-1 rounded bg-primary/10 text-primary hover:bg-primary/20 shrink-0">הזמנה חדשה</button>
                                                         )}
                                                         {orders.length > 0 && (
-                                                            <div ref={ordersOpen ? ordersDropdownRef : undefined} className="relative inline-block shrink-0">
+                                                            <div className="relative inline-block shrink-0">
                                                                 <button
                                                                     type="button"
-                                                                    onClick={() => setOpenOrdersDropdownLogId(ordersOpen ? null : log.id)}
+                                                                    onClick={(e) => {
+                                                                        if (ordersOpen) {
+                                                                            setOpenOrdersDropdownLogId(null);
+                                                                            setOrdersDropdownAnchor(null);
+                                                                        } else {
+                                                                            const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                                                                            setOrdersDropdownAnchor({ top: rect.top, left: rect.left, width: rect.width, height: rect.height, customerId: m.customerId });
+                                                                            setOpenOrdersDropdownLogId(log.id);
+                                                                        }
+                                                                    }}
                                                                     className="inline-flex items-center gap-1 px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-medium"
                                                                     title="הזמנות רלוונטיות"
                                                                 >
                                                                     {orders.length === 1 ? 'הזמנה 1' : `${orders.length} הזמנות`}
                                                                     <span className="rtl:rotate-180" aria-hidden>▼</span>
                                                                 </button>
-                                                                {ordersOpen && (
-                                                                    <div className="absolute top-full right-0 mt-1 z-50 min-w-[180px] max-h-[220px] overflow-y-auto rounded-lg border border-slate-200 bg-white shadow-lg py-1">
-                                                                        {orders.map((ord) => (
-                                                                            <div key={ord.id} className="px-3 py-2 hover:bg-slate-50 border-b border-slate-100 last:border-0 flex items-center justify-between gap-2">
-                                                                                <span className="text-xs text-slate-800 truncate" title={`${ord.orderNumber} – ${ord.orderStatus}`}>{ord.orderNumber} ({ord.orderStatus})</span>
-                                                                                {onNavigateToOrder && (
-                                                                                    <button type="button" onClick={() => { onNavigateToOrder(ord.id); setOpenOrdersDropdownLogId(null); }} className="text-xs text-primary hover:underline shrink-0">פתח</button>
-                                                                                )}
-                                                                            </div>
-                                                                        ))}
-                                                                    </div>
-                                                                )}
                                                             </div>
                                                         )}
                                                         </div>
@@ -694,44 +783,45 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
                                                         <span className="flex-shrink-0 rtl:rotate-180" aria-hidden>▼</span>
                                                     </button>
                                                     {isOpen && (
-                                                        <div className="absolute top-full right-0 mt-1 z-50 min-w-[200px] max-h-[280px] overflow-y-auto rounded-lg border border-slate-200 bg-white shadow-lg py-1">
+                                                        <div className="absolute top-full right-0 mt-1 z-50 min-w-[260px] max-h-[320px] overflow-y-auto rounded-lg border border-slate-200 bg-white shadow-lg py-1">
                                                             {matches.map((m) => {
-                                                                const orders = relevantOrdersByCustomer[m.customerId] || [];
-                                                                const ordersKey = `${log.id}-${m.customerId}`;
-                                                                const ordersOpen = openOrdersDropdownLogId === ordersKey;
-                                                                return (
-                                                                    <div key={m.customerId} className="px-3 py-2 hover:bg-slate-50 border-b border-slate-100 last:border-0">
-                                                                        <div className="text-xs text-slate-800 truncate" title={m.customerName}>{m.customerName}</div>
-                                                                        <span className="flex flex-wrap items-center gap-1 mt-1">
-                                                                            {canOpen && (
-                                                                                <button type="button" onClick={() => { setSelectedCustomerId(m.customerId); onNavigateToPage!('Customers'); setOpenCustomerDropdownLogId(null); }} className="text-xs text-primary hover:underline">פתח לקוח</button>
-                                                                            )}
-                                                                            {canNewOrder && (
-                                                                                <button type="button" onClick={() => { onNewOrderWithCustomer(m.customerId); setOpenCustomerDropdownLogId(null); }} className="text-xs text-primary hover:underline">הזמנה חדשה</button>
-                                                                            )}
-                                                                            {orders.length > 0 && (
-                                                                                <div ref={ordersOpen ? ordersDropdownRef : undefined} className="relative inline-block">
-                                                                                    <button type="button" onClick={() => setOpenOrdersDropdownLogId(ordersOpen ? null : ordersKey)} className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 hover:bg-slate-200">
-                                                                                        {orders.length === 1 ? '1 הזמנה' : `${orders.length} הזמנות`} ▼
-                                                                                    </button>
-                                                                                    {ordersOpen && (
-                                                                                        <div className="absolute top-full right-0 mt-1 z-[60] min-w-[160px] max-h-[180px] overflow-y-auto rounded border border-slate-200 bg-white shadow-lg py-1">
-                                                                                            {orders.map((ord) => (
-                                                                                                <div key={ord.id} className="px-2 py-1.5 hover:bg-slate-50 flex items-center justify-between gap-1 text-xs">
-                                                                                                    <span className="truncate">{ord.orderNumber}</span>
-                                                                                                    {onNavigateToOrder && (
-                                                                                                        <button type="button" onClick={() => { onNavigateToOrder(ord.id); setOpenCustomerDropdownLogId(null); setOpenOrdersDropdownLogId(null); }} className="text-primary hover:underline shrink-0">פתח</button>
-                                                                                                    )}
-                                                                                                </div>
-                                                                                            ))}
-                                                                                        </div>
-                                                                                    )}
-                                                                                </div>
-                                                                            )}
-                                                                        </span>
-                                                                    </div>
-                                                                );
-                                                            })}
+                                                                    const orders = relevantOrdersByCustomer[m.customerId] || [];
+                                                                    const ordersKey = `${log.id}-${m.customerId}`;
+                                                                    const ordersOpen = openOrdersDropdownLogId === ordersKey;
+                                                                    return (
+                                                                        <div key={m.customerId} className="px-3 py-2 hover:bg-slate-50 border-b border-slate-100 last:border-0">
+                                                                            <div className="text-xs text-slate-800 truncate" title={formatCustomerDisplay(m)}>{formatCustomerDisplay(m)}</div>
+                                                                            <span className="flex flex-wrap items-center gap-1 mt-1">
+                                                                                {canOpen && (
+                                                                                    <button type="button" onClick={() => { setSelectedCustomerId(m.customerId); onNavigateToPage!('Customers'); setOpenCustomerDropdownLogId(null); }} className="text-xs text-primary hover:underline">פתח לקוח</button>
+                                                                                )}
+                                                                                {canNewOrder && (
+                                                                                    <button type="button" onClick={() => { onNewOrderWithCustomer(m.customerId); setOpenCustomerDropdownLogId(null); }} className="text-xs text-primary hover:underline">הזמנה חדשה</button>
+                                                                                )}
+                                                                                {orders.length > 0 && (
+                                                                                    <div className="relative inline-block">
+                                                                                        <button
+                                                                                            type="button"
+                                                                                            onClick={(e) => {
+                                                                                                if (ordersOpen) {
+                                                                                                    setOpenOrdersDropdownLogId(null);
+                                                                                                    setOrdersDropdownAnchor(null);
+                                                                                                } else {
+                                                                                                    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                                                                                                    setOrdersDropdownAnchor({ top: rect.top, left: rect.left, width: rect.width, height: rect.height, customerId: m.customerId });
+                                                                                                    setOpenOrdersDropdownLogId(ordersKey);
+                                                                                                }
+                                                                                            }}
+                                                                                            className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 hover:bg-slate-200"
+                                                                                        >
+                                                                                            {orders.length === 1 ? '1 הזמנה' : `${orders.length} הזמנות`} ▼
+                                                                                        </button>
+                                                                                    </div>
+                                                                                )}
+                                                                            </span>
+                                                                        </div>
+                                                                    );
+                                                                })}
                                                         </div>
                                                     )}
                                                 </div>
@@ -861,6 +951,142 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
                     <div className="px-4 py-2 text-center text-slate-500 text-sm border-t border-slate-200">טוען...</div>
                 )}
             </div>
+
+            {ordersDropdownAnchor && createPortal(
+                <div
+                    ref={ordersDropdownRef}
+                    dir="rtl"
+                    className="fixed z-[9999] min-w-[260px] max-w-[min(320px,100vw)] max-h-[320px] overflow-y-auto overflow-x-auto rounded-lg border border-slate-200 bg-white shadow-lg py-1"
+                    style={{ top: ordersDropdownAnchor.top + ordersDropdownAnchor.height + 8, left: ordersDropdownAnchor.left }}
+                >
+                    {(relevantOrdersByCustomer[ordersDropdownAnchor.customerId] || []).map((ord) => (
+                        <div key={ord.id} className="px-3 py-2 hover:bg-slate-50 border-b border-slate-100 last:border-0 flex items-center justify-between gap-2">
+                            <span className="text-xs text-slate-800 truncate" title={`${ord.orderNumber} – ${ord.orderStatus}`}>{ord.orderNumber} ({ord.orderStatus})</span>
+                            {onNavigateToOrder && (
+                                <button type="button" onClick={() => { onNavigateToOrder(ord.id); setOpenOrdersDropdownLogId(null); setOrdersDropdownAnchor(null); }} className="text-xs text-primary hover:underline shrink-0">פתח</button>
+                            )}
+                        </div>
+                    ))}
+                </div>,
+                document.body
+            )}
+
+            {addContactForPhone && (
+                <Modal
+                    title="שייך מספר כאדם קשר ללקוח"
+                    onClose={() => { setAddContactForPhone(null); setAddContactSelectedId(null); }}
+                    size="md"
+                >
+                    <div className="space-y-3 text-start">
+                        <p className="text-xs text-slate-500">
+                            משויך למספר: <strong dir="ltr" className="text-slate-700">{addContactForPhone}</strong>
+                        </p>
+                        <div>
+                            <label className="sr-only">חיפוש לקוח</label>
+                            <input
+                                ref={addContactSearchInputRef}
+                                type="text"
+                                value={addContactSearchTerm}
+                                onChange={(e) => setAddContactSearchTerm(e.target.value)}
+                                placeholder="חיפוש לפי שם לקוח, ח.פ, איש קשר, טלפון או אימייל..."
+                                className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm placeholder:text-slate-400 focus:ring-2 focus:ring-primary/20 focus:border-primary"
+                                aria-label="חיפוש לקוחות"
+                            />
+                        </div>
+                        <div className="min-h-[120px] max-h-60 overflow-y-auto border border-slate-200 rounded-lg bg-slate-50/50">
+                            {addContactSearchLoading ? (
+                                <p className="p-4 text-center text-sm text-slate-500">טוען...</p>
+                            ) : addContactDebouncedSearchTerm.trim().length === 0 ? (
+                                <p className="p-4 text-center text-sm text-slate-500">הקלידו לחיפוש לקוח (שם, ח.פ, טלפון או אימייל)</p>
+                            ) : addContactSearchResults.length === 0 ? (
+                                <p className="p-4 text-center text-sm text-slate-500">לא נמצאו לקוחות התואמים את החיפוש</p>
+                            ) : (
+                                <ul className="divide-y divide-slate-200">
+                                    {addContactSearchResults.map((c) => (
+                                        <li key={c.id}>
+                                            <button
+                                                type="button"
+                                                onClick={() => setAddContactSelectedId(c.id)}
+                                                className={`w-full px-3 py-2 text-right text-sm transition-colors ${addContactSelectedId === c.id ? 'bg-primary/10 text-primary font-medium' : 'hover:bg-white text-slate-800'}`}
+                                            >
+                                                <div className="font-medium">{c.name}</div>
+                                                <div className="text-xs text-slate-500 mt-0.5">
+                                                    {c.businessId ? `ח.פ ${c.businessId}` : '—'}
+                                                </div>
+                                                <CustomerSyncBadges customer={c} compact />
+                                            </button>
+                                        </li>
+                                    ))}
+                                </ul>
+                            )}
+                        </div>
+                        {addContactSelectedId && (
+                            <div className="space-y-2 border-t border-slate-200 pt-3">
+                                <p className="text-xs font-medium text-slate-600">פרטי איש הקשר (אופציונלי)</p>
+                                <input
+                                    type="text"
+                                    value={addContactName}
+                                    onChange={(e) => setAddContactName(e.target.value)}
+                                    placeholder="שם איש קשר (אופציונלי)"
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm placeholder:text-slate-400 focus:ring-2 focus:ring-primary/20 focus:border-primary"
+                                    aria-label="שם איש קשר"
+                                />
+                                <input
+                                    type="email"
+                                    value={addContactEmail}
+                                    onChange={(e) => setAddContactEmail(e.target.value)}
+                                    placeholder="אימייל (אופציונלי)"
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm placeholder:text-slate-400 focus:ring-2 focus:ring-primary/20 focus:border-primary"
+                                    aria-label="אימייל איש קשר"
+                                />
+                            </div>
+                        )}
+                        <button
+                            type="button"
+                            disabled={!addContactSelectedId || addContactSaving}
+                            onClick={async () => {
+                                if (!addContactSelectedId || !addContactForPhone) return;
+                                setAddContactSaving(true);
+                                try {
+                                    const customer = await getCustomerById(addContactSelectedId);
+                                    if (!customer) {
+                                        alert('הלקוח לא נמצא.');
+                                        return;
+                                    }
+                                    const newContact: Contact = {
+                                        id: `cont_${Date.now()}`,
+                                        name: addContactName.trim(),
+                                        email: addContactEmail.trim(),
+                                        phone: addContactForPhone,
+                                        role: 'איש קשר',
+                                        isBillingContact: false,
+                                        isDefault: (customer.contacts || []).length === 0,
+                                    };
+                                    await updateCustomer({
+                                        ...customer,
+                                        contacts: [...(customer.contacts || []), newContact],
+                                    });
+                                    const phones = [...new Set(logs.flatMap((log) => [log.caller, log.callee].filter(Boolean).map(String)))];
+                                    await matchPhones(phones).then(setPhoneMatches);
+                                    await matchSupplierPhones(phones).then(setSupplierMatches);
+                                    setAddContactForPhone(null);
+                                    setAddContactSelectedId(null);
+                                    setAddContactName('');
+                                    setAddContactEmail('');
+                                } catch (e) {
+                                    console.error(e);
+                                    alert('שגיאה בהוספת איש הקשר. נסה שוב.');
+                                } finally {
+                                    setAddContactSaving(false);
+                                }
+                            }}
+                            className="w-full px-4 py-2.5 rounded-lg bg-primary text-white text-sm font-medium hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                            {addContactSaving ? 'מוסיף...' : 'הוסף כאדם קשר'}
+                        </button>
+                    </div>
+                </Modal>
+            )}
 
             {playingLog && (
                 <Modal

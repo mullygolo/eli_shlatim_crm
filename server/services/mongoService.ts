@@ -884,12 +884,12 @@ export async function getOrdersPaginated(filters: any, page: number = 1, limit: 
         const [statusConfigs, customers] = await Promise.all([getStatusConfigs(), getCustomers()]);
 
         const sortBy = filters.sortBy === 'dueDate' || filters.sortBy === 'updatedAt' ? filters.sortBy : 'date';
-        // When orderStatusFilter is empty: "מועד תשלום" overrides default – show all isActiveDeal (incl. completed) with balance due; otherwise active-only
+        // When orderStatusFilter is empty: "מועד תשלום" overrides default – show all isActiveDeal (incl. completed) with balance due; otherwise active + lead + quote
         const effectiveFilters = { ...filters };
         if (!effectiveFilters.orderStatusFilter || effectiveFilters.orderStatusFilter.length === 0) {
             const configs = sortBy === 'dueDate'
                 ? statusConfigs.filter(c => c.isActiveDeal)
-                : statusConfigs.filter(c => c.isActiveDeal && !c.isCompleted);
+                : statusConfigs.filter(c => (c.isActiveDeal && !c.isCompleted) || c.isLead || c.isQuote);
             effectiveFilters.orderStatusFilter = [...configs.map(c => c.id), ...configs.map(c => c.label)];
         }
         const { orders: allMatchingOrders, allMatchingDocs } = await getFilteredOrderSet(collection, effectiveFilters, statusConfigs, customers);
@@ -3966,29 +3966,38 @@ function normalizePhone(s: string): string {
     return (s || '').replace(/\D/g, '');
 }
 
+/** Single customer match for a phone (includes contact when match is via contact.phone). */
+export type CustomerPhoneMatch = { customerId: string; customerName: string; contactId?: string; contactName?: string };
+
 /**
  * For each requested phone, return all customers (id, name) whose any contact.phone matches (after normalizing).
+ * When the match is via a contact, includes contactId and contactName for that contact.
  * Keys in result are normalized phones; value is array so one phone can match multiple customers.
  */
-export async function getCustomersByPhones(phones: string[]): Promise<Record<string, { customerId: string; customerName: string }[]>> {
-    const result: Record<string, { customerId: string; customerName: string }[]> = {};
+export async function getCustomersByPhones(phones: string[]): Promise<Record<string, CustomerPhoneMatch[]>> {
+    const result: Record<string, CustomerPhoneMatch[]> = {};
     const requested = [...new Set(phones.map(normalizePhone).filter((p) => p.length >= 6))];
     if (requested.length === 0) return result;
     try {
         const database = await getDb();
         const collection = database.collection<Customer>('customers');
         const docs = await collection
-            .find({}, { projection: { id: 1, name: 1, 'contacts.phone': 1 } })
+            .find({}, { projection: { id: 1, name: 1, 'contacts.phone': 1, 'contacts.name': 1, 'contacts.id': 1 } })
             .limit(15000)
             .toArray();
-        const map = new Map<string, { customerId: string; customerName: string }[]>();
+        const map = new Map<string, CustomerPhoneMatch[]>();
         for (const doc of docs) {
-            const c = doc as { id: string; name: string; contacts?: { phone?: string }[] };
+            const c = doc as { id: string; name: string; contacts?: { phone?: string; name?: string; id?: string }[] };
             const name = (c.name || '').trim();
             for (const contact of c.contacts || []) {
                 const p = normalizePhone(contact.phone || '');
                 if (p.length >= 6) {
-                    const entry = { customerId: c.id, customerName: name };
+                    const entry: CustomerPhoneMatch = {
+                        customerId: c.id,
+                        customerName: name,
+                        contactId: contact.id || undefined,
+                        contactName: (contact.name || '').trim() || undefined,
+                    };
                     if (!map.has(p)) map.set(p, []);
                     const arr = map.get(p)!;
                     if (!arr.some((x) => x.customerId === c.id)) arr.push(entry);
@@ -4006,29 +4015,38 @@ export async function getCustomersByPhones(phones: string[]): Promise<Record<str
     }
 }
 
+/** Single supplier match for a phone (includes contact when match is via contact.phone). */
+export type SupplierPhoneMatch = { supplierId: string; supplierName: string; contactId?: string; contactName?: string };
+
 /**
  * For each requested phone, return all suppliers (id, name) whose any contact.phone matches (after normalizing).
+ * When the match is via a contact, includes contactId and contactName for that contact.
  * Keys in result are normalized phones; value is array so one phone can match multiple suppliers.
  */
-export async function getSuppliersByPhones(phones: string[]): Promise<Record<string, { supplierId: string; supplierName: string }[]>> {
-    const result: Record<string, { supplierId: string; supplierName: string }[]> = {};
+export async function getSuppliersByPhones(phones: string[]): Promise<Record<string, SupplierPhoneMatch[]>> {
+    const result: Record<string, SupplierPhoneMatch[]> = {};
     const requested = [...new Set(phones.map(normalizePhone).filter((p) => p.length >= 6))];
     if (requested.length === 0) return result;
     try {
         const database = await getDb();
         const collection = database.collection<Supplier>('suppliers');
         const docs = await collection
-            .find({}, { projection: { id: 1, name: 1, 'contacts.phone': 1 } })
+            .find({}, { projection: { id: 1, name: 1, 'contacts.phone': 1, 'contacts.name': 1, 'contacts.id': 1 } })
             .limit(5000)
             .toArray();
-        const map = new Map<string, { supplierId: string; supplierName: string }[]>();
+        const map = new Map<string, SupplierPhoneMatch[]>();
         for (const doc of docs) {
-            const s = doc as { id: string; name: string; contacts?: { phone?: string }[] };
+            const s = doc as { id: string; name: string; contacts?: { phone?: string; name?: string; id?: string }[] };
             const name = (s.name || '').trim();
             for (const contact of s.contacts || []) {
                 const p = normalizePhone(contact.phone || '');
                 if (p.length >= 6) {
-                    const entry = { supplierId: s.id, supplierName: name };
+                    const entry: SupplierPhoneMatch = {
+                        supplierId: s.id,
+                        supplierName: name,
+                        contactId: contact.id || undefined,
+                        contactName: (contact.name || '').trim() || undefined,
+                    };
                     if (!map.has(p)) map.set(p, []);
                     const arr = map.get(p)!;
                     if (!arr.some((x) => x.supplierId === s.id)) arr.push(entry);

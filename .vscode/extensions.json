@@ -10,6 +10,11 @@
     "editorconfig.editorconfig",
     "snyk-security.snyk-vscode",
     "wix.vscode-import-cost",
-    "sonarsource.sonarlint-vscode"
+    "sonarsource.sonarlint-vscode",
+    "gruntfuggly.todo-tree",
+    "dsznajder.es7-react-js-snippets",
+    "mhutchie.git-graph",
+    "alefragnani.project-manager",
+    "ms-thunderclient.thunderclient"
   ]
 }

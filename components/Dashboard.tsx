@@ -431,11 +431,13 @@ type LostDealsPeriod = 'THIS_MONTH' | 'LAST_MONTH' | 'LAST_3';
 
 const StrongNumberCard: React.FC<{ 
     orders: Order[]; 
+    customers: Customer[];
     statusConfigs: OrderStatusConfiguration[];
     vatRate: number;
     roleType?: string;
     onNavigateToOrder?: (orderId: string) => void;
-}> = ({ orders, statusConfigs, vatRate, roleType, onNavigateToOrder }) => {
+}> = ({ orders, customers, statusConfigs, vatRate, roleType, onNavigateToOrder }) => {
+    const getCustomerName = (customerId?: string) => customers.find(c => c.id === customerId)?.name ?? '—';
     const isEmployee = roleType === 'EMPLOYEE';
     const [lostDealsPeriod, setLostDealsPeriod] = useState<LostDealsPeriod>('THIS_MONTH');
     const [lostDealsModalOpen, setLostDealsModalOpen] = useState(false);
@@ -993,7 +995,7 @@ const StrongNumberCard: React.FC<{
                     <Modal
                         title="עסקאות אבודות"
                         onClose={() => setLostDealsModalOpen(false)}
-                        size="2xl"
+                        size="6xl"
                     >
                         <div className="space-y-4">
                             <div className="flex items-center gap-2 flex-wrap">
@@ -1018,6 +1020,7 @@ const StrongNumberCard: React.FC<{
                                         <tr>
                                             <th className="px-3 py-2.5 whitespace-nowrap">תאריך</th>
                                             <th className="px-3 py-2.5 whitespace-nowrap">הזמנה</th>
+                                            <th className="px-3 py-2.5 whitespace-nowrap">שם לקוח</th>
                                             <th className="px-3 py-2.5">תיאור</th>
                                             <th className="px-3 py-2.5 whitespace-nowrap tabular-nums">אובדן הכנסה</th>
                                             <th className="px-3 py-2.5 whitespace-nowrap tabular-nums">אובדן רווח</th>
@@ -1025,7 +1028,7 @@ const StrongNumberCard: React.FC<{
                                     </thead>
                                     <tbody className="divide-y divide-slate-100">
                                         {stats.lostDealsList.length === 0 ? (
-                                            <tr><td colSpan={5} className="px-3 py-4 text-slate-500 text-center">אין עסקאות אבודות בתקופה הנבחרת</td></tr>
+                                            <tr><td colSpan={6} className="px-3 py-4 text-slate-500 text-center">אין עסקאות אבודות בתקופה הנבחרת</td></tr>
                                         ) : (
                                             sortOrdersByDate(stats.lostDealsList, 'lost').map((order) => {
                                                 const { totalAmount, profit } = calculateOrderTotals(order);
@@ -1037,7 +1040,8 @@ const StrongNumberCard: React.FC<{
                                                     >
                                                         <td className="px-3 py-2.5 text-slate-600 whitespace-nowrap">{getOrderDisplayDate(order, 'lost').toLocaleDateString('he-IL')}</td>
                                                         <td className="px-3 py-2.5 font-medium text-primary whitespace-nowrap">{order.orderNumber}</td>
-                                                        <td className="px-3 py-2.5 text-slate-700 min-w-[200px] max-w-[360px] line-clamp-2 break-words align-top" title={order.description}>{order.description || '—'}</td>
+                                                        <td className="px-3 py-2.5 text-slate-600 whitespace-nowrap">{getCustomerName(order.customerId)}</td>
+                                                        <td className="px-3 py-2.5 text-slate-700 min-w-[280px] max-w-[520px] line-clamp-2 break-words align-top" title={order.description}>{order.description || '—'}</td>
                                                         <td className="px-3 py-2.5 font-medium tabular-nums">{formatCurrency(totalAmount)}</td>
                                                         <td className="px-3 py-2.5 tabular-nums">{formatCurrency(profit)}</td>
                                                     </tr>
@@ -1053,7 +1057,7 @@ const StrongNumberCard: React.FC<{
 
                 {/* Today's deals modal */}
                 {dailyModalOpen && (
-                    <Modal title="עסקאות שאושרו היום" onClose={() => setDailyModalOpen(false)} size="2xl">
+                    <Modal title="עסקאות שאושרו היום" onClose={() => setDailyModalOpen(false)} size="6xl">
                         <SortBar count={stats.dailyDealsList.length} />
                         <div className="overflow-x-auto max-h-[60vh] border border-slate-200 rounded-lg">
                             <table className="min-w-full text-sm text-right">
@@ -1061,6 +1065,7 @@ const StrongNumberCard: React.FC<{
                                     <tr>
                                         <th className="px-3 py-2.5 whitespace-nowrap">תאריך</th>
                                         <th className="px-3 py-2.5 whitespace-nowrap">הזמנה</th>
+                                        <th className="px-3 py-2.5 whitespace-nowrap">שם לקוח</th>
                                         <th className="px-3 py-2.5">תיאור</th>
                                         <th className="px-3 py-2.5 whitespace-nowrap tabular-nums">הכנסה</th>
                                         <th className="px-3 py-2.5 whitespace-nowrap tabular-nums">רווח</th>
@@ -1068,7 +1073,7 @@ const StrongNumberCard: React.FC<{
                                 </thead>
                                 <tbody className="divide-y divide-slate-100">
                                     {stats.dailyDealsList.length === 0 ? (
-                                        <tr><td colSpan={5} className="px-3 py-4 text-slate-500 text-center">{selectedDailyDate ? `אין עסקאות ב־${dailyCardTitle}` : 'אין עסקאות היום'}</td></tr>
+                                        <tr><td colSpan={6} className="px-3 py-4 text-slate-500 text-center">{selectedDailyDate ? `אין עסקאות ב־${dailyCardTitle}` : 'אין עסקאות היום'}</td></tr>
                                     ) : (
                                         sortOrdersByDate(stats.dailyDealsList, 'deal').map((order) => {
                                             const { totalAmount, profit } = calculateOrderTotals(order);
@@ -1076,7 +1081,8 @@ const StrongNumberCard: React.FC<{
                                                 <tr key={order.id} className="hover:bg-indigo-50/50 cursor-pointer" onClick={() => { onNavigateToOrder?.(order.id); setDailyModalOpen(false); }}>
                                                     <td className="px-3 py-2.5 text-slate-600 whitespace-nowrap">{getOrderDisplayDate(order, 'deal').toLocaleDateString('he-IL')}</td>
                                                     <td className="px-3 py-2.5 font-medium text-primary whitespace-nowrap">{order.orderNumber}</td>
-                                                    <td className="px-3 py-2.5 text-slate-700 min-w-[200px] max-w-[360px] line-clamp-2 break-words align-top" title={order.description}>{order.description || '—'}</td>
+                                                    <td className="px-3 py-2.5 text-slate-600 whitespace-nowrap">{getCustomerName(order.customerId)}</td>
+                                                    <td className="px-3 py-2.5 text-slate-700 min-w-[280px] max-w-[520px] line-clamp-2 break-words align-top" title={order.description}>{order.description || '—'}</td>
                                                     <td className="px-3 py-2.5 font-medium tabular-nums">{formatCurrency(totalAmount)}</td>
                                                     <td className="px-3 py-2.5 tabular-nums">{formatCurrency(profit)}</td>
                                                 </tr>
@@ -1091,7 +1097,7 @@ const StrongNumberCard: React.FC<{
 
                 {/* Month deals modal */}
                 {monthlyModalOpen && (
-                    <Modal title="עסקאות החודש" onClose={() => setMonthlyModalOpen(false)} size="2xl">
+                    <Modal title="עסקאות החודש" onClose={() => setMonthlyModalOpen(false)} size="6xl">
                         <SortBar count={stats.monthlyDealsList.length} />
                         <div className="overflow-x-auto max-h-[60vh] border border-slate-200 rounded-lg">
                             <table className="min-w-full text-sm text-right">
@@ -1099,6 +1105,7 @@ const StrongNumberCard: React.FC<{
                                     <tr>
                                         <th className="px-3 py-2.5 whitespace-nowrap">תאריך</th>
                                         <th className="px-3 py-2.5 whitespace-nowrap">הזמנה</th>
+                                        <th className="px-3 py-2.5 whitespace-nowrap">שם לקוח</th>
                                         <th className="px-3 py-2.5">תיאור</th>
                                         <th className="px-3 py-2.5 whitespace-nowrap tabular-nums">הכנסה</th>
                                         <th className="px-3 py-2.5 whitespace-nowrap tabular-nums">רווח</th>
@@ -1106,7 +1113,7 @@ const StrongNumberCard: React.FC<{
                                 </thead>
                                 <tbody className="divide-y divide-slate-100">
                                     {stats.monthlyDealsList.length === 0 ? (
-                                        <tr><td colSpan={5} className="px-3 py-4 text-slate-500 text-center">אין עסקאות בחודש</td></tr>
+                                        <tr><td colSpan={6} className="px-3 py-4 text-slate-500 text-center">אין עסקאות בחודש</td></tr>
                                     ) : (
                                         sortOrdersByDate(stats.monthlyDealsList, 'deal').map((order) => {
                                             const { totalAmount, profit } = calculateOrderTotals(order);
@@ -1114,7 +1121,8 @@ const StrongNumberCard: React.FC<{
                                                 <tr key={order.id} className="hover:bg-blue-50/50 cursor-pointer" onClick={() => { onNavigateToOrder?.(order.id); setMonthlyModalOpen(false); }}>
                                                     <td className="px-3 py-2.5 text-slate-600 whitespace-nowrap">{getOrderDisplayDate(order, 'deal').toLocaleDateString('he-IL')}</td>
                                                     <td className="px-3 py-2.5 font-medium text-primary whitespace-nowrap">{order.orderNumber}</td>
-                                                    <td className="px-3 py-2.5 text-slate-700 min-w-[200px] max-w-[360px] line-clamp-2 break-words align-top" title={order.description}>{order.description || '—'}</td>
+                                                    <td className="px-3 py-2.5 text-slate-600 whitespace-nowrap">{getCustomerName(order.customerId)}</td>
+                                                    <td className="px-3 py-2.5 text-slate-700 min-w-[280px] max-w-[520px] line-clamp-2 break-words align-top" title={order.description}>{order.description || '—'}</td>
                                                     <td className="px-3 py-2.5 font-medium tabular-nums">{formatCurrency(totalAmount)}</td>
                                                     <td className="px-3 py-2.5 tabular-nums">{formatCurrency(profit)}</td>
                                                 </tr>
@@ -1129,7 +1137,7 @@ const StrongNumberCard: React.FC<{
 
                 {/* Year deals modal */}
                 {yearlyModalOpen && (
-                    <Modal title="עסקאות השנה" onClose={() => setYearlyModalOpen(false)} size="2xl">
+                    <Modal title="עסקאות השנה" onClose={() => setYearlyModalOpen(false)} size="6xl">
                         <SortBar count={stats.yearlyDealsList.length} />
                         <div className="overflow-x-auto max-h-[60vh] border border-slate-200 rounded-lg">
                             <table className="min-w-full text-sm text-right">
@@ -1137,6 +1145,7 @@ const StrongNumberCard: React.FC<{
                                     <tr>
                                         <th className="px-3 py-2.5 whitespace-nowrap">תאריך</th>
                                         <th className="px-3 py-2.5 whitespace-nowrap">הזמנה</th>
+                                        <th className="px-3 py-2.5 whitespace-nowrap">שם לקוח</th>
                                         <th className="px-3 py-2.5">תיאור</th>
                                         <th className="px-3 py-2.5 whitespace-nowrap tabular-nums">הכנסה</th>
                                         <th className="px-3 py-2.5 whitespace-nowrap tabular-nums">רווח</th>
@@ -1144,7 +1153,7 @@ const StrongNumberCard: React.FC<{
                                 </thead>
                                 <tbody className="divide-y divide-slate-100">
                                     {stats.yearlyDealsList.length === 0 ? (
-                                        <tr><td colSpan={5} className="px-3 py-4 text-slate-500 text-center">אין עסקאות השנה</td></tr>
+                                        <tr><td colSpan={6} className="px-3 py-4 text-slate-500 text-center">אין עסקאות השנה</td></tr>
                                     ) : (
                                         sortOrdersByDate(stats.yearlyDealsList, 'deal').map((order) => {
                                             const { totalAmount, profit } = calculateOrderTotals(order);
@@ -1152,7 +1161,8 @@ const StrongNumberCard: React.FC<{
                                                 <tr key={order.id} className="hover:bg-sky-50/50 cursor-pointer" onClick={() => { onNavigateToOrder?.(order.id); setYearlyModalOpen(false); }}>
                                                     <td className="px-3 py-2.5 text-slate-600 whitespace-nowrap">{getOrderDisplayDate(order, 'deal').toLocaleDateString('he-IL')}</td>
                                                     <td className="px-3 py-2.5 font-medium text-primary whitespace-nowrap">{order.orderNumber}</td>
-                                                    <td className="px-3 py-2.5 text-slate-700 min-w-[200px] max-w-[360px] line-clamp-2 break-words align-top" title={order.description}>{order.description || '—'}</td>
+                                                    <td className="px-3 py-2.5 text-slate-600 whitespace-nowrap">{getCustomerName(order.customerId)}</td>
+                                                    <td className="px-3 py-2.5 text-slate-700 min-w-[280px] max-w-[520px] line-clamp-2 break-words align-top" title={order.description}>{order.description || '—'}</td>
                                                     <td className="px-3 py-2.5 font-medium tabular-nums">{formatCurrency(totalAmount)}</td>
                                                     <td className="px-3 py-2.5 tabular-nums">{formatCurrency(profit)}</td>
                                                 </tr>
@@ -1167,7 +1177,7 @@ const StrongNumberCard: React.FC<{
 
                 {/* Collection modal - overdue + this month */}
                 {collectionModalOpen && (
-                    <Modal title="גבייה" onClose={() => setCollectionModalOpen(false)} size="2xl">
+                    <Modal title="גבייה" onClose={() => setCollectionModalOpen(false)} size="6xl">
                         <div className="space-y-4">
                             <section>
                                 <h4 className="text-sm font-bold text-rose-700 mb-2">בחריגה ({stats.collection.overdueOrders.length})</h4>
@@ -1178,6 +1188,7 @@ const StrongNumberCard: React.FC<{
                                             <tr>
                                                 <th className="px-3 py-2.5 whitespace-nowrap">תאריך אישור</th>
                                                 <th className="px-3 py-2.5 whitespace-nowrap">הזמנה</th>
+                                                <th className="px-3 py-2.5 whitespace-nowrap">שם לקוח</th>
                                                 <th className="px-3 py-2.5">תיאור</th>
                                                 <th className="px-3 py-2.5 whitespace-nowrap tabular-nums">יתרה לתשלום</th>
                                                 <th className="px-3 py-2.5 whitespace-nowrap">מועד תשלום</th>
@@ -1185,7 +1196,7 @@ const StrongNumberCard: React.FC<{
                                         </thead>
                                         <tbody className="divide-y divide-slate-100">
                                             {stats.collection.overdueOrders.length === 0 ? (
-                                                <tr><td colSpan={5} className="px-3 py-4 text-slate-500 text-center">אין חריגות</td></tr>
+                                                <tr><td colSpan={6} className="px-3 py-4 text-slate-500 text-center">אין חריגות</td></tr>
                                             ) : (
                                                 sortOrdersByDate(stats.collection.overdueOrders, 'collection').map((order) => {
                                                     const { totalAmount, totalPaid } = calculateOrderTotals(order);
@@ -1198,7 +1209,8 @@ const StrongNumberCard: React.FC<{
                                                         <tr key={order.id} className="hover:bg-rose-50/50 cursor-pointer" onClick={() => { onNavigateToOrder?.(order.id); setCollectionModalOpen(false); }}>
                                                             <td className="px-3 py-2.5 text-slate-600 whitespace-nowrap">{getOrderDisplayDate(order, 'collection').toLocaleDateString('he-IL')}</td>
                                                             <td className="px-3 py-2.5 font-medium text-primary whitespace-nowrap">{order.orderNumber}</td>
-                                                            <td className="px-3 py-2.5 text-slate-700 min-w-[200px] max-w-[360px] line-clamp-2 break-words align-top" title={order.description}>{order.description || '—'}</td>
+                                                            <td className="px-3 py-2.5 text-slate-700 whitespace-nowrap">{getCustomerName(order.customerId)}</td>
+                                                            <td className="px-3 py-2.5 text-slate-700 min-w-[280px] max-w-[520px] line-clamp-2 break-words align-top" title={order.description}>{order.description || '—'}</td>
                                                             <td className="px-3 py-2.5 font-medium tabular-nums">{formatCurrency(balanceInclVat)}</td>
                                                             <td className="px-3 py-2.5 whitespace-nowrap">{new Date(dueDate).toLocaleDateString('he-IL')}</td>
                                                         </tr>
@@ -1218,6 +1230,7 @@ const StrongNumberCard: React.FC<{
                                             <tr>
                                                 <th className="px-3 py-2.5 whitespace-nowrap">תאריך אישור</th>
                                                 <th className="px-3 py-2.5 whitespace-nowrap">הזמנה</th>
+                                                <th className="px-3 py-2.5 whitespace-nowrap">שם לקוח</th>
                                                 <th className="px-3 py-2.5">תיאור</th>
                                                 <th className="px-3 py-2.5 whitespace-nowrap tabular-nums">יתרה לתשלום</th>
                                                 <th className="px-3 py-2.5 whitespace-nowrap">מועד תשלום</th>
@@ -1225,7 +1238,7 @@ const StrongNumberCard: React.FC<{
                                         </thead>
                                         <tbody className="divide-y divide-slate-100">
                                             {stats.collection.thisMonthOrders.length === 0 ? (
-                                                <tr><td colSpan={5} className="px-3 py-4 text-slate-500 text-center">אין תשלומים החודש</td></tr>
+                                                <tr><td colSpan={6} className="px-3 py-4 text-slate-500 text-center">אין תשלומים החודש</td></tr>
                                             ) : (
                                                 sortOrdersByDate(stats.collection.thisMonthOrders, 'collection').map((order) => {
                                                     const { totalAmount, totalPaid } = calculateOrderTotals(order);
@@ -1238,7 +1251,8 @@ const StrongNumberCard: React.FC<{
                                                         <tr key={order.id} className="hover:bg-slate-50 cursor-pointer" onClick={() => { onNavigateToOrder?.(order.id); setCollectionModalOpen(false); }}>
                                                             <td className="px-3 py-2.5 text-slate-600 whitespace-nowrap">{getOrderDisplayDate(order, 'collection').toLocaleDateString('he-IL')}</td>
                                                             <td className="px-3 py-2.5 font-medium text-primary whitespace-nowrap">{order.orderNumber}</td>
-                                                            <td className="px-3 py-2.5 text-slate-700 min-w-[200px] max-w-[360px] line-clamp-2 break-words align-top" title={order.description}>{order.description || '—'}</td>
+                                                            <td className="px-3 py-2.5 text-slate-700 whitespace-nowrap">{getCustomerName(order.customerId)}</td>
+                                                            <td className="px-3 py-2.5 text-slate-700 min-w-[280px] max-w-[520px] line-clamp-2 break-words align-top" title={order.description}>{order.description || '—'}</td>
                                                             <td className="px-3 py-2.5 font-medium tabular-nums">{formatCurrency(balanceInclVat)}</td>
                                                             <td className="px-3 py-2.5 whitespace-nowrap">{new Date(dueDate).toLocaleDateString('he-IL')}</td>
                                                         </tr>
@@ -1255,7 +1269,7 @@ const StrongNumberCard: React.FC<{
 
                 {/* Leads modal */}
                 {leadsModalOpen && (
-                    <Modal title="לידים חדשים – ממתינים לטיפול" onClose={() => setLeadsModalOpen(false)} size="2xl">
+                    <Modal title="לידים חדשים – ממתינים לטיפול" onClose={() => setLeadsModalOpen(false)} size="6xl">
                         <SortBar count={stats.untouchedLeadsList.length} />
                         <div className="overflow-x-auto max-h-[60vh] border border-slate-200 rounded-lg">
                             <table className="min-w-full text-sm text-right">
@@ -1263,19 +1277,21 @@ const StrongNumberCard: React.FC<{
                                     <tr>
                                         <th className="px-3 py-2.5 whitespace-nowrap">תאריך</th>
                                         <th className="px-3 py-2.5 whitespace-nowrap">הזמנה</th>
+                                        <th className="px-3 py-2.5 whitespace-nowrap">שם לקוח</th>
                                         <th className="px-3 py-2.5">תיאור</th>
                                         <th className="px-3 py-2.5 whitespace-nowrap">סטטוס</th>
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-slate-100">
                                     {stats.untouchedLeadsList.length === 0 ? (
-                                        <tr><td colSpan={4} className="px-3 py-4 text-slate-500 text-center">אין לידים ממתינים</td></tr>
+                                        <tr><td colSpan={5} className="px-3 py-4 text-slate-500 text-center">אין לידים ממתינים</td></tr>
                                     ) : (
                                         sortOrdersByDate(stats.untouchedLeadsList, 'lead').map((order) => (
                                             <tr key={order.id} className="hover:bg-orange-50/50 cursor-pointer" onClick={() => { onNavigateToOrder?.(order.id); setLeadsModalOpen(false); }}>
                                                 <td className="px-3 py-2.5 text-slate-600 whitespace-nowrap">{getOrderDisplayDate(order, 'lead').toLocaleDateString('he-IL')}</td>
                                                 <td className="px-3 py-2.5 font-medium text-primary whitespace-nowrap">{order.orderNumber}</td>
-                                                <td className="px-3 py-2.5 text-slate-700 min-w-[200px] max-w-[360px] line-clamp-2 break-words align-top" title={order.description}>{order.description || '—'}</td>
+                                                <td className="px-3 py-2.5 text-slate-700 whitespace-nowrap">{getCustomerName(order.customerId)}</td>
+                                                <td className="px-3 py-2.5 text-slate-700 min-w-[280px] max-w-[520px] line-clamp-2 break-words align-top" title={order.description}>{order.description || '—'}</td>
                                                 <td className="px-3 py-2.5">{getOrderStatusLabel(order, statusConfigs)}</td>
                                             </tr>
                                         ))
@@ -1288,32 +1304,34 @@ const StrongNumberCard: React.FC<{
 
                 {/* Quotes modal */}
                 {quotesModalOpen && (
-                    <Modal title="הצעות מחיר" onClose={() => setQuotesModalOpen(false)} size="2xl">
+                    <Modal title="הצעות מחיר" onClose={() => setQuotesModalOpen(false)} size="8xl">
                         <SortBar count={stats.quotes.list.length} />
-                        <div className="overflow-x-auto max-h-[60vh] border border-slate-200 rounded-lg">
-                            <table className="min-w-full text-sm text-right">
+                        <div className="overflow-x-hidden overflow-y-auto max-h-[60vh] border border-slate-200 rounded-lg">
+                            <table className="w-full text-sm text-right table-fixed">
                                 <thead className="bg-slate-50 text-slate-600 font-bold sticky top-0">
                                     <tr>
-                                        <th className="px-3 py-2.5 whitespace-nowrap">תאריך</th>
-                                        <th className="px-3 py-2.5 whitespace-nowrap">הזמנה</th>
-                                        <th className="px-3 py-2.5">תיאור</th>
-                                        <th className="px-3 py-2.5 whitespace-nowrap tabular-nums">פוטנציאל</th>
-                                        <th className="px-3 py-2.5 whitespace-nowrap tabular-nums">רווח צפוי</th>
+                                        <th className="px-3 py-2.5 w-[90px] whitespace-nowrap">תאריך</th>
+                                        <th className="px-3 py-2.5 w-[100px] whitespace-nowrap">הזמנה</th>
+                                        <th className="px-3 py-2.5 w-[140px] whitespace-nowrap">שם לקוח</th>
+                                        <th className="px-3 py-2.5 min-w-0">תיאור</th>
+                                        <th className="px-3 py-2.5 w-[110px] whitespace-nowrap tabular-nums">פוטנציאל</th>
+                                        <th className="px-3 py-2.5 w-[110px] whitespace-nowrap tabular-nums">רווח צפוי</th>
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-slate-100">
                                     {stats.quotes.list.length === 0 ? (
-                                        <tr><td colSpan={5} className="px-3 py-4 text-slate-500 text-center">אין הצעות מחיר פתוחות</td></tr>
+                                        <tr><td colSpan={6} className="px-3 py-4 text-slate-500 text-center">אין הצעות מחיר פתוחות</td></tr>
                                     ) : (
                                         sortOrdersByDate(stats.quotes.list, 'quote').map((order) => {
                                             const { totalAmount, profit } = calculateOrderTotals(order);
                                             return (
                                                 <tr key={order.id} className="hover:bg-purple-50/50 cursor-pointer" onClick={() => { onNavigateToOrder?.(order.id); setQuotesModalOpen(false); }}>
                                                     <td className="px-3 py-2.5 text-slate-600 whitespace-nowrap">{getOrderDisplayDate(order, 'quote').toLocaleDateString('he-IL')}</td>
-                                                    <td className="px-3 py-2.5 font-medium text-primary whitespace-nowrap">{order.orderNumber}</td>
-                                                    <td className="px-3 py-2.5 text-slate-700 min-w-[200px] max-w-[360px] line-clamp-2 break-words align-top" title={order.description}>{order.description || '—'}</td>
-                                                    <td className="px-3 py-2.5 font-medium tabular-nums">{formatCurrency(totalAmount)}</td>
-                                                    <td className="px-3 py-2.5 tabular-nums">{formatCurrency(profit)}</td>
+                                                    <td className="px-3 py-2.5 font-medium text-primary whitespace-nowrap truncate" title={order.orderNumber}>{order.orderNumber}</td>
+                                                    <td className="px-3 py-2.5 text-slate-700 whitespace-nowrap truncate" title={getCustomerName(order.customerId)}>{getCustomerName(order.customerId)}</td>
+                                                    <td className="px-3 py-2.5 text-slate-700 min-w-0 break-words align-top line-clamp-2" title={order.description}>{order.description || '—'}</td>
+                                                    <td className="px-3 py-2.5 font-medium tabular-nums whitespace-nowrap">{formatCurrency(totalAmount)}</td>
+                                                    <td className="px-3 py-2.5 tabular-nums whitespace-nowrap">{formatCurrency(profit)}</td>
                                                 </tr>
                                             );
                                         })
@@ -1512,7 +1530,7 @@ const Dashboard: React.FC<DashboardProps> = ({
             </div>
 
             {/* Strong Numbers Row */}
-            <StrongNumberCard orders={ordersDeduped} statusConfigs={statusConfigs} vatRate={vatRate} roleType={user?.roleType} onNavigateToOrder={onNavigateToOrder} />
+            <StrongNumberCard orders={ordersDeduped} customers={customers} statusConfigs={statusConfigs} vatRate={vatRate} roleType={user?.roleType} onNavigateToOrder={onNavigateToOrder} />
 
             {/* Bottom Section: Operations Calendar & Tasks */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "server": "npm run dev --prefix server",
     "server:install": "npm install --prefix server",
-    "dev:all": "concurrently \"npm run server\" \"npm run dev\""
+    "dev:all": "concurrently -k \"npm run server\" \"npm run dev:wait\"",
+    "dev:wait": "wait-on tcp:3002 --timeout 60000 && npm run dev"
   },
   "dependencies": {
     "@floating-ui/dom": "^1.7.5",
@@ -34,6 +35,7 @@
     "@vitejs/plugin-react": "^5.0.0",
     "concurrently": "^9.2.1",
     "typescript": "~5.8.2",
-    "vite": "^6.2.0"
+    "vite": "^6.2.0",
+    "wait-on": "^8.0.5"
   }
 }

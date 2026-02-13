@@ -4,7 +4,7 @@ import { verifyToken } from '../middleware/auth.js';
 
 const router = Router();
 
-/** POST /api/suppliers/match-phones – body: { phones: string[] }. Returns { [normalizedPhone]: { supplierId, supplierName }[] }. */
+/** POST /api/suppliers/match-phones – body: { phones: string[] }. Returns { [normalizedPhone]: { supplierId, supplierName, contactId?, contactName? }[] }. */
 router.post('/match-phones', verifyToken, async (req, res) => {
     try {
         const { phones } = req.body as { phones?: string[] };

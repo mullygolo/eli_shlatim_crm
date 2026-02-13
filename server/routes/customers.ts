@@ -20,7 +20,7 @@ router.get('/', async (req, res) => {
     }
 });
 
-/** POST /api/customers/match-phones – body: { phones: string[] }. Returns { [normalizedPhone]: { customerId, customerName }[] } (all customers that have that phone). */
+/** POST /api/customers/match-phones – body: { phones: string[] }. Returns { [normalizedPhone]: { customerId, customerName, contactId?, contactName? }[] }. */
 router.post('/match-phones', verifyToken, async (req, res) => {
     try {
         const { phones } = req.body as { phones?: string[] };

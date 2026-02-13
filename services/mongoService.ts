@@ -61,19 +61,25 @@ export async function getCustomerById(customerId: string): Promise<Customer | nu
     }
 }
 
-/** Match phone numbers to customers (for call center). Returns { [normalizedPhone]: { customerId, customerName }[] }. */
-export async function matchPhones(phones: string[]): Promise<Record<string, { customerId: string; customerName: string }[]>> {
+/** Single customer match for a phone (includes contact when match is via contact.phone). */
+export type CustomerPhoneMatch = { customerId: string; customerName: string; contactId?: string; contactName?: string };
+
+/** Match phone numbers to customers (for call center). Returns { [normalizedPhone]: CustomerPhoneMatch[] }. */
+export async function matchPhones(phones: string[]): Promise<Record<string, CustomerPhoneMatch[]>> {
     if (!phones.length) return {};
-    return apiRequest<Record<string, { customerId: string; customerName: string }[]>>('/customers/match-phones', {
+    return apiRequest<Record<string, CustomerPhoneMatch[]>>('/customers/match-phones', {
         method: 'POST',
         body: JSON.stringify({ phones }),
     });
 }
 
-/** Match phone numbers to suppliers (for call center). Returns { [normalizedPhone]: { supplierId, supplierName }[] }. */
-export async function matchSupplierPhones(phones: string[]): Promise<Record<string, { supplierId: string; supplierName: string }[]>> {
+/** Single supplier match for a phone (includes contact when match is via contact.phone). */
+export type SupplierPhoneMatch = { supplierId: string; supplierName: string; contactId?: string; contactName?: string };
+
+/** Match phone numbers to suppliers (for call center). Returns { [normalizedPhone]: SupplierPhoneMatch[] }. */
+export async function matchSupplierPhones(phones: string[]): Promise<Record<string, SupplierPhoneMatch[]>> {
     if (!phones.length) return {};
-    return apiRequest<Record<string, { supplierId: string; supplierName: string }[]>>('/suppliers/match-phones', {
+    return apiRequest<Record<string, SupplierPhoneMatch[]>>('/suppliers/match-phones', {
         method: 'POST',
         body: JSON.stringify({ phones }),
     });
@@ -107,20 +113,24 @@ export async function mergeCustomers(veteranId: string, victimId: string): Promi
     });
 }
 
-export async function getCustomersPaginated(filters: { searchTerm?: string }, page: number = 1, limit: number = 50): Promise<any> {
+export async function getCustomersPaginated(
+    filters: { searchTerm?: string },
+    page: number = 1,
+    limit: number = 50,
+    options?: { signal?: AbortSignal }
+): Promise<{ customers: Customer[]; totalCount: number; page: number; limit: number; totalPages: number }> {
     const queryParams = new URLSearchParams({
         page: page.toString(),
         limit: limit.toString(),
         filters: JSON.stringify(filters)
     });
-    
     const response = await fetch(`${API_BASE_URL}/customers/paginated?${queryParams}`, {
         headers: {
             'Authorization': `Bearer ${localStorage.getItem('authToken')}`,
             'Content-Type': 'application/json'
-        }
+        },
+        ...(options?.signal && { signal: options.signal })
     });
-    
     if (!response.ok) throw new Error('Failed to fetch paginated customers');
     return response.json();
 }

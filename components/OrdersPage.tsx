@@ -3732,6 +3732,16 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
     const supplierOptions = useMemo(() => suppliers.map(s => ({ value: s.id, label: s.name })), [suppliers]);
     const employeeOptions = useMemo(() => employees.map(e => ({ value: e.id, label: e.name })), [employees]);
     const orderStatusOptions = useMemo(() => (statusConfigs || []).map(s => ({ value: s.id, label: s.label })), [statusConfigs]);
+    const defaultOrderStatusIds = useMemo(() => {
+        if (!statusConfigs?.length) return [];
+        return statusConfigs
+            .filter(c => (c.isActiveDeal && !c.isCompleted) || c.isLead || c.isQuote)
+            .map(c => c.id);
+    }, [statusConfigs]);
+    const defaultOrderStatusIdsForDueDate = useMemo(() => {
+        if (!statusConfigs?.length) return [];
+        return statusConfigs.filter(c => c.isActiveDeal).map(c => c.id);
+    }, [statusConfigs]);
     // Migrate saved filter from labels to ids (once statusConfigs available)
     const orderStatusFilterMigratedRef = useRef(false);
     useEffect(() => {
@@ -3748,6 +3758,32 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
             return [...new Set(migrated)];
         });
     }, [statusConfigs]);
+    // When no saved orderStatusFilter or saved is [], pre-select defaults so dropdown shows checkmarks; use dueDate default when sortBy is מועד תשלום
+    useEffect(() => {
+        if (!statusConfigs?.length) return;
+        const saved = savedView.orderStatusFilter;
+        if (saved !== undefined && saved.length > 0) return; // User saved a non-empty selection – respect it
+        const defaultIds = sortBy === 'dueDate' ? defaultOrderStatusIdsForDueDate : defaultOrderStatusIds;
+        if (defaultIds.length === 0) return;
+        setOrderStatusFilter(defaultIds);
+    }, [statusConfigs, defaultOrderStatusIds, defaultOrderStatusIdsForDueDate, sortBy]);
+    // When user switches sort to/from מועד תשלום, sync status filter to the matching default so חובות are not missed
+    const prevSortByRef = useRef(sortBy);
+    useEffect(() => {
+        if (prevSortByRef.current === sortBy) return;
+        const prev = prevSortByRef.current;
+        prevSortByRef.current = sortBy;
+        const setEqual = (a: string[], b: string[]) => a.length === b.length && a.every(id => b.includes(id));
+        if (sortBy === 'dueDate' && setEqual(orderStatusFilter, defaultOrderStatusIds)) {
+            setOrderStatusFilter(defaultOrderStatusIdsForDueDate);
+        } else if (sortBy !== 'dueDate' && setEqual(orderStatusFilter, defaultOrderStatusIdsForDueDate)) {
+            setOrderStatusFilter(defaultOrderStatusIds);
+        }
+    }, [sortBy, orderStatusFilter, defaultOrderStatusIds, defaultOrderStatusIdsForDueDate]);
+    const isStatusFilterDefault = useMemo(() => {
+        const defaultIds = sortBy === 'dueDate' ? defaultOrderStatusIdsForDueDate : defaultOrderStatusIds;
+        return orderStatusFilter.length === defaultIds.length && orderStatusFilter.every(id => defaultIds.includes(id));
+    }, [sortBy, orderStatusFilter, defaultOrderStatusIds, defaultOrderStatusIdsForDueDate]);
     const paymentStatusOptions = useMemo(() => PAYMENT_STATUSES_ORDERED.map(s => ({ value: s, label: s })), []);
 
     // Generate available years (current year and last 5 years)
@@ -3836,7 +3872,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
         setCustomerFilter([]);
         setSupplierFilter([]);
         setEmployeeFilter([]);
-        setOrderStatusFilter([]);
+        setOrderStatusFilter(sortBy === 'dueDate' ? defaultOrderStatusIdsForDueDate : defaultOrderStatusIds);
         setPaymentStatusFilter([]);
         setMonthFilter('all');
         setYearFilter('all');
@@ -4410,7 +4446,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                         <option value="updatedAt">עודכנו לאחרונה</option>
                     </select>
                 </div>
-                <button type="button" onClick={resetFilters} className="text-xs font-black text-slate-400 hover:text-red-500 px-3 py-2 rounded border border-slate-100 min-h-[44px]">נקה</button>
+                <button type="button" onClick={resetFilters} className="text-xs font-black text-slate-400 hover:text-red-500 px-3 py-2 rounded border border-slate-100 min-h-[44px]" title="מנקה מסננים ומחזיר ברירת מחדל – סטטוסים יישארו מסומנים (לידים, הצעות מחיר, עסקאות פעילות ללא שהסתיימו).">נקה</button>
             </div>
             {/* Filters panel: desktop inline, mobile in drawer */}
             {filtersPanelOpen && (
@@ -4437,7 +4473,10 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                                 <div className="col-span-2"><MultiSelectFilter label="לקוח" options={customerOptions} selectedValues={customerFilter} onChange={(v) => { setCustomerFilter(v); if (v.length === 0) setCustomerIsImportPlaceholderOnly(false); }} /></div>
                                 <div className="col-span-2"><MultiSelectFilter label="עובד" options={employeeOptions} selectedValues={employeeFilter} onChange={setEmployeeFilter} /></div>
                                 <div className="col-span-2"><MultiSelectFilter label="ספק" options={supplierOptions} selectedValues={supplierFilter} onChange={setSupplierFilter} /></div>
-                                <div className="col-span-2"><MultiSelectFilter label="סטטוס" options={orderStatusOptions} selectedValues={orderStatusFilter} onChange={setOrderStatusFilter} emptyLabel="עסקאות פעילות בלבד (ללא שהסתיימו)" /></div>
+                                <div className="col-span-2">
+                                    <MultiSelectFilter label="סטטוס" options={orderStatusOptions} selectedValues={orderStatusFilter} onChange={setOrderStatusFilter} emptyLabel="לידים, הצעות מחיר ועסקאות פעילות" />
+                                    {isStatusFilterDefault && <p className="text-[10px] text-slate-400 mt-0.5">ברירת מחדל: לידים, הצעות מחיר ועסקאות פעילות (ללא עסקאות שהסתיימו). איפוס מסננים מחזיר לסימון הזה.</p>}
+                                </div>
                                 <div className="col-span-2"><label className="block text-[10px] font-black text-slate-400 uppercase mb-1">חיפוש</label><input type="text" placeholder="חיפוש..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)} className="w-full text-xs p-2 border-slate-300 rounded-md min-h-[44px]" /></div>
                                 <div className="col-span-2"><label className="flex items-center gap-2 text-xs font-medium text-slate-600 cursor-pointer"><input type="checkbox" checked={customerIsImportPlaceholderOnly} onChange={e => setCustomerIsImportPlaceholderOnly(e.target.checked)} className="rounded border-slate-300 text-primary" /> הזמנות עם לקוח מייבוא</label></div>
                             </div>
@@ -4503,7 +4542,8 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                                 <MultiSelectFilter label="ספק" options={supplierOptions} selectedValues={supplierFilter} onChange={setSupplierFilter} />
                             </div>
                             <div>
-                                <MultiSelectFilter label="סטטוס" options={orderStatusOptions} selectedValues={orderStatusFilter} onChange={setOrderStatusFilter} emptyLabel="עסקאות פעילות בלבד (ללא שהסתיימו)" />
+                                <MultiSelectFilter label="סטטוס" options={orderStatusOptions} selectedValues={orderStatusFilter} onChange={setOrderStatusFilter} emptyLabel="לידים, הצעות מחיר ועסקאות פעילות" />
+                                {isStatusFilterDefault && <p className="text-[10px] text-slate-400 mt-0.5">ברירת מחדל: לידים, הצעות מחיר ועסקאות פעילות (ללא עסקאות שהסתיימו). איפוס מסננים מחזיר לסימון הזה.</p>}
                             </div>
                             <div className="lg:col-span-2">
                                 <label className="block text-[10px] font-black text-slate-400 uppercase mb-1">חיפוש חופשי</label>
@@ -4565,6 +4605,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                              <button 
                                 onClick={resetFilters} 
                                 className="text-xs font-black text-slate-400 hover:text-red-500 transition-colors uppercase flex items-center gap-1 bg-slate-50 px-3 py-2 rounded border border-slate-100"
+                                title="מנקה מסננים ומחזיר ברירת מחדל – סטטוסים יישארו מסומנים (לידים, הצעות מחיר, עסקאות פעילות ללא שהסתיימו)."
                              >
                                 <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
                                 נקה את כל המסננים

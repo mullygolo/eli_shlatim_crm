@@ -7,6 +7,7 @@ import { CUSTOMER_CATEGORIES, PAYMENT_TERMS_OPTIONS } from '../constants';
 import { calculateOrderTotals } from '../utils/calculations';
 import * as mongoService from '../services/mongoService';
 import { useViewTracker } from '../contexts/ViewTrackerContext';
+import CustomerSyncBadges, { fromGreenInvoice, formatCustomerCreatedAt } from './CustomerSyncBadges';
 
 // Added missing interface definition for CustomersPageProps
 interface CustomersPageProps {
@@ -42,36 +43,6 @@ const findDuplicateCustomer = (customers: Customer[], name: string, hp?: string,
         }
         return false;
     });
-};
-
-// Visual badges: origin (from GI vs app) and sync status to Green Invoice
-const fromGreenInvoice = (c: Customer) =>
-    (c.notes || '').trim().startsWith('יובא מחשבונית ירוקה') ||
-    (!!c.greenInvoiceClientId && (c.category || '').trim() === 'לקוח מ-חשבונית ירוקה');
-const syncedToGreenInvoice = (c: Customer) => !!c.greenInvoiceClientId;
-
-const formatCustomerCreatedAt = (d: Date | string | undefined): string => {
-    if (!d) return '—';
-    const date = typeof d === 'string' ? new Date(d) : d;
-    if (isNaN(date.getTime())) return '—';
-    return date.toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit', year: 'numeric' });
-};
-
-const CustomerSyncBadges: React.FC<{ customer: Customer; compact?: boolean }> = ({ customer, compact }) => {
-    const fromGI = fromGreenInvoice(customer);
-    const toGI = syncedToGreenInvoice(customer);
-    const badge = (label: string, title: string, bg: string) => (
-        <span key={label} title={title} className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium ${bg}`}>
-            {label}
-        </span>
-    );
-    return (
-        <div className={`flex flex-wrap gap-1 ${compact ? 'mt-0.5' : 'mt-2'}`}>
-            {fromGI ? badge('נוצר בחשבונית ירוקה', 'הלקוח נוצר בחשבונית ירוקה וסונכרן לתוכנה', 'bg-emerald-100 text-emerald-800') : badge('נוצר בתוכנה', 'הלקוח נוצר במערכת זו', 'bg-indigo-100 text-indigo-800')}
-            {fromGI && toGI && badge('מסונכרן לתוכנה', 'הלקוח סונכרן ומופיע במערכת', 'bg-emerald-100 text-emerald-800')}
-            {!fromGI && toGI && badge('מסונכרן לחשבונית ירוקה', 'הלקוח מקושר ומופיע בחשבונית ירוקה', 'bg-amber-100 text-amber-800')}
-        </div>
-    );
 };
 
 // Enhanced document linking with list selection, allocation editing, and validation

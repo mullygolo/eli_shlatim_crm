@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "tsx watch index.ts",
     "build": "cd .. && npm install && npm run build && cd server && tsc",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "migrate:order-statuses": "tsx scripts/migrate-order-statuses.ts"
   },
   "dependencies": {
     "@types/bcrypt": "^6.0.0",

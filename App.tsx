@@ -67,6 +67,7 @@ const App: React.FC = () => {
     const { trackViewStart, trackViewEnd } = useViewTracker();
     const prevPageRef = useRef<Page | null>(null);
     const [currentPage, setCurrentPage] = useState<Page>('Dashboard');
+    const [selectedCustomerId, setSelectedCustomerId] = useState<string | null>(null);
     const [sidebarOpen, setSidebarOpen] = useState(false);
     const [customers, setCustomers] = useState<Customer[]>([]);
     const [orders, setOrders] = useState<Order[]>([]);
@@ -318,6 +319,9 @@ const App: React.FC = () => {
 
     const [openOrderId, setOpenOrderId] = useState<string | null>(null);
     const [openNewOrderRequest, setOpenNewOrderRequest] = useState(false);
+    const [newOrderWithCustomerId, setNewOrderWithCustomerId] = useState<string | null>(null);
+    const [newOrderWithPhone, setNewOrderWithPhone] = useState<string | null>(null);
+    const [newCustomerWithPhone, setNewCustomerWithPhone] = useState<string | null>(null);
 
     // Mock data placeholders for new pages
     const [deals, setDeals] = useState<any[]>([]); 
@@ -351,6 +355,21 @@ const App: React.FC = () => {
     const handleAddOrderFromHeader = useCallback(() => {
         setCurrentPage('Orders');
         setOpenNewOrderRequest(true);
+    }, []);
+
+    const handleNewOrderWithCustomer = useCallback((customerId: string) => {
+        setCurrentPage('Orders');
+        setOpenNewOrderRequest(true);
+        setNewOrderWithCustomerId(customerId);
+    }, []);
+    const handleNewOrderWithPhone = useCallback((phone: string) => {
+        setCurrentPage('Orders');
+        setOpenNewOrderRequest(true);
+        setNewOrderWithPhone(phone);
+    }, []);
+    const handleNewCustomerWithPhone = useCallback((phone: string) => {
+        setCurrentPage('Customers');
+        setNewCustomerWithPhone(phone);
     }, []);
 
     const addActivity = useCallback(async (description: string, options?: AddActivityOptions) => {
@@ -437,16 +456,20 @@ const App: React.FC = () => {
                             addManualEvent={addManualEvent}
                         />;
             case 'Customers':
-                return <CustomersPage 
+return <CustomersPage 
                             customers={customers} 
                             setCustomers={setCustomersWithSync}
                             setCustomersLocal={setCustomersLocal} 
                             orders={orders} 
-                            setOrders={setOrdersWithSync}
+                            setOrders={setOrdersWithSync} 
                             addActivity={addActivity} 
                             onNavigateToOrder={handleNavigateToOrder}
                             statusConfigs={statusConfigs}
                             vatRate={vatRate}
+                            selectedCustomerId={selectedCustomerId}
+                            setSelectedCustomerId={setSelectedCustomerId}
+                            newCustomerWithPhone={newCustomerWithPhone}
+                            onClearedNewCustomerWithPhone={() => setNewCustomerWithPhone(null)}
                         />;
             case 'Orders':
                 return <OrdersPage 
@@ -463,6 +486,9 @@ const App: React.FC = () => {
                             onOrderOpened={onOrderOpened}
                             openNewOrderRequest={openNewOrderRequest}
                             onClearedOpenNewOrderRequest={() => setOpenNewOrderRequest(false)}
+                            openNewOrderWithCustomerId={newOrderWithCustomerId}
+                            openNewOrderWithPhone={newOrderWithPhone}
+                            onClearedNewOrderPrefill={() => { setNewOrderWithCustomerId(null); setNewOrderWithPhone(null); }}
                             statusConfigs={statusConfigs}
                             getNextOrderNumber={getNextOrderNumber}
                             vatRate={vatRate}
@@ -554,7 +580,14 @@ const App: React.FC = () => {
             case 'PriceList':
                 return <PriceListPage suppliers={suppliers} />;
             case 'CallCenter':
-                return <CallCenterPage />;
+                return <CallCenterPage 
+                            onNavigateToPage={setCurrentPage} 
+                            setSelectedCustomerId={setSelectedCustomerId}
+                            onNewOrderWithCustomer={handleNewOrderWithCustomer}
+                            onNewOrderWithPhone={handleNewOrderWithPhone}
+                            onNewCustomerWithPhone={handleNewCustomerWithPhone}
+                            onNavigateToOrder={handleNavigateToOrder}
+                        />;
             case 'ImprovementSuggestions':
                 return <ImprovementSuggestionsPage currentPage={currentPage} />;
             default:

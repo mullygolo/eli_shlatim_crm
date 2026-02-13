@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import type { Customer } from '../types.js';
-import { getCustomers, getCustomerById, createCustomer, updateCustomer, deleteCustomer, getCustomersPaginated, getSettings, mergeCustomers } from '../services/mongoService.js';
+import { getCustomers, getCustomerById, createCustomer, updateCustomer, deleteCustomer, getCustomersPaginated, getSettings, mergeCustomers, getCustomersByPhones } from '../services/mongoService.js';
+import { verifyToken } from '../middleware/auth.js';
 import { createOrGetClient, updateClient } from '../services/greenInvoiceService.js';
 import { mapCustomerToClient } from '../services/greenInvoiceMapper.js';
 import { applyGreenInvoiceClientToCustomer, giClientName, findSiblingForMerge } from '../services/greenInvoiceSyncService.js';
@@ -19,6 +20,19 @@ router.get('/', async (req, res) => {
     }
 });
 
+/** POST /api/customers/match-phones – body: { phones: string[] }. Returns { [normalizedPhone]: { customerId, customerName }[] } (all customers that have that phone). */
+router.post('/match-phones', verifyToken, async (req, res) => {
+    try {
+        const { phones } = req.body as { phones?: string[] };
+        const list = Array.isArray(phones) ? phones.filter((p) => typeof p === 'string') : [];
+        const result = await getCustomersByPhones(list);
+        res.json(result);
+    } catch (error) {
+        console.error('Error in POST /customers/match-phones:', error);
+        res.status(500).json({ error: 'Failed to match phones' });
+    }
+});
+
 // New paginated endpoint with debt calculation
 router.get('/paginated', async (req, res) => {
     try {
@@ -34,6 +48,17 @@ router.get('/paginated', async (req, res) => {
     } catch (error) {
         console.error('Error in paginated customers route:', error);
         res.status(500).json({ error: 'Failed to fetch paginated customers' });
+    }
+});
+
+router.get('/:id', async (req, res) => {
+    try {
+        const customer = await getCustomerById(req.params.id);
+        if (!customer) return res.status(404).json({ error: 'Customer not found' });
+        res.json(customer);
+    } catch (error) {
+        console.error('Error in GET /customers/:id:', error);
+        res.status(500).json({ error: 'Failed to fetch customer' });
     }
 });
 

@@ -53,6 +53,32 @@ export async function getCustomers(): Promise<Customer[]> {
     return apiRequest<Customer[]>('/customers');
 }
 
+export async function getCustomerById(customerId: string): Promise<Customer | null> {
+    try {
+        return await apiRequest<Customer>(`/customers/${encodeURIComponent(customerId)}`);
+    } catch {
+        return null;
+    }
+}
+
+/** Match phone numbers to customers (for call center). Returns { [normalizedPhone]: { customerId, customerName }[] }. */
+export async function matchPhones(phones: string[]): Promise<Record<string, { customerId: string; customerName: string }[]>> {
+    if (!phones.length) return {};
+    return apiRequest<Record<string, { customerId: string; customerName: string }[]>>('/customers/match-phones', {
+        method: 'POST',
+        body: JSON.stringify({ phones }),
+    });
+}
+
+/** Match phone numbers to suppliers (for call center). Returns { [normalizedPhone]: { supplierId, supplierName }[] }. */
+export async function matchSupplierPhones(phones: string[]): Promise<Record<string, { supplierId: string; supplierName: string }[]>> {
+    if (!phones.length) return {};
+    return apiRequest<Record<string, { supplierId: string; supplierName: string }[]>>('/suppliers/match-phones', {
+        method: 'POST',
+        body: JSON.stringify({ phones }),
+    });
+}
+
 export async function createCustomer(customer: Customer): Promise<Customer> {
     return apiRequest<Customer>('/customers', {
         method: 'POST',
@@ -882,6 +908,62 @@ export async function getCallLogs(): Promise<CallLog[]> {
     return apiRequest<CallLog[]>('/call-logs');
 }
 
+export interface CallLogsPaginatedResult {
+    logs: CallLog[];
+    totalCount: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+}
+
+export interface CallLogsStatsResult {
+    totalCalls: number;
+    incomingCount: number;
+    outgoingCount: number;
+    unansweredCount: number;
+    totalDurationSeconds: number;
+    totalDurationIncoming: number;
+    totalDurationOutgoing: number;
+    totalDurationUnknown: number;
+}
+
+export async function getCallLogsStats(filters: { startDate?: string; endDate?: string; callee?: string } = {}): Promise<CallLogsStatsResult> {
+    const params = new URLSearchParams();
+    if (filters.startDate) params.set('startDate', filters.startDate);
+    if (filters.endDate) params.set('endDate', filters.endDate);
+    if (filters.callee) params.set('callee', filters.callee);
+    return apiRequest<CallLogsStatsResult>(`/call-logs/stats?${params}`);
+}
+
+export interface CallLogsAgentItem {
+    callee: string;
+    calleeName?: string;
+}
+
+export async function getCallLogsAgents(filters: { startDate?: string; endDate?: string } = {}): Promise<CallLogsAgentItem[]> {
+    const params = new URLSearchParams();
+    if (filters.startDate) params.set('startDate', filters.startDate);
+    if (filters.endDate) params.set('endDate', filters.endDate);
+    return apiRequest<CallLogsAgentItem[]>(`/call-logs/agents?${params}`);
+}
+
+export async function inferCallLogDirection(): Promise<{ updated: number }> {
+    return apiRequest<{ updated: number }>('/call-logs/infer-direction', { method: 'POST' });
+}
+
+export async function getCallLogsPaginated(
+    filters: { searchTerm?: string; startDate?: string; endDate?: string; callee?: string } = {},
+    page: number = 1,
+    limit: number = 50
+): Promise<CallLogsPaginatedResult> {
+    const params = new URLSearchParams({ page: String(page), limit: String(limit) });
+    if (filters.searchTerm) params.set('searchTerm', filters.searchTerm);
+    if (filters.startDate) params.set('startDate', filters.startDate);
+    if (filters.endDate) params.set('endDate', filters.endDate);
+    if (filters.callee) params.set('callee', filters.callee);
+    return apiRequest<CallLogsPaginatedResult>(`/call-logs/paginated?${params}`);
+}
+
 export interface SyncCallLogsResult {
     success: boolean;
     fetched: number;
@@ -895,6 +977,19 @@ export async function syncCallLogs(startDate: string, endDate: string, number?: 
         method: 'POST',
         body: JSON.stringify({ startDate, endDate, number }),
     });
+}
+
+/** Fetch recent call logs for a customer (caller/callee matches customer contact phones). */
+export async function getCallLogsForCustomer(customerId: string, limit: number = 20): Promise<CallLog[]> {
+    return apiRequest<CallLog[]>(`/call-logs/for-customer/${encodeURIComponent(customerId)}?limit=${limit}`);
+}
+
+export type RelevantOrderSummary = { id: string; orderNumber: string; orderStatus: string };
+export async function getRelevantOrdersForCustomers(customerIds: string[]): Promise<Record<string, RelevantOrderSummary[]>> {
+    if (!customerIds.length) return {};
+    const params = new URLSearchParams();
+    customerIds.forEach(id => params.append('customerIds', id));
+    return apiRequest<Record<string, RelevantOrderSummary[]>>(`/orders/relevant-for-customers?${params}`);
 }
 
 /** Fetch stored call recording as Blob (for playback). Requires auth. */

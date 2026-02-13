@@ -82,6 +82,9 @@ interface GroupedPaymentTransaction {
     }[];
 }
 
+// Format date as YYYY-MM-DD in local timezone (for type="date" inputs)
+const toLocalDateStr = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
 // Helper to ensure date is a Date object
 const ensureDate = (date: Date | string): Date => {
     if (date instanceof Date) return date;
@@ -812,11 +815,17 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
             result = result.filter(g => g.supplierId === supplierFilterId);
         }
         
-        // Date filters for Log (based on payment date)
-        const start = dateStart ? new Date(dateStart) : null;
-        const end = dateEnd ? new Date(dateEnd) : null;
-        if (start) start.setHours(0,0,0,0);
-        if (end) end.setHours(23,59,59,999);
+        // Date filters for Log (based on payment date) - use local date to avoid timezone shifts
+        const parseLocalDate = (s: string): Date => {
+            const [y, m, d] = s.split('-').map(Number);
+            return new Date(y, (m || 1) - 1, d || 1, 0, 0, 0, 0);
+        };
+        const parseLocalDateEnd = (s: string): Date => {
+            const [y, m, d] = s.split('-').map(Number);
+            return new Date(y, (m || 1) - 1, d || 1, 23, 59, 59, 999);
+        };
+        const start = dateStart ? parseLocalDate(dateStart) : null;
+        const end = dateEnd ? parseLocalDateEnd(dateEnd) : null;
 
         result = result.filter(g => {
             if (start && g.date < start) return false;
@@ -1192,15 +1201,25 @@ const ReportsPage: React.FC<ReportsPageProps> = ({ orders, suppliers, onNavigate
                     />
 
                     {/* Date Range */}
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
                         <div>
-                            <label className="block text-xs font-bold text-slate-500 mb-1">מ-:</label>
+                            <label className="block text-xs font-bold text-slate-500 mb-1">מ:</label>
                             <input type="date" value={dateStart} onChange={e => setDateStart(e.target.value)} className="text-sm border border-slate-300 rounded px-2 py-1.5 w-32" />
                         </div>
                         <div>
                             <label className="block text-xs font-bold text-slate-500 mb-1">עד:</label>
                             <input type="date" value={dateEnd} onChange={e => setDateEnd(e.target.value)} className="text-sm border border-slate-300 rounded px-2 py-1.5 w-32" />
                         </div>
+                        <div className="flex gap-1 self-end">
+                            <button type="button" onClick={() => { const now = new Date(); const first = new Date(now.getFullYear(), now.getMonth(), 1); setDateStart(toLocalDateStr(first)); setDateEnd(toLocalDateStr(now)); }} className="text-xs text-slate-500 hover:text-slate-700 hover:bg-slate-100 px-2 py-1 rounded">החודש</button>
+                            <button type="button" onClick={() => { const now = new Date(); const threeMonths = new Date(now.getFullYear(), now.getMonth() - 2, 1); setDateStart(toLocalDateStr(threeMonths)); setDateEnd(toLocalDateStr(now)); }} className="text-xs text-slate-500 hover:text-slate-700 hover:bg-slate-100 px-2 py-1 rounded">3 חודשים</button>
+                            <button type="button" onClick={() => { const now = new Date(); setDateStart(`${now.getFullYear()}-01-01`); setDateEnd(toLocalDateStr(now)); }} className="text-xs text-slate-500 hover:text-slate-700 hover:bg-slate-100 px-2 py-1 rounded">השנה</button>
+                        </div>
+                        {(dateStart || dateEnd) && (
+                            <button type="button" onClick={() => { setDateStart(''); setDateEnd(''); }} className="text-xs text-slate-500 hover:text-slate-700 underline self-end">
+                                נקה תאריכים
+                            </button>
+                        )}
                     </div>
 
                     {/* Show Paid Toggle (Only relevant for item views) */}

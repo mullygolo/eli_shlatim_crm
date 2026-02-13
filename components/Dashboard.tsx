@@ -448,6 +448,7 @@ const StrongNumberCard: React.FC<{
     const [collectionModalOpen, setCollectionModalOpen] = useState(false);
     const [leadsModalOpen, setLeadsModalOpen] = useState(false);
     const [quotesModalOpen, setQuotesModalOpen] = useState(false);
+    const [tableSortOrder, setTableSortOrder] = useState<'newest' | 'oldest'>('newest');
     useEffect(() => {
         if (!lostDealsModalOpen) return;
         const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setLostDealsModalOpen(false); };
@@ -488,6 +489,49 @@ const StrongNumberCard: React.FC<{
         };
     };
 
+    const getLostEventDate = (o: Order): Date => {
+        if (o.statusHistory && o.statusHistory.length > 0) {
+            const historyEntry = o.statusHistory.find(h => h.status === o.orderStatus);
+            if (historyEntry) return new Date(historyEntry.startDate);
+            const sorted = [...o.statusHistory].sort((a, b) => new Date(b.startDate).getTime() - new Date(a.startDate).getTime());
+            if (sorted.length > 0) return new Date(sorted[0].startDate);
+        }
+        return new Date(o.date);
+    };
+    const getOrderDisplayDate = (o: Order, type: 'lead' | 'quote' | 'deal' | 'lost' | 'collection'): Date => {
+        if (type === 'lost') return getLostEventDate(o);
+        if (type === 'deal' || type === 'collection') return new Date(o.dealStartDate || o.date);
+        return new Date(o.createdAt || o.date);
+    };
+    const sortOrdersByDate = <T extends Order>(list: T[], type: 'lead' | 'quote' | 'deal' | 'lost' | 'collection'): T[] => {
+        return [...list].sort((a, b) => {
+            const ta = getOrderDisplayDate(a, type).getTime();
+            const tb = getOrderDisplayDate(b, type).getTime();
+            return tableSortOrder === 'newest' ? tb - ta : ta - tb;
+        });
+    };
+    const SortBar: React.FC<{ count: number }> = ({ count }) => (
+        <div className="flex items-center justify-between gap-4 mb-3 flex-wrap">
+            <span className="text-sm text-slate-600 font-medium">{count} פריטים</span>
+            <div className="flex gap-1">
+                <button
+                    type="button"
+                    onClick={() => setTableSortOrder('newest')}
+                    className={`text-xs px-2 py-1 rounded ${tableSortOrder === 'newest' ? 'bg-primary text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                >
+                    חדש לישן
+                </button>
+                <button
+                    type="button"
+                    onClick={() => setTableSortOrder('oldest')}
+                    className={`text-xs px-2 py-1 rounded ${tableSortOrder === 'oldest' ? 'bg-primary text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                >
+                    ישן לחדש
+                </button>
+            </div>
+        </div>
+    );
+
     const stats = useMemo(() => {
         const now = new Date();
         const todayStr = getDateStringIsrael(now);
@@ -497,6 +541,7 @@ const StrongNumberCard: React.FC<{
         const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
         const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
 
+        // orders כאן = כבר מדובלל מההורה (orderNumber אחד לכל הזמנה לוגית, המעודכן ביותר)
         // Active deals for collection/leads/quotes/lost (all isActiveDeal)
         const activeDeals = orders.filter(order => {
              const config = statusConfigs.find(c => c.label === order.orderStatus);
@@ -540,7 +585,7 @@ const StrongNumberCard: React.FC<{
             return d.slice(0, 4) === yearStr && d <= todayStr;
         });
 
-        // Use the isLead flag configuration to count new leads
+        // Use the isLead flag configuration to count new leads – נתונים מדובללים (תואם ללוח הזמנות)
         const leadStatuses = new Set(statusConfigs.filter(c => c.isLead).map(c => c.label));
         const untouchedLeads = orders.filter(o => leadStatuses.has(o.orderStatus));
         
@@ -565,15 +610,6 @@ const StrongNumberCard: React.FC<{
 
         // Lost Deals: event-based (when order entered "Lost" status). Support multiple periods + previous period for comparison.
         const lostStatuses = new Set(statusConfigs.filter(c => c.isLost).map(c => c.label));
-        const getLostEventDate = (o: Order): Date => {
-            if (o.statusHistory && o.statusHistory.length > 0) {
-                const historyEntry = o.statusHistory.find(h => h.status === o.orderStatus);
-                if (historyEntry) return new Date(historyEntry.startDate);
-                const sorted = [...o.statusHistory].sort((a, b) => new Date(b.startDate).getTime() - new Date(a.startDate).getTime());
-                if (sorted.length > 0) return new Date(sorted[0].startDate);
-            }
-            return new Date(o.date);
-        };
         const getRangeForPeriod = (period: LostDealsPeriod): { start: Date; end: Date } => {
             const y = now.getFullYear(), m = now.getMonth();
             if (period === 'THIS_MONTH') return { start: new Date(y, m, 1), end: new Date(y, m + 1, 0, 23, 59, 59, 999) };
@@ -961,6 +997,7 @@ const StrongNumberCard: React.FC<{
                     <Modal
                         title="עסקאות אבודות"
                         onClose={() => setLostDealsModalOpen(false)}
+                        size="2xl"
                     >
                         <div className="space-y-4">
                             <div className="flex items-center gap-2 flex-wrap">
@@ -978,21 +1015,23 @@ const StrongNumberCard: React.FC<{
                                     <span className="text-xs text-slate-500">לעומת תקופה קודמת: {stats.lostPrevious.count} עסקאות, {formatCurrency(stats.lostPrevious.revenueExclVat)} אובדן הכנסה</span>
                                 )}
                             </div>
+                            <SortBar count={stats.lostDealsList.length} />
                             <div className="overflow-x-auto max-h-[60vh] border border-slate-200 rounded-lg">
                                 <table className="min-w-full text-sm text-right">
                                     <thead className="bg-slate-50 text-slate-600 font-bold sticky top-0">
                                         <tr>
-                                            <th className="px-3 py-2">הזמנה</th>
-                                            <th className="px-3 py-2">תיאור</th>
-                                            <th className="px-3 py-2">אובדן הכנסה</th>
-                                            <th className="px-3 py-2">אובדן רווח</th>
+                                            <th className="px-3 py-2.5 whitespace-nowrap">תאריך</th>
+                                            <th className="px-3 py-2.5 whitespace-nowrap">הזמנה</th>
+                                            <th className="px-3 py-2.5">תיאור</th>
+                                            <th className="px-3 py-2.5 whitespace-nowrap tabular-nums">אובדן הכנסה</th>
+                                            <th className="px-3 py-2.5 whitespace-nowrap tabular-nums">אובדן רווח</th>
                                         </tr>
                                     </thead>
                                     <tbody className="divide-y divide-slate-100">
                                         {stats.lostDealsList.length === 0 ? (
-                                            <tr><td colSpan={4} className="px-3 py-4 text-slate-500 text-center">אין עסקאות אבודות בתקופה הנבחרת</td></tr>
+                                            <tr><td colSpan={5} className="px-3 py-4 text-slate-500 text-center">אין עסקאות אבודות בתקופה הנבחרת</td></tr>
                                         ) : (
-                                            stats.lostDealsList.map((order) => {
+                                            sortOrdersByDate(stats.lostDealsList, 'lost').map((order) => {
                                                 const { totalAmount, profit } = calculateOrderTotals(order);
                                                 return (
                                                     <tr
@@ -1000,10 +1039,11 @@ const StrongNumberCard: React.FC<{
                                                         className="hover:bg-red-50/50 cursor-pointer"
                                                         onClick={() => { onNavigateToOrder?.(order.id); setLostDealsModalOpen(false); }}
                                                     >
-                                                        <td className="px-3 py-2 font-medium text-primary">{order.orderNumber}</td>
-                                                        <td className="px-3 py-2 text-slate-700 max-w-[200px] truncate" title={order.description}>{order.description || '—'}</td>
-                                                        <td className="px-3 py-2 font-medium">{formatCurrency(totalAmount)}</td>
-                                                        <td className="px-3 py-2">{formatCurrency(profit)}</td>
+                                                        <td className="px-3 py-2.5 text-slate-600 whitespace-nowrap">{getOrderDisplayDate(order, 'lost').toLocaleDateString('he-IL')}</td>
+                                                        <td className="px-3 py-2.5 font-medium text-primary whitespace-nowrap">{order.orderNumber}</td>
+                                                        <td className="px-3 py-2.5 text-slate-700 min-w-[200px] max-w-[360px] line-clamp-2 break-words align-top" title={order.description}>{order.description || '—'}</td>
+                                                        <td className="px-3 py-2.5 font-medium tabular-nums">{formatCurrency(totalAmount)}</td>
+                                                        <td className="px-3 py-2.5 tabular-nums">{formatCurrency(profit)}</td>
                                                     </tr>
                                                 );
                                             })
@@ -1017,29 +1057,32 @@ const StrongNumberCard: React.FC<{
 
                 {/* Today's deals modal */}
                 {dailyModalOpen && (
-                    <Modal title="עסקאות שאושרו היום" onClose={() => setDailyModalOpen(false)}>
+                    <Modal title="עסקאות שאושרו היום" onClose={() => setDailyModalOpen(false)} size="2xl">
+                        <SortBar count={stats.dailyDealsList.length} />
                         <div className="overflow-x-auto max-h-[60vh] border border-slate-200 rounded-lg">
                             <table className="min-w-full text-sm text-right">
                                 <thead className="bg-slate-50 text-slate-600 font-bold sticky top-0">
                                     <tr>
-                                        <th className="px-3 py-2">הזמנה</th>
-                                        <th className="px-3 py-2">תיאור</th>
-                                        <th className="px-3 py-2">הכנסה</th>
-                                        <th className="px-3 py-2">רווח</th>
+                                        <th className="px-3 py-2.5 whitespace-nowrap">תאריך</th>
+                                        <th className="px-3 py-2.5 whitespace-nowrap">הזמנה</th>
+                                        <th className="px-3 py-2.5">תיאור</th>
+                                        <th className="px-3 py-2.5 whitespace-nowrap tabular-nums">הכנסה</th>
+                                        <th className="px-3 py-2.5 whitespace-nowrap tabular-nums">רווח</th>
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-slate-100">
                                     {stats.dailyDealsList.length === 0 ? (
-                                        <tr><td colSpan={4} className="px-3 py-4 text-slate-500 text-center">{selectedDailyDate ? `אין עסקאות ב־${dailyCardTitle}` : 'אין עסקאות היום'}</td></tr>
+                                        <tr><td colSpan={5} className="px-3 py-4 text-slate-500 text-center">{selectedDailyDate ? `אין עסקאות ב־${dailyCardTitle}` : 'אין עסקאות היום'}</td></tr>
                                     ) : (
-                                        stats.dailyDealsList.map((order) => {
+                                        sortOrdersByDate(stats.dailyDealsList, 'deal').map((order) => {
                                             const { totalAmount, profit } = calculateOrderTotals(order);
                                             return (
                                                 <tr key={order.id} className="hover:bg-indigo-50/50 cursor-pointer" onClick={() => { onNavigateToOrder?.(order.id); setDailyModalOpen(false); }}>
-                                                    <td className="px-3 py-2 font-medium text-primary">{order.orderNumber}</td>
-                                                    <td className="px-3 py-2 text-slate-700 max-w-[200px] truncate" title={order.description}>{order.description || '—'}</td>
-                                                    <td className="px-3 py-2 font-medium">{formatCurrency(totalAmount)}</td>
-                                                    <td className="px-3 py-2">{formatCurrency(profit)}</td>
+                                                    <td className="px-3 py-2.5 text-slate-600 whitespace-nowrap">{getOrderDisplayDate(order, 'deal').toLocaleDateString('he-IL')}</td>
+                                                    <td className="px-3 py-2.5 font-medium text-primary whitespace-nowrap">{order.orderNumber}</td>
+                                                    <td className="px-3 py-2.5 text-slate-700 min-w-[200px] max-w-[360px] line-clamp-2 break-words align-top" title={order.description}>{order.description || '—'}</td>
+                                                    <td className="px-3 py-2.5 font-medium tabular-nums">{formatCurrency(totalAmount)}</td>
+                                                    <td className="px-3 py-2.5 tabular-nums">{formatCurrency(profit)}</td>
                                                 </tr>
                                             );
                                         })
@@ -1052,29 +1095,32 @@ const StrongNumberCard: React.FC<{
 
                 {/* Month deals modal */}
                 {monthlyModalOpen && (
-                    <Modal title="עסקאות החודש" onClose={() => setMonthlyModalOpen(false)}>
+                    <Modal title="עסקאות החודש" onClose={() => setMonthlyModalOpen(false)} size="2xl">
+                        <SortBar count={stats.monthlyDealsList.length} />
                         <div className="overflow-x-auto max-h-[60vh] border border-slate-200 rounded-lg">
                             <table className="min-w-full text-sm text-right">
                                 <thead className="bg-slate-50 text-slate-600 font-bold sticky top-0">
                                     <tr>
-                                        <th className="px-3 py-2">הזמנה</th>
-                                        <th className="px-3 py-2">תיאור</th>
-                                        <th className="px-3 py-2">הכנסה</th>
-                                        <th className="px-3 py-2">רווח</th>
+                                        <th className="px-3 py-2.5 whitespace-nowrap">תאריך</th>
+                                        <th className="px-3 py-2.5 whitespace-nowrap">הזמנה</th>
+                                        <th className="px-3 py-2.5">תיאור</th>
+                                        <th className="px-3 py-2.5 whitespace-nowrap tabular-nums">הכנסה</th>
+                                        <th className="px-3 py-2.5 whitespace-nowrap tabular-nums">רווח</th>
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-slate-100">
                                     {stats.monthlyDealsList.length === 0 ? (
-                                        <tr><td colSpan={4} className="px-3 py-4 text-slate-500 text-center">אין עסקאות בחודש</td></tr>
+                                        <tr><td colSpan={5} className="px-3 py-4 text-slate-500 text-center">אין עסקאות בחודש</td></tr>
                                     ) : (
-                                        stats.monthlyDealsList.map((order) => {
+                                        sortOrdersByDate(stats.monthlyDealsList, 'deal').map((order) => {
                                             const { totalAmount, profit } = calculateOrderTotals(order);
                                             return (
                                                 <tr key={order.id} className="hover:bg-blue-50/50 cursor-pointer" onClick={() => { onNavigateToOrder?.(order.id); setMonthlyModalOpen(false); }}>
-                                                    <td className="px-3 py-2 font-medium text-primary">{order.orderNumber}</td>
-                                                    <td className="px-3 py-2 text-slate-700 max-w-[200px] truncate" title={order.description}>{order.description || '—'}</td>
-                                                    <td className="px-3 py-2 font-medium">{formatCurrency(totalAmount)}</td>
-                                                    <td className="px-3 py-2">{formatCurrency(profit)}</td>
+                                                    <td className="px-3 py-2.5 text-slate-600 whitespace-nowrap">{getOrderDisplayDate(order, 'deal').toLocaleDateString('he-IL')}</td>
+                                                    <td className="px-3 py-2.5 font-medium text-primary whitespace-nowrap">{order.orderNumber}</td>
+                                                    <td className="px-3 py-2.5 text-slate-700 min-w-[200px] max-w-[360px] line-clamp-2 break-words align-top" title={order.description}>{order.description || '—'}</td>
+                                                    <td className="px-3 py-2.5 font-medium tabular-nums">{formatCurrency(totalAmount)}</td>
+                                                    <td className="px-3 py-2.5 tabular-nums">{formatCurrency(profit)}</td>
                                                 </tr>
                                             );
                                         })
@@ -1087,29 +1133,32 @@ const StrongNumberCard: React.FC<{
 
                 {/* Year deals modal */}
                 {yearlyModalOpen && (
-                    <Modal title="עסקאות השנה" onClose={() => setYearlyModalOpen(false)}>
+                    <Modal title="עסקאות השנה" onClose={() => setYearlyModalOpen(false)} size="2xl">
+                        <SortBar count={stats.yearlyDealsList.length} />
                         <div className="overflow-x-auto max-h-[60vh] border border-slate-200 rounded-lg">
                             <table className="min-w-full text-sm text-right">
                                 <thead className="bg-slate-50 text-slate-600 font-bold sticky top-0">
                                     <tr>
-                                        <th className="px-3 py-2">הזמנה</th>
-                                        <th className="px-3 py-2">תיאור</th>
-                                        <th className="px-3 py-2">הכנסה</th>
-                                        <th className="px-3 py-2">רווח</th>
+                                        <th className="px-3 py-2.5 whitespace-nowrap">תאריך</th>
+                                        <th className="px-3 py-2.5 whitespace-nowrap">הזמנה</th>
+                                        <th className="px-3 py-2.5">תיאור</th>
+                                        <th className="px-3 py-2.5 whitespace-nowrap tabular-nums">הכנסה</th>
+                                        <th className="px-3 py-2.5 whitespace-nowrap tabular-nums">רווח</th>
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-slate-100">
                                     {stats.yearlyDealsList.length === 0 ? (
-                                        <tr><td colSpan={4} className="px-3 py-4 text-slate-500 text-center">אין עסקאות השנה</td></tr>
+                                        <tr><td colSpan={5} className="px-3 py-4 text-slate-500 text-center">אין עסקאות השנה</td></tr>
                                     ) : (
-                                        stats.yearlyDealsList.map((order) => {
+                                        sortOrdersByDate(stats.yearlyDealsList, 'deal').map((order) => {
                                             const { totalAmount, profit } = calculateOrderTotals(order);
                                             return (
                                                 <tr key={order.id} className="hover:bg-sky-50/50 cursor-pointer" onClick={() => { onNavigateToOrder?.(order.id); setYearlyModalOpen(false); }}>
-                                                    <td className="px-3 py-2 font-medium text-primary">{order.orderNumber}</td>
-                                                    <td className="px-3 py-2 text-slate-700 max-w-[200px] truncate" title={order.description}>{order.description || '—'}</td>
-                                                    <td className="px-3 py-2 font-medium">{formatCurrency(totalAmount)}</td>
-                                                    <td className="px-3 py-2">{formatCurrency(profit)}</td>
+                                                    <td className="px-3 py-2.5 text-slate-600 whitespace-nowrap">{getOrderDisplayDate(order, 'deal').toLocaleDateString('he-IL')}</td>
+                                                    <td className="px-3 py-2.5 font-medium text-primary whitespace-nowrap">{order.orderNumber}</td>
+                                                    <td className="px-3 py-2.5 text-slate-700 min-w-[200px] max-w-[360px] line-clamp-2 break-words align-top" title={order.description}>{order.description || '—'}</td>
+                                                    <td className="px-3 py-2.5 font-medium tabular-nums">{formatCurrency(totalAmount)}</td>
+                                                    <td className="px-3 py-2.5 tabular-nums">{formatCurrency(profit)}</td>
                                                 </tr>
                                             );
                                         })
@@ -1122,25 +1171,27 @@ const StrongNumberCard: React.FC<{
 
                 {/* Collection modal - overdue + this month */}
                 {collectionModalOpen && (
-                    <Modal title="גבייה" onClose={() => setCollectionModalOpen(false)}>
+                    <Modal title="גבייה" onClose={() => setCollectionModalOpen(false)} size="2xl">
                         <div className="space-y-4">
                             <section>
                                 <h4 className="text-sm font-bold text-rose-700 mb-2">בחריגה ({stats.collection.overdueOrders.length})</h4>
+                                <SortBar count={stats.collection.overdueOrders.length} />
                                 <div className="overflow-x-auto max-h-[40vh] border border-slate-200 rounded-lg">
                                     <table className="min-w-full text-sm text-right">
                                         <thead className="bg-slate-50 text-slate-600 font-bold sticky top-0">
                                             <tr>
-                                                <th className="px-3 py-2">הזמנה</th>
-                                                <th className="px-3 py-2">תיאור</th>
-                                                <th className="px-3 py-2">יתרה לתשלום</th>
-                                                <th className="px-3 py-2">מועד תשלום</th>
+                                                <th className="px-3 py-2.5 whitespace-nowrap">תאריך אישור</th>
+                                                <th className="px-3 py-2.5 whitespace-nowrap">הזמנה</th>
+                                                <th className="px-3 py-2.5">תיאור</th>
+                                                <th className="px-3 py-2.5 whitespace-nowrap tabular-nums">יתרה לתשלום</th>
+                                                <th className="px-3 py-2.5 whitespace-nowrap">מועד תשלום</th>
                                             </tr>
                                         </thead>
                                         <tbody className="divide-y divide-slate-100">
                                             {stats.collection.overdueOrders.length === 0 ? (
-                                                <tr><td colSpan={4} className="px-3 py-4 text-slate-500 text-center">אין חריגות</td></tr>
+                                                <tr><td colSpan={5} className="px-3 py-4 text-slate-500 text-center">אין חריגות</td></tr>
                                             ) : (
-                                                stats.collection.overdueOrders.map((order) => {
+                                                sortOrdersByDate(stats.collection.overdueOrders, 'collection').map((order) => {
                                                     const { totalAmount, totalPaid } = calculateOrderTotals(order);
                                                     const orderVat = order.vatRate ?? vatRate;
                                                     const dueWithVat = totalAmount * (1 + orderVat / 100);
@@ -1149,10 +1200,11 @@ const StrongNumberCard: React.FC<{
                                                     const dueDate = calculateDueDate(baseDate, order.paymentTerms);
                                                     return (
                                                         <tr key={order.id} className="hover:bg-rose-50/50 cursor-pointer" onClick={() => { onNavigateToOrder?.(order.id); setCollectionModalOpen(false); }}>
-                                                            <td className="px-3 py-2 font-medium text-primary">{order.orderNumber}</td>
-                                                            <td className="px-3 py-2 text-slate-700 max-w-[200px] truncate" title={order.description}>{order.description || '—'}</td>
-                                                            <td className="px-3 py-2 font-medium">{formatCurrency(balanceInclVat)}</td>
-                                                            <td className="px-3 py-2">{new Date(dueDate).toLocaleDateString('he-IL')}</td>
+                                                            <td className="px-3 py-2.5 text-slate-600 whitespace-nowrap">{getOrderDisplayDate(order, 'collection').toLocaleDateString('he-IL')}</td>
+                                                            <td className="px-3 py-2.5 font-medium text-primary whitespace-nowrap">{order.orderNumber}</td>
+                                                            <td className="px-3 py-2.5 text-slate-700 min-w-[200px] max-w-[360px] line-clamp-2 break-words align-top" title={order.description}>{order.description || '—'}</td>
+                                                            <td className="px-3 py-2.5 font-medium tabular-nums">{formatCurrency(balanceInclVat)}</td>
+                                                            <td className="px-3 py-2.5 whitespace-nowrap">{new Date(dueDate).toLocaleDateString('he-IL')}</td>
                                                         </tr>
                                                     );
                                                 })
@@ -1163,21 +1215,23 @@ const StrongNumberCard: React.FC<{
                             </section>
                             <section>
                                 <h4 className="text-sm font-bold text-slate-700 mb-2">החודש ({stats.collection.thisMonthOrders.length})</h4>
+                                <SortBar count={stats.collection.thisMonthOrders.length} />
                                 <div className="overflow-x-auto max-h-[40vh] border border-slate-200 rounded-lg">
                                     <table className="min-w-full text-sm text-right">
                                         <thead className="bg-slate-50 text-slate-600 font-bold sticky top-0">
                                             <tr>
-                                                <th className="px-3 py-2">הזמנה</th>
-                                                <th className="px-3 py-2">תיאור</th>
-                                                <th className="px-3 py-2">יתרה לתשלום</th>
-                                                <th className="px-3 py-2">מועד תשלום</th>
+                                                <th className="px-3 py-2.5 whitespace-nowrap">תאריך אישור</th>
+                                                <th className="px-3 py-2.5 whitespace-nowrap">הזמנה</th>
+                                                <th className="px-3 py-2.5">תיאור</th>
+                                                <th className="px-3 py-2.5 whitespace-nowrap tabular-nums">יתרה לתשלום</th>
+                                                <th className="px-3 py-2.5 whitespace-nowrap">מועד תשלום</th>
                                             </tr>
                                         </thead>
                                         <tbody className="divide-y divide-slate-100">
                                             {stats.collection.thisMonthOrders.length === 0 ? (
-                                                <tr><td colSpan={4} className="px-3 py-4 text-slate-500 text-center">אין תשלומים החודש</td></tr>
+                                                <tr><td colSpan={5} className="px-3 py-4 text-slate-500 text-center">אין תשלומים החודש</td></tr>
                                             ) : (
-                                                stats.collection.thisMonthOrders.map((order) => {
+                                                sortOrdersByDate(stats.collection.thisMonthOrders, 'collection').map((order) => {
                                                     const { totalAmount, totalPaid } = calculateOrderTotals(order);
                                                     const orderVat = order.vatRate ?? vatRate;
                                                     const dueWithVat = totalAmount * (1 + orderVat / 100);
@@ -1186,10 +1240,11 @@ const StrongNumberCard: React.FC<{
                                                     const dueDate = calculateDueDate(baseDate, order.paymentTerms);
                                                     return (
                                                         <tr key={order.id} className="hover:bg-slate-50 cursor-pointer" onClick={() => { onNavigateToOrder?.(order.id); setCollectionModalOpen(false); }}>
-                                                            <td className="px-3 py-2 font-medium text-primary">{order.orderNumber}</td>
-                                                            <td className="px-3 py-2 text-slate-700 max-w-[200px] truncate" title={order.description}>{order.description || '—'}</td>
-                                                            <td className="px-3 py-2 font-medium">{formatCurrency(balanceInclVat)}</td>
-                                                            <td className="px-3 py-2">{new Date(dueDate).toLocaleDateString('he-IL')}</td>
+                                                            <td className="px-3 py-2.5 text-slate-600 whitespace-nowrap">{getOrderDisplayDate(order, 'collection').toLocaleDateString('he-IL')}</td>
+                                                            <td className="px-3 py-2.5 font-medium text-primary whitespace-nowrap">{order.orderNumber}</td>
+                                                            <td className="px-3 py-2.5 text-slate-700 min-w-[200px] max-w-[360px] line-clamp-2 break-words align-top" title={order.description}>{order.description || '—'}</td>
+                                                            <td className="px-3 py-2.5 font-medium tabular-nums">{formatCurrency(balanceInclVat)}</td>
+                                                            <td className="px-3 py-2.5 whitespace-nowrap">{new Date(dueDate).toLocaleDateString('he-IL')}</td>
                                                         </tr>
                                                     );
                                                 })
@@ -1204,25 +1259,28 @@ const StrongNumberCard: React.FC<{
 
                 {/* Leads modal */}
                 {leadsModalOpen && (
-                    <Modal title="לידים חדשים – ממתינים לטיפול" onClose={() => setLeadsModalOpen(false)}>
+                    <Modal title="לידים חדשים – ממתינים לטיפול" onClose={() => setLeadsModalOpen(false)} size="2xl">
+                        <SortBar count={stats.untouchedLeadsList.length} />
                         <div className="overflow-x-auto max-h-[60vh] border border-slate-200 rounded-lg">
                             <table className="min-w-full text-sm text-right">
                                 <thead className="bg-slate-50 text-slate-600 font-bold sticky top-0">
                                     <tr>
-                                        <th className="px-3 py-2">הזמנה</th>
-                                        <th className="px-3 py-2">תיאור</th>
-                                        <th className="px-3 py-2">סטטוס</th>
+                                        <th className="px-3 py-2.5 whitespace-nowrap">תאריך</th>
+                                        <th className="px-3 py-2.5 whitespace-nowrap">הזמנה</th>
+                                        <th className="px-3 py-2.5">תיאור</th>
+                                        <th className="px-3 py-2.5 whitespace-nowrap">סטטוס</th>
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-slate-100">
                                     {stats.untouchedLeadsList.length === 0 ? (
-                                        <tr><td colSpan={3} className="px-3 py-4 text-slate-500 text-center">אין לידים ממתינים</td></tr>
+                                        <tr><td colSpan={4} className="px-3 py-4 text-slate-500 text-center">אין לידים ממתינים</td></tr>
                                     ) : (
-                                        stats.untouchedLeadsList.map((order) => (
+                                        sortOrdersByDate(stats.untouchedLeadsList, 'lead').map((order) => (
                                             <tr key={order.id} className="hover:bg-orange-50/50 cursor-pointer" onClick={() => { onNavigateToOrder?.(order.id); setLeadsModalOpen(false); }}>
-                                                <td className="px-3 py-2 font-medium text-primary">{order.orderNumber}</td>
-                                                <td className="px-3 py-2 text-slate-700 max-w-[200px] truncate" title={order.description}>{order.description || '—'}</td>
-                                                <td className="px-3 py-2">{order.orderStatus || '—'}</td>
+                                                <td className="px-3 py-2.5 text-slate-600 whitespace-nowrap">{getOrderDisplayDate(order, 'lead').toLocaleDateString('he-IL')}</td>
+                                                <td className="px-3 py-2.5 font-medium text-primary whitespace-nowrap">{order.orderNumber}</td>
+                                                <td className="px-3 py-2.5 text-slate-700 min-w-[200px] max-w-[360px] line-clamp-2 break-words align-top" title={order.description}>{order.description || '—'}</td>
+                                                <td className="px-3 py-2.5">{order.orderStatus || '—'}</td>
                                             </tr>
                                         ))
                                     )}
@@ -1234,29 +1292,32 @@ const StrongNumberCard: React.FC<{
 
                 {/* Quotes modal */}
                 {quotesModalOpen && (
-                    <Modal title="הצעות מחיר" onClose={() => setQuotesModalOpen(false)}>
+                    <Modal title="הצעות מחיר" onClose={() => setQuotesModalOpen(false)} size="2xl">
+                        <SortBar count={stats.quotes.list.length} />
                         <div className="overflow-x-auto max-h-[60vh] border border-slate-200 rounded-lg">
                             <table className="min-w-full text-sm text-right">
                                 <thead className="bg-slate-50 text-slate-600 font-bold sticky top-0">
                                     <tr>
-                                        <th className="px-3 py-2">הזמנה</th>
-                                        <th className="px-3 py-2">תיאור</th>
-                                        <th className="px-3 py-2">פוטנציאל</th>
-                                        <th className="px-3 py-2">רווח צפוי</th>
+                                        <th className="px-3 py-2.5 whitespace-nowrap">תאריך</th>
+                                        <th className="px-3 py-2.5 whitespace-nowrap">הזמנה</th>
+                                        <th className="px-3 py-2.5">תיאור</th>
+                                        <th className="px-3 py-2.5 whitespace-nowrap tabular-nums">פוטנציאל</th>
+                                        <th className="px-3 py-2.5 whitespace-nowrap tabular-nums">רווח צפוי</th>
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-slate-100">
                                     {stats.quotes.list.length === 0 ? (
-                                        <tr><td colSpan={4} className="px-3 py-4 text-slate-500 text-center">אין הצעות מחיר פתוחות</td></tr>
+                                        <tr><td colSpan={5} className="px-3 py-4 text-slate-500 text-center">אין הצעות מחיר פתוחות</td></tr>
                                     ) : (
-                                        stats.quotes.list.map((order) => {
+                                        sortOrdersByDate(stats.quotes.list, 'quote').map((order) => {
                                             const { totalAmount, profit } = calculateOrderTotals(order);
                                             return (
                                                 <tr key={order.id} className="hover:bg-purple-50/50 cursor-pointer" onClick={() => { onNavigateToOrder?.(order.id); setQuotesModalOpen(false); }}>
-                                                    <td className="px-3 py-2 font-medium text-primary">{order.orderNumber}</td>
-                                                    <td className="px-3 py-2 text-slate-700 max-w-[200px] truncate" title={order.description}>{order.description || '—'}</td>
-                                                    <td className="px-3 py-2 font-medium">{formatCurrency(totalAmount)}</td>
-                                                    <td className="px-3 py-2">{formatCurrency(profit)}</td>
+                                                    <td className="px-3 py-2.5 text-slate-600 whitespace-nowrap">{getOrderDisplayDate(order, 'quote').toLocaleDateString('he-IL')}</td>
+                                                    <td className="px-3 py-2.5 font-medium text-primary whitespace-nowrap">{order.orderNumber}</td>
+                                                    <td className="px-3 py-2.5 text-slate-700 min-w-[200px] max-w-[360px] line-clamp-2 break-words align-top" title={order.description}>{order.description || '—'}</td>
+                                                    <td className="px-3 py-2.5 font-medium tabular-nums">{formatCurrency(totalAmount)}</td>
+                                                    <td className="px-3 py-2.5 tabular-nums">{formatCurrency(profit)}</td>
                                                 </tr>
                                             );
                                         })
@@ -1317,6 +1378,23 @@ const Dashboard: React.FC<DashboardProps> = ({
     const [wallInput, setWallInput] = useState('');
     const [wallSending, setWallSending] = useState(false);
 
+    // דדופליקציה: רשומה אחת לכל מספר הזמנה (המעודכנת ביותר) – תואם ללוח הזמנות, מונע כפילות
+    const ordersDeduped = useMemo(() => {
+        const getMostRecentDate = (o: Order) => o.updatedAt || o.createdAt || o.date;
+        const byNumber = new Map<string, Order>();
+        for (const o of orders) {
+            const raw = (o.orderNumber != null && o.orderNumber !== '') ? String(o.orderNumber).trim() : '';
+            const key = raw !== '' ? raw.toUpperCase() : (o.id || '');
+            if (!key) continue;
+            const existing = byNumber.get(key);
+            const oTime = getMostRecentDate(o) ? new Date(getMostRecentDate(o) as string | Date).getTime() : 0;
+            if (!existing || new Date(getMostRecentDate(existing) as string | Date).getTime() < oTime) {
+                byNumber.set(key, o);
+            }
+        }
+        return Array.from(byNumber.values());
+    }, [orders]);
+
     useEffect(() => {
         let cancelled = false;
         mongoService.getWallPosts().then(data => { if (!cancelled) setWallPosts(data); }).catch(() => {});
@@ -1345,13 +1423,13 @@ const Dashboard: React.FC<DashboardProps> = ({
         }
     };
 
-    // Aggregate Tasks
+    // Aggregate Tasks (נתונים מדובללים – מונע כפילות)
     const allTasks = useMemo(() => {
         const tasks: any[] = [];
         const today = new Date();
         today.setHours(0,0,0,0);
 
-        orders.forEach(order => {
+        ordersDeduped.forEach(order => {
             if (order.timeline) {
                 order.timeline.forEach(event => {
                     if (event.type === 'TASK' && !event.isCompleted && event.dueDate) {
@@ -1376,7 +1454,7 @@ const Dashboard: React.FC<DashboardProps> = ({
             }
         });
         return tasks.sort((a,b) => a.dueDate.getTime() - b.dueDate.getTime());
-    }, [orders, customers]);
+    }, [ordersDeduped, customers]);
 
     const taskCounts = useMemo(() => {
         return {
@@ -1402,7 +1480,7 @@ const Dashboard: React.FC<DashboardProps> = ({
     const currentMonthlyRevenue = useMemo(() => {
          const now = new Date();
          const monthStr = getDateStringIsrael(now).slice(0, 7);
-         const activeDeals = orders.filter(order => {
+         const activeDeals = ordersDeduped.filter(order => {
              const config = statusConfigs.find(c => c.label === order.orderStatus);
              return config ? config.isActiveDeal === true : false;
          });
@@ -1426,7 +1504,7 @@ const Dashboard: React.FC<DashboardProps> = ({
          const monthlyDeals = deduped.filter(o => orderDateStr(o).slice(0, 7) === monthStr);
          const forGoal = monthlyDeals.filter(o => !o.hiddenFromSalesGoal);
          return forGoal.reduce((sum, order) => sum + calculateOrderTotals(order).totalAmount, 0);
-    }, [orders, statusConfigs]);
+    }, [ordersDeduped, statusConfigs]);
 
     return (
         <div className="space-y-6 pb-10">
@@ -1441,7 +1519,7 @@ const Dashboard: React.FC<DashboardProps> = ({
             </div>
 
             {/* Strong Numbers Row */}
-            <StrongNumberCard orders={orders} statusConfigs={statusConfigs} vatRate={vatRate} roleType={user?.roleType} onNavigateToOrder={onNavigateToOrder} />
+            <StrongNumberCard orders={ordersDeduped} statusConfigs={statusConfigs} vatRate={vatRate} roleType={user?.roleType} onNavigateToOrder={onNavigateToOrder} />
 
             {/* Bottom Section: Operations Calendar & Tasks */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -1449,7 +1527,7 @@ const Dashboard: React.FC<DashboardProps> = ({
                  {/* Smart Operations Calendar (New) */}
                  <div className="lg:col-span-2">
                     <OperationsCalendarWidget 
-                        orders={orders} 
+                        orders={ordersDeduped} 
                         manualEvents={manualEvents}
                         addManualEvent={addManualEvent}
                         onNavigateToOrder={onNavigateToOrder}

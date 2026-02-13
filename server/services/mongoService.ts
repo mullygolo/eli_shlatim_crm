@@ -422,6 +422,46 @@ export async function getOrderById(orderId: string): Promise<Order | null> {
     }
 }
 
+/** Orders in "relevant" statuses for call center: isLead, isActiveDeal, or isQuote (exclude isLost). Returns per customerId. */
+export async function getRelevantOrdersForCustomers(customerIds: string[]): Promise<Record<string, { id: string; orderNumber: string; orderStatus: string }[]>> {
+    const result: Record<string, { id: string; orderNumber: string; orderStatus: string }[]> = {};
+    const unique = [...new Set(customerIds)].filter(Boolean);
+    if (unique.length === 0) return result;
+    try {
+        const statusConfigs = await getStatusConfigs();
+        const relevantLabels = new Set(
+            statusConfigs
+                .filter(c => (c.isLead || c.isActiveDeal || c.isQuote) && !c.isLost)
+                .map(c => (c.label || '').trim())
+                .filter(Boolean)
+        );
+        if (relevantLabels.size === 0) {
+            unique.forEach(id => { result[id] = []; });
+            return result;
+        }
+        const database = await getDb();
+        const collection = database.collection<Order>('orders');
+        const docs = await collection
+            .find({ customerId: { $in: unique } })
+            .project({ id: 1, orderNumber: 1, orderStatus: 1, customerId: 1 })
+            .sort({ date: -1 })
+            .limit(1000)
+            .toArray();
+        unique.forEach(id => { result[id] = []; });
+        for (const doc of docs) {
+            const o = doc as { id: string; orderNumber: string; orderStatus: string; customerId: string };
+            const statusTrimmed = (o.orderStatus || '').trim();
+            if (o.customerId && result[o.customerId] && relevantLabels.has(statusTrimmed)) {
+                result[o.customerId].push({ id: o.id, orderNumber: o.orderNumber || '', orderStatus: statusTrimmed });
+            }
+        }
+        return result;
+    } catch (error) {
+        console.error('Error in getRelevantOrdersForCustomers:', error);
+        throw error;
+    }
+}
+
 /** Find one order by order number (trimmed). For import: update existing order status. */
 export async function getOrderByOrderNumber(orderNumber: string): Promise<Order | null> {
     try {
@@ -1153,18 +1193,20 @@ export async function getPayableItems(
         }
         
         // 3. Date Range Filter (BUT keep overdue items visible!)
+        // payment_log: do NOT filter by date on server - client filters by payment date
         const viewMode = filters.viewMode || 'forecast';
-        if (filters.dateStart || filters.dateEnd) {
-            const start = filters.dateStart ? new Date(filters.dateStart) : null;
-            const end = filters.dateEnd ? new Date(filters.dateEnd) : null;
-            
-            if (start) start.setHours(0, 0, 0, 0);
-            if (end) end.setHours(23, 59, 59, 999);
+        if (viewMode !== 'payment_log' && (filters.dateStart || filters.dateEnd)) {
+            const parseLocalDate = (s: string): Date => {
+                const [y, m, d] = s.split('-').map(Number);
+                return new Date(y, (m || 1) - 1, d || 1, 0, 0, 0, 0);
+            };
+            const start = filters.dateStart ? parseLocalDate(filters.dateStart) : null;
+            const end = filters.dateEnd ? (() => {
+                const [y, m, d] = filters.dateEnd!.split('-').map(Number);
+                return new Date(y, (m || 1) - 1, d || 1, 23, 59, 59, 999);
+            })() : null;
             
             filteredItems = filteredItems.filter(item => {
-                // Always show overdue unpaid items regardless of date filter
-                if (item.timeStatus === 'איחור' && item.remainingAmount > 1) return true;
-                
                 const dateToCheck = viewMode === 'forecast' ? item.dueDate : item.orderDate;
                 if (start && dateToCheck < start) return false;
                 if (end && dateToCheck > end) return false;
@@ -3833,6 +3875,385 @@ export async function getCallLogs(): Promise<CallLog[]> {
         console.error('Error fetching call logs:', error);
         throw error;
     }
+}
+
+/** Normalize phone for matching: digits only. */
+function normalizePhone(s: string): string {
+    return (s || '').replace(/\D/g, '');
+}
+
+/**
+ * For each requested phone, return all customers (id, name) whose any contact.phone matches (after normalizing).
+ * Keys in result are normalized phones; value is array so one phone can match multiple customers.
+ */
+export async function getCustomersByPhones(phones: string[]): Promise<Record<string, { customerId: string; customerName: string }[]>> {
+    const result: Record<string, { customerId: string; customerName: string }[]> = {};
+    const requested = [...new Set(phones.map(normalizePhone).filter((p) => p.length >= 6))];
+    if (requested.length === 0) return result;
+    try {
+        const database = await getDb();
+        const collection = database.collection<Customer>('customers');
+        const docs = await collection
+            .find({}, { projection: { id: 1, name: 1, 'contacts.phone': 1 } })
+            .limit(15000)
+            .toArray();
+        const map = new Map<string, { customerId: string; customerName: string }[]>();
+        for (const doc of docs) {
+            const c = doc as { id: string; name: string; contacts?: { phone?: string }[] };
+            const name = (c.name || '').trim();
+            for (const contact of c.contacts || []) {
+                const p = normalizePhone(contact.phone || '');
+                if (p.length >= 6) {
+                    const entry = { customerId: c.id, customerName: name };
+                    if (!map.has(p)) map.set(p, []);
+                    const arr = map.get(p)!;
+                    if (!arr.some((x) => x.customerId === c.id)) arr.push(entry);
+                }
+            }
+        }
+        for (const norm of requested) {
+            const found = map.get(norm);
+            if (found && found.length > 0) result[norm] = found;
+        }
+        return result;
+    } catch (error) {
+        console.error('Error in getCustomersByPhones:', error);
+        throw error;
+    }
+}
+
+/**
+ * For each requested phone, return all suppliers (id, name) whose any contact.phone matches (after normalizing).
+ * Keys in result are normalized phones; value is array so one phone can match multiple suppliers.
+ */
+export async function getSuppliersByPhones(phones: string[]): Promise<Record<string, { supplierId: string; supplierName: string }[]>> {
+    const result: Record<string, { supplierId: string; supplierName: string }[]> = {};
+    const requested = [...new Set(phones.map(normalizePhone).filter((p) => p.length >= 6))];
+    if (requested.length === 0) return result;
+    try {
+        const database = await getDb();
+        const collection = database.collection<Supplier>('suppliers');
+        const docs = await collection
+            .find({}, { projection: { id: 1, name: 1, 'contacts.phone': 1 } })
+            .limit(5000)
+            .toArray();
+        const map = new Map<string, { supplierId: string; supplierName: string }[]>();
+        for (const doc of docs) {
+            const s = doc as { id: string; name: string; contacts?: { phone?: string }[] };
+            const name = (s.name || '').trim();
+            for (const contact of s.contacts || []) {
+                const p = normalizePhone(contact.phone || '');
+                if (p.length >= 6) {
+                    const entry = { supplierId: s.id, supplierName: name };
+                    if (!map.has(p)) map.set(p, []);
+                    const arr = map.get(p)!;
+                    if (!arr.some((x) => x.supplierId === s.id)) arr.push(entry);
+                }
+            }
+        }
+        for (const norm of requested) {
+            const found = map.get(norm);
+            if (found && found.length > 0) result[norm] = found;
+        }
+        return result;
+    } catch (error) {
+        console.error('Error in getSuppliersByPhones:', error);
+        throw error;
+    }
+}
+
+/**
+ * Recent call logs where caller or callee matches any of the customer's contact phones (normalized).
+ */
+export async function getCallLogsForCustomer(customerId: string, limit: number = 20): Promise<(CallLog & { hasStoredRecording?: boolean })[]> {
+    try {
+        const customer = await getCustomerById(customerId);
+        if (!customer) return [];
+        const phonesSet = new Set<string>();
+        for (const c of customer.contacts || []) {
+            const p = normalizePhone(c.phone || '');
+            if (p.length >= 6) phonesSet.add(p);
+        }
+        if (phonesSet.size === 0) return [];
+        const database = await getDb();
+        const collection = database.collection<CallLog & { recordingData?: Buffer }>('callLogs');
+        const docs = await collection.find({}).sort({ startDate: -1 }).limit(500).toArray();
+        const out: (CallLog & { hasStoredRecording?: boolean })[] = [];
+        for (const doc of docs) {
+            if (out.length >= limit) break;
+            const log = deserializeDates(doc) as CallLog & { recordingData?: Buffer };
+            const callerNorm = normalizePhone(log.caller || '');
+            const calleeNorm = normalizePhone(log.callee || '');
+            if (phonesSet.has(callerNorm) || phonesSet.has(calleeNorm)) {
+                const { recordingData: _rd, ...rest } = log;
+                out.push({ ...rest, hasStoredRecording: !!_rd });
+            }
+        }
+        return out;
+    } catch (error) {
+        console.error('Error in getCallLogsForCustomer:', error);
+        throw error;
+    }
+}
+
+export async function getCallLogsPaginated(
+    filters: { searchTerm?: string; startDate?: string; endDate?: string; callee?: string } = {},
+    page: number = 1,
+    limit: number = 50
+): Promise<{
+    logs: (Omit<CallLog, 'recordingData'> & { hasStoredRecording: boolean })[];
+    totalCount: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+}> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<CallLog & { recordingData?: Buffer }>('callLogs');
+        const query: Record<string, unknown> = {};
+
+        if (filters.searchTerm && filters.searchTerm.trim()) {
+            const term = filters.searchTerm.trim();
+            const regex = { $regex: term, $options: 'i' };
+            query.$or = [
+                { caller: regex },
+                { callee: regex },
+                { calleeName: regex },
+                { forward: regex },
+            ];
+        }
+        // startDate in DB is stored as ISO string (serializeDates), so filter by string range for correct match
+        if (filters.startDate || filters.endDate) {
+            query.startDate = {} as Record<string, string>;
+            if (filters.startDate) {
+                (query.startDate as Record<string, string>).$gte = filters.startDate + 'T00:00:00.000Z';
+            }
+            if (filters.endDate) {
+                (query.startDate as Record<string, string>).$lte = filters.endDate + 'T23:59:59.999Z';
+            }
+        }
+        if (filters.callee && filters.callee.trim()) {
+            const calleeRegex = { $regex: filters.callee.trim(), $options: 'i' as const };
+            const calleeMatch = { $or: [{ callee: calleeRegex }, { calleeName: calleeRegex }] };
+            query = { $and: [query, calleeMatch] };
+        }
+
+        const totalCount = await collection.countDocuments(query);
+        const skip = (page - 1) * limit;
+        const docs = await collection
+            .find(query)
+            .sort({ startDate: -1 })
+            .skip(skip)
+            .limit(limit)
+            .toArray();
+
+        const logs = docs.map((doc) => {
+            const { recordingData: _rd, ...rest } = deserializeDates(doc) as CallLog & { recordingData?: Buffer };
+            return { ...rest, hasStoredRecording: !!_rd };
+        });
+
+        return {
+            logs,
+            totalCount,
+            page,
+            limit,
+            totalPages: Math.ceil(totalCount / limit) || 1,
+        };
+    } catch (error) {
+        console.error('Error fetching paginated call logs:', error);
+        throw error;
+    }
+}
+
+export interface CallLogsStatsResult {
+    totalCalls: number;
+    incomingCount: number;
+    outgoingCount: number;
+    unansweredCount: number;
+    totalDurationSeconds: number;
+    totalDurationIncoming: number;
+    totalDurationOutgoing: number;
+    /** Duration where direction is not incoming/outgoing (PBX did not send direction). */
+    totalDurationUnknown: number;
+}
+
+export async function getCallLogsStats(filters: { startDate?: string; endDate?: string; callee?: string } = {}): Promise<CallLogsStatsResult> {
+    const empty: CallLogsStatsResult = {
+        totalCalls: 0,
+        incomingCount: 0,
+        outgoingCount: 0,
+        unansweredCount: 0,
+        totalDurationSeconds: 0,
+        totalDurationIncoming: 0,
+        totalDurationOutgoing: 0,
+        totalDurationUnknown: 0,
+    };
+    try {
+        const database = await getDb();
+        const collection = database.collection<CallLog>('callLogs');
+        const match: Record<string, unknown> = {};
+        // startDate in DB is stored as ISO string (serializeDates), so filter by string range
+        if (filters.startDate || filters.endDate) {
+            match.startDate = {} as Record<string, string>;
+            if (filters.startDate) {
+                (match.startDate as Record<string, string>).$gte = filters.startDate + 'T00:00:00.000Z';
+            }
+            if (filters.endDate) {
+                (match.startDate as Record<string, string>).$lte = filters.endDate + 'T23:59:59.999Z';
+            }
+        }
+        if (filters.callee && filters.callee.trim()) {
+            const calleeTerm = filters.callee.trim();
+            match.$or = [
+                { callee: new RegExp(calleeTerm, 'i') },
+                { calleeName: new RegExp(calleeTerm, 'i') },
+            ];
+        }
+        const pipeline: object[] = [{ $match: Object.keys(match).length ? match : {} }];
+        pipeline.push({
+            $group: {
+                _id: null,
+                totalCalls: { $sum: 1 },
+                incomingCount: { $sum: { $cond: [{ $eq: ['$direction', 'incoming'] }, 1, 0] } },
+                outgoingCount: { $sum: { $cond: [{ $eq: ['$direction', 'outgoing'] }, 1, 0] } },
+                unansweredCount: {
+                    $sum: {
+                        $cond: [
+                            { $not: { $in: [{ $toUpper: { $ifNull: ['$status', ''] } }, ['ANSWER', 'ANSWERED']] } },
+                            1,
+                            0,
+                        ] },
+                },
+                totalDurationSeconds: { $sum: { $ifNull: ['$durationSeconds', 0] } },
+                totalDurationIncoming: {
+                    $sum: { $cond: [{ $eq: ['$direction', 'incoming'] }, { $ifNull: ['$durationSeconds', 0] }, 0] },
+                },
+                totalDurationOutgoing: {
+                    $sum: { $cond: [{ $eq: ['$direction', 'outgoing'] }, { $ifNull: ['$durationSeconds', 0] }, 0] },
+                },
+                totalDurationUnknown: {
+                    $sum: {
+                        $cond: [
+                            { $not: { $in: ['$direction', ['incoming', 'outgoing']] } },
+                            { $ifNull: ['$durationSeconds', 0] },
+                            0,
+                        ] },
+                },
+            },
+        });
+        const result = await collection.aggregate(pipeline).toArray();
+        const r = result[0] as {
+            totalCalls?: number;
+            incomingCount?: number;
+            outgoingCount?: number;
+            unansweredCount?: number;
+            totalDurationSeconds?: number;
+            totalDurationIncoming?: number;
+            totalDurationOutgoing?: number;
+            totalDurationUnknown?: number;
+        } | undefined;
+        if (!r) return empty;
+        return {
+            totalCalls: r.totalCalls ?? 0,
+            incomingCount: r.incomingCount ?? 0,
+            outgoingCount: r.outgoingCount ?? 0,
+            unansweredCount: r.unansweredCount ?? 0,
+            totalDurationSeconds: r.totalDurationSeconds ?? 0,
+            totalDurationIncoming: r.totalDurationIncoming ?? 0,
+            totalDurationOutgoing: r.totalDurationOutgoing ?? 0,
+            totalDurationUnknown: r.totalDurationUnknown ?? 0,
+        };
+    } catch (error) {
+        console.error('Error in getCallLogsStats:', error);
+        return empty;
+    }
+}
+
+export async function getCallLogsAgents(filters: { startDate?: string; endDate?: string } = {}): Promise<{ callee: string; calleeName?: string }[]> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<CallLog>('callLogs');
+        const match: Record<string, unknown> = {};
+        // startDate in DB is stored as ISO string (serializeDates), so filter by string range
+        if (filters.startDate || filters.endDate) {
+            match.startDate = {} as Record<string, string>;
+            if (filters.startDate) {
+                (match.startDate as Record<string, string>).$gte = filters.startDate + 'T00:00:00.000Z';
+            }
+            if (filters.endDate) {
+                (match.startDate as Record<string, string>).$lte = filters.endDate + 'T23:59:59.999Z';
+            }
+        }
+        const pipeline: object[] = [
+            { $match: Object.keys(match).length ? match : {} },
+            { $group: { _id: { callee: { $ifNull: ['$callee', ''] }, calleeName: { $ifNull: ['$calleeName', ''] } } } },
+            { $match: { '_id.callee': { $ne: '' } } },
+            { $sort: { '_id.callee': 1 } },
+            { $project: { callee: '$_id.callee', calleeName: '$_id.calleeName', _id: 0 } },
+        ];
+        const result = await collection.aggregate(pipeline).toArray();
+        return (result as { callee: string; calleeName?: string }[]).filter((x) => x.callee);
+    } catch (error) {
+        console.error('Error in getCallLogsAgents:', error);
+        return [];
+    }
+}
+
+/** Build set of phone digits for direction inference (include 9-digit form for Israeli 0-prefix). */
+function phoneSetForDirectionInference(phones: string[]): Set<string> {
+    const set = new Set<string>();
+    for (const p of phones) {
+        const d = (p || '').replace(/\D/g, '');
+        if (!d) continue;
+        set.add(d);
+        if (d.length === 10 && d[0] === '0') set.add(d.slice(1));
+    }
+    return set;
+}
+
+function isInPhoneSet(norm: string, set: Set<string>): boolean {
+    return set.has(norm) || (norm.length === 9 && set.has('0' + norm));
+}
+
+/** Re-infer direction for call logs that have direction 'unknown', using extension heuristic and known agents. */
+export async function inferCallLogDirectionForUnknown(): Promise<{ updated: number }> {
+    let updated = 0;
+    try {
+        const agents = await getCallLogsAgents({});
+        const agentSet = phoneSetForDirectionInference(agents.map((a) => a.callee || '').filter(Boolean));
+        const database = await getDb();
+        const collection = database.collection<CallLog>('callLogs');
+        const cursor = collection.find({
+            $or: [{ direction: 'unknown' }, { direction: { $exists: false } }, { direction: null }],
+        });
+        for await (const doc of cursor) {
+            const caller = String(doc.caller ?? '').trim();
+            const callee = String(doc.callee ?? '').trim();
+            let newDir: 'incoming' | 'outgoing' | 'unknown' = 'unknown';
+            const callerShort = /^\d{2,5}$/.test(caller);
+            const calleeShort = /^\d{2,5}$/.test(callee);
+            if (callerShort && !calleeShort) newDir = 'outgoing';
+            else if (!callerShort && calleeShort) newDir = 'incoming';
+            if (newDir === 'unknown' && agentSet.size > 0) {
+                const callerNorm = caller.replace(/\D/g, '');
+                const calleeNorm = callee.replace(/\D/g, '');
+                const calleeInSet = isInPhoneSet(calleeNorm, agentSet);
+                const callerInSet = isInPhoneSet(callerNorm, agentSet);
+                if (calleeInSet && !callerInSet) newDir = 'incoming';
+                else if (callerInSet && !calleeInSet) newDir = 'outgoing';
+            }
+            if (newDir !== 'unknown') {
+                await collection.updateOne(
+                    { uniqueId: doc.uniqueId },
+                    { $set: { direction: newDir } }
+                );
+                updated++;
+            }
+        }
+    } catch (error) {
+        console.error('Error in inferCallLogDirectionForUnknown:', error);
+    }
+    return { updated };
 }
 
 export async function createCallLog(callLog: CallLog): Promise<CallLog> {

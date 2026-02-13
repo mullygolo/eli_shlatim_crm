@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { getOrders, createOrder, updateOrder, deleteOrder, getOrdersPaginated, getSettings, getOrderById, getOrdersByParentId, getPayableItems, getPreparationStatusSuggestions, getOrderLock, acquireOrderLock, releaseOrderLock } from '../services/mongoService.js';
+import { getOrders, createOrder, updateOrder, deleteOrder, getOrdersPaginated, getSettings, getOrderById, getOrdersByParentId, getPayableItems, getPreparationStatusSuggestions, getOrderLock, acquireOrderLock, releaseOrderLock, getRelevantOrdersForCustomers } from '../services/mongoService.js';
 import { buildImportPreview, executeImport } from '../services/orderImportService.js';
 import { verifyToken, AuthRequest } from '../middleware/auth.js';
 
@@ -54,6 +54,18 @@ router.get('/preparation-status-suggestions', async (req, res) => {
     } catch (error) {
         console.error('Error fetching preparation status suggestions:', error);
         res.status(500).json({ error: 'Failed to fetch suggestions' });
+    }
+});
+
+router.get('/relevant-for-customers', verifyToken, async (req, res) => {
+    try {
+        const ids = req.query.customerIds;
+        const customerIds = typeof ids === 'string' ? ids.split(',').map(s => s.trim()).filter(Boolean) : Array.isArray(ids) ? ids.flatMap(s => String(s).split(',').map(x => x.trim())).filter(Boolean) : [];
+        const data = await getRelevantOrdersForCustomers(customerIds);
+        res.json(data);
+    } catch (error) {
+        console.error('Error fetching relevant orders for customers:', error);
+        res.status(500).json({ error: 'Failed to fetch relevant orders' });
     }
 });
 

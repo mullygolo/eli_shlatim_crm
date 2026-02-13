@@ -35,6 +35,9 @@ interface OrdersPageProps {
     onOrderOpened?: () => void;
     openNewOrderRequest?: boolean;
     onClearedOpenNewOrderRequest?: () => void;
+    openNewOrderWithCustomerId?: string | null;
+    openNewOrderWithPhone?: string | null;
+    onClearedNewOrderPrefill?: () => void;
     statusConfigs: OrderStatusConfiguration[];
     getNextOrderNumber: () => string;
     vatRate: number;
@@ -680,6 +683,8 @@ const OrderFileManager: React.FC<{
 
 const OrderForm: React.FC<{
     order: Order | null;
+    initialCustomerId?: string;
+    initialNewCustomerPhone?: string;
     customers: Customer[];
     setCustomers: React.Dispatch<React.SetStateAction<Customer[]>>;
     suppliers: Supplier[];
@@ -696,7 +701,7 @@ const OrderForm: React.FC<{
     setHeaderContent?: (node: React.ReactNode) => void;
     readOnly?: boolean;
     lockedByUserName?: string;
-}> = ({ order, customers, setCustomers, suppliers, setSuppliers, employees, onSave, onDraftCreate, onCancel, addActivity, onSwitchOrder, statusConfigs, getNextOrderNumber, vatRate, setHeaderContent, readOnly, lockedByUserName }) => {
+}> = ({ order, initialCustomerId, initialNewCustomerPhone, customers, setCustomers, suppliers, setSuppliers, employees, onSave, onDraftCreate, onCancel, addActivity, onSwitchOrder, statusConfigs, getNextOrderNumber, vatRate, setHeaderContent, readOnly, lockedByUserName }) => {
     
     // Find Dynamic Initial Status
     const initialStatus = useMemo(() => statusConfigs.find(c => c.isLead)?.label || 'ליד חדש', [statusConfigs]);
@@ -791,6 +796,21 @@ const OrderForm: React.FC<{
     useEffect(() => {
         mongoService.getPreparationStatusSuggestions().then(setPreparationStatusSuggestions).catch(() => setPreparationStatusSuggestions([]));
     }, []);
+
+    // Prefill from call center: open new order with customer or phone
+    useEffect(() => {
+        if (order) return;
+        if (initialCustomerId) {
+            setFormData(prev => ({ ...prev, customerId: initialCustomerId }));
+            setCustomerMode('EXISTING');
+            setShowNewCustomerForm(false);
+        }
+        if (initialNewCustomerPhone) {
+            setCustomerMode('NEW');
+            setShowNewCustomerForm(true);
+            setNewCustomerData(prev => ({ ...prev, phone: initialNewCustomerPhone }));
+        }
+    }, [order, initialCustomerId, initialNewCustomerPhone]);
 
     const [paymentIdToDelete, setPaymentIdToDelete] = useState<string | null>(null); 
     const [viewingPaymentDocuments, setViewingPaymentDocuments] = useState<Attachment[] | null>(null);
@@ -3639,7 +3659,7 @@ function getOrdersViewFromStorage(): Partial<{
     return {};
 }
 
-const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLocal, customers, setCustomers, suppliers, setSuppliers, employees, addActivity, initialOpenOrderId, onOrderOpened, openNewOrderRequest, onClearedOpenNewOrderRequest, statusConfigs, getNextOrderNumber, vatRate }) => {
+const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLocal, customers, setCustomers, suppliers, setSuppliers, employees, addActivity, initialOpenOrderId, onOrderOpened, openNewOrderRequest, onClearedOpenNewOrderRequest, openNewOrderWithCustomerId, openNewOrderWithPhone, onClearedNewOrderPrefill, statusConfigs, getNextOrderNumber, vatRate }) => {
     const { user } = useAuth();
     const { trackViewStart, trackViewEnd } = useViewTracker();
     const isAdmin = user?.roleType === 'ADMIN';
@@ -3648,6 +3668,8 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [isImportModalOpen, setIsImportModalOpen] = useState(false);
     const [editingOrder, setEditingOrder] = useState<Order | null>(null);
+    const [newOrderPrefillCustomerId, setNewOrderPrefillCustomerId] = useState<string | undefined>(undefined);
+    const [newOrderPrefillPhone, setNewOrderPrefillPhone] = useState<string | undefined>(undefined);
     const [orderFormHeaderContent, setOrderFormHeaderContent] = useState<React.ReactNode>(null);
     const [orderLockedByOther, setOrderLockedByOther] = useState<{ userName: string } | null>(null);
     const savedView = useRef(getOrdersViewFromStorage()).current;
@@ -3708,6 +3730,8 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
         setOrderFormHeaderContent(null);
         setOrderLockedByOther(null);
         setEditingOrder(null);
+        setNewOrderPrefillCustomerId(undefined);
+        setNewOrderPrefillPhone(undefined);
         setIsModalOpen(false);
         if (orderId && user?.id) {
             mongoService.releaseOrderLock(orderId).catch(() => {});
@@ -4003,10 +4027,13 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
         if (openNewOrderRequest && onClearedOpenNewOrderRequest) {
             setOrderLockedByOther(null);
             setEditingOrder(null);
+            setNewOrderPrefillCustomerId(openNewOrderWithCustomerId ?? undefined);
+            setNewOrderPrefillPhone(openNewOrderWithPhone ?? undefined);
             setIsModalOpen(true);
             onClearedOpenNewOrderRequest();
+            onClearedNewOrderPrefill?.();
         }
-    }, [openNewOrderRequest, onClearedOpenNewOrderRequest]);
+    }, [openNewOrderRequest, onClearedOpenNewOrderRequest, onClearedNewOrderPrefill, openNewOrderWithCustomerId, openNewOrderWithPhone]);
 
     const handleSaveOrder = async (order: Order, keepOpen: boolean = false) => {
         try {
@@ -4832,6 +4859,8 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLoc
                     <OrderForm 
                         key={editingOrder ? editingOrder.id : 'new'} 
                         order={editingOrder}
+                        initialCustomerId={!editingOrder ? newOrderPrefillCustomerId : undefined}
+                        initialNewCustomerPhone={!editingOrder ? newOrderPrefillPhone : undefined}
                         customers={customers}
                         setCustomers={setCustomers}
                         suppliers={suppliers}

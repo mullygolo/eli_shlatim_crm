@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { getCallLogs, getCallLogByUniqueId, upsertCallLogByUniqueId } from '../services/mongoService.js';
+import { getCallLogs, getCallLogsPaginated, getCallLogsStats, getCallLogsAgents, inferCallLogDirectionForUnknown, getCallLogByUniqueId, upsertCallLogByUniqueId, getCallLogsForCustomer } from '../services/mongoService.js';
 import { verifyToken } from '../middleware/auth.js';
 import { fetchCallLogsFromMasterPBX } from '../services/masterPBXService.js';
 import { parseDateTimeAsIsrael } from '../utils/timezone.js';
@@ -17,6 +17,105 @@ router.get('/', verifyToken, async (req, res) => {
         res.json(forClient);
     } catch (error) {
         res.status(500).json({ error: 'Failed to fetch call logs' });
+    }
+});
+
+/**
+ * GET /api/call-logs/paginated?page=1&limit=50&searchTerm=&startDate=&endDate=
+ * Returns { logs, totalCount, page, limit, totalPages }. Use for large datasets.
+ */
+router.get('/paginated', verifyToken, async (req, res) => {
+    try {
+        const page = Math.max(1, parseInt(req.query.page as string) || 1);
+        const limit = Math.min(500, Math.max(1, parseInt(req.query.limit as string) || 50));
+        const filters: { searchTerm?: string; startDate?: string; endDate?: string; callee?: string } = {};
+        if (typeof req.query.searchTerm === 'string' && req.query.searchTerm.trim()) {
+            filters.searchTerm = req.query.searchTerm.trim();
+        }
+        if (typeof req.query.startDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.startDate)) {
+            filters.startDate = req.query.startDate;
+        }
+        if (typeof req.query.endDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.endDate)) {
+            filters.endDate = req.query.endDate;
+        }
+        if (typeof req.query.callee === 'string' && req.query.callee.trim()) {
+            filters.callee = req.query.callee.trim();
+        }
+        const result = await getCallLogsPaginated(filters, page, limit);
+        res.json(result);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch call logs' });
+    }
+});
+
+/**
+ * GET /api/call-logs/stats?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD&callee=
+ * Aggregated stats for the date range (and optional callee filter).
+ */
+router.get('/stats', verifyToken, async (req, res) => {
+    try {
+        const filters: { startDate?: string; endDate?: string; callee?: string } = {};
+        if (typeof req.query.startDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.startDate)) {
+            filters.startDate = req.query.startDate;
+        }
+        if (typeof req.query.endDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.endDate)) {
+            filters.endDate = req.query.endDate;
+        }
+        if (typeof req.query.callee === 'string' && req.query.callee.trim()) {
+            filters.callee = req.query.callee.trim();
+        }
+        const stats = await getCallLogsStats(filters);
+        res.json(stats);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch call logs stats' });
+    }
+});
+
+/**
+ * GET /api/call-logs/agents?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
+ * Distinct callee/calleeName in the date range for the agent dropdown.
+ */
+router.get('/agents', verifyToken, async (req, res) => {
+    try {
+        const filters: { startDate?: string; endDate?: string } = {};
+        if (typeof req.query.startDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.startDate)) {
+            filters.startDate = req.query.startDate;
+        }
+        if (typeof req.query.endDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.endDate)) {
+            filters.endDate = req.query.endDate;
+        }
+        const agents = await getCallLogsAgents(filters);
+        res.json(agents);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch call logs agents' });
+    }
+});
+
+/**
+ * POST /api/call-logs/infer-direction
+ * Re-infer direction for call logs with direction 'unknown' (using extension heuristic + known agents). Returns { updated }.
+ */
+router.post('/infer-direction', verifyToken, async (req, res) => {
+    try {
+        const result = await inferCallLogDirectionForUnknown();
+        res.json(result);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to infer call direction' });
+    }
+});
+
+/**
+ * GET /api/call-logs/for-customer/:customerId
+ * Recent call logs where caller or callee matches the customer's contact phones. Requires auth.
+ */
+router.get('/for-customer/:customerId', verifyToken, async (req, res) => {
+    try {
+        const { customerId } = req.params;
+        const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+        const logs = await getCallLogsForCustomer(customerId, limit);
+        res.json(logs);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch call logs for customer' });
     }
 });
 

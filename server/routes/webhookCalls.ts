@@ -1,7 +1,23 @@
 import { Router, Request, Response } from 'express';
-import { upsertCallLogByUniqueId, updateCallLogRecordingData } from '../services/mongoService.js';
+import { upsertCallLogByUniqueId, updateCallLogRecordingData, getCallLogsAgents } from '../services/mongoService.js';
 import { parseDateTimeAsIsrael } from '../utils/timezone.js';
 import type { CallLog } from '../types.js';
+
+/** Digits-only for comparison; add both 10-digit and 9-digit (no leading 0) for Israeli numbers. */
+function phoneSetForMatch(phones: string[]): Set<string> {
+    const set = new Set<string>();
+    for (const p of phones) {
+        const d = (p || '').replace(/\D/g, '');
+        if (!d) continue;
+        set.add(d);
+        if (d.length === 10 && d[0] === '0') set.add(d.slice(1));
+    }
+    return set;
+}
+
+function isInAgentSet(norm: string, agentSet: Set<string>): boolean {
+    return agentSet.has(norm) || (norm.length === 9 && agentSet.has('0' + norm));
+}
 
 const router = Router();
 
@@ -169,7 +185,33 @@ router.post('/calls', async (req: Request, res: Response) => {
 
         const startDate = parseDateTimeAsIsrael(data.start_date as string);
         const endDate = parseDateTimeAsIsrael(data.end_date as string);
-        const direction = normalizeDirection(firstOf(data, WEBHOOK_EXPECTED_FIELDS.direction) as string);
+        let direction = normalizeDirection(firstOf(data, WEBHOOK_EXPECTED_FIELDS.direction) as string);
+
+        const callerStr = String(data.caller ?? data.caller_id ?? '').trim();
+        const calleeStr = String(data.callee ?? data.callee_id ?? '').trim();
+
+        if (direction === 'unknown') {
+            const callerShort = /^\d{2,5}$/.test(callerStr);
+            const calleeShort = /^\d{2,5}$/.test(calleeStr);
+            if (callerShort && !calleeShort) direction = 'outgoing';
+            else if (!callerShort && calleeShort) direction = 'incoming';
+        }
+        if (direction === 'unknown') {
+            try {
+                const agents = await getCallLogsAgents({});
+                const agentSet = phoneSetForMatch(agents.map((a) => a.callee || '').filter(Boolean));
+                if (agentSet.size > 0) {
+                    const callerNorm = callerStr.replace(/\D/g, '');
+                    const calleeNorm = calleeStr.replace(/\D/g, '');
+                    const calleeInSet = isInAgentSet(calleeNorm, agentSet);
+                    const callerInSet = isInAgentSet(callerNorm, agentSet);
+                    if (calleeInSet && !callerInSet) direction = 'incoming';
+                    else if (callerInSet && !calleeInSet) direction = 'outgoing';
+                }
+            } catch (e) {
+                console.warn('[Webhook /calls] Could not infer direction from agents', { callid, err: e instanceof Error ? e.message : String(e) });
+            }
+        }
 
         const rawAnswer = firstOf(data, WEBHOOK_EXPECTED_FIELDS.answerTime);
         const answerNum = rawAnswer !== undefined ? parseNum(rawAnswer as string | number) : undefined;
@@ -190,8 +232,8 @@ router.post('/calls', async (req: Request, res: Response) => {
             id: `call_${Date.now()}_${callid}`,
             uniqueId: callid,
             file,
-            caller: String(data.caller ?? data.caller_id ?? '').trim(),
-            callee: String(data.callee ?? data.callee_id ?? '').trim(),
+            caller: callerStr,
+            callee: calleeStr,
             calleeName: calleeName || undefined,
             startDate: startDate ?? new Date(),
             endDate: endDate,

@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { Customer, Contact, Order, PaymentMethod, CustomerPayment, TimelineEvent, OrderStatusConfiguration, PaymentStatus } from '../types';
+import { Customer, Contact, Order, PaymentMethod, CustomerPayment, TimelineEvent, OrderStatusConfiguration, PaymentStatus, CallLog } from '../types';
 import { PlusIcon, EditIcon, DeleteIcon, ImportIcon, WhatsAppIcon, EmailIcon, PhoneIcon, CashIcon } from './icons';
 import Modal from './Modal';
 import { CUSTOMER_CATEGORIES, PAYMENT_TERMS_OPTIONS } from '../constants';
@@ -18,6 +18,10 @@ interface CustomersPageProps {
     onNavigateToOrder: (orderId: string) => void;
     statusConfigs: OrderStatusConfiguration[];
     vatRate: number;
+    selectedCustomerId?: string | null;
+    setSelectedCustomerId?: (id: string | null) => void;
+    newCustomerWithPhone?: string | null;
+    onClearedNewCustomerWithPhone?: () => void;
 }
 
 // Logical key for customer deduplication (must match server)
@@ -757,7 +761,7 @@ const ManualMergeModal: React.FC<{
 };
 
 // Enhanced form for adding a new customer with all details
-const NewCustomerForm: React.FC<{ onSave: (customer: Partial<Customer>, firstContact: Partial<Contact>) => void; onCancel: () => void; saving?: boolean }> = ({ onSave, onCancel, saving }) => {
+const NewCustomerForm: React.FC<{ initialPhone?: string; onSave: (customer: Partial<Customer>, firstContact: Partial<Contact>) => void; onCancel: () => void; saving?: boolean }> = ({ initialPhone = '', onSave, onCancel, saving }) => {
     const [customerData, setCustomerData] = useState({ 
         name: '', 
         businessId: '',
@@ -772,7 +776,10 @@ const NewCustomerForm: React.FC<{ onSave: (customer: Partial<Customer>, firstCon
         paymentTerms: 'תשלום מיידי',
         isSpecial: false
     });
-    const [contactData, setContactData] = useState({ name: '', email: '', phone: '', role: '' });
+    const [contactData, setContactData] = useState({ name: '', email: '', phone: initialPhone || '', role: '' });
+    useEffect(() => {
+        if (initialPhone) setContactData(prev => ({ ...prev, phone: initialPhone }));
+    }, [initialPhone]);
 
     const handleCustomerChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
         const { name, value, type } = e.target;
@@ -912,10 +919,70 @@ interface CustomerDetailViewProps {
     vatRate: number;
 }
 
+const formatCallDateTime = (d: Date | string | undefined): string => {
+    if (!d) return '—';
+    const date = typeof d === 'string' ? new Date(d) : d;
+    if (isNaN(date.getTime())) return '—';
+    return date.toLocaleString('he-IL', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+};
+const formatCallDuration = (seconds: number): string => {
+    if (!seconds || isNaN(seconds)) return '0:00';
+    const m = Math.floor(seconds / 60);
+    const s = Math.floor(seconds % 60);
+    return `${m}:${s.toString().padStart(2, '0')}`;
+};
+
 const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, customerOrders, customerOrdersLoading, onSave, onCancel, onNavigateToOrder, onMergeClick, statusConfigs, vatRate }) => {
     const [activeTab, setActiveTab] = useState<'details' | 'contacts' | 'orders'>('details');
     const [editableCustomer, setEditableCustomer] = useState<Customer>(customer);
     const [editingContact, setEditingContact] = useState<Contact | null>(null);
+    const [callLogs, setCallLogs] = useState<CallLog[]>([]);
+    const [callLogsLoading, setCallLogsLoading] = useState(false);
+    const [playingLog, setPlayingLog] = useState<CallLog | null>(null);
+    const [playingAudioUrl, setPlayingAudioUrl] = useState<string | null>(null);
+    const [playingAudioLoading, setPlayingAudioLoading] = useState(false);
+
+    useEffect(() => {
+        setCallLogs([]);
+        setCallLogsLoading(true);
+        let cancelled = false;
+        mongoService.getCallLogsForCustomer(customer.id, 20).then((logs) => {
+            if (!cancelled) setCallLogs(logs);
+        }).catch(() => {
+            if (!cancelled) setCallLogs([]);
+        }).finally(() => {
+            if (!cancelled) setCallLogsLoading(false);
+        });
+        return () => { cancelled = true; };
+    }, [customer.id]);
+
+    const playingAudioUrlRef = useRef<string | null>(null);
+    useEffect(() => {
+        if (!playingLog || !playingLog.hasStoredRecording) {
+            setPlayingAudioUrl(null);
+            setPlayingAudioLoading(false);
+            return;
+        }
+        setPlayingAudioLoading(true);
+        setPlayingAudioUrl(null);
+        let cancelled = false;
+        mongoService.getCallLogRecordingBlob(playingLog.uniqueId).then((blob) => {
+            if (cancelled) return;
+            const url = URL.createObjectURL(blob);
+            playingAudioUrlRef.current = url;
+            setPlayingAudioUrl(url);
+            setPlayingAudioLoading(false);
+        }).catch(() => {
+            if (!cancelled) setPlayingAudioLoading(false);
+        });
+        return () => {
+            cancelled = true;
+            if (playingAudioUrlRef.current) {
+                URL.revokeObjectURL(playingAudioUrlRef.current);
+                playingAudioUrlRef.current = null;
+            }
+        };
+    }, [playingLog?.uniqueId]);
 
     useEffect(() => {
         setEditableCustomer({
@@ -1052,6 +1119,57 @@ const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, custo
                         <div className="md:col-span-2">
                             <label className="block text-sm font-medium text-slate-700 mb-1">הערות</label>
                             <textarea name="notes" value={editableCustomer.notes} onChange={handleCustomerChange} className="w-full p-2 border rounded h-24"/>
+                        </div>
+                        <div className="md:col-span-2 border border-slate-200 rounded-lg p-4 bg-slate-50">
+                            <h4 className="text-sm font-medium text-slate-700 mb-2">שיחות אחרונות</h4>
+                            {callLogsLoading ? (
+                                <p className="text-sm text-slate-500">טוען...</p>
+                            ) : callLogs.length === 0 ? (
+                                <p className="text-sm text-slate-500">אין שיחות</p>
+                            ) : (
+                                <div className="overflow-x-auto">
+                                    <table className="min-w-full text-sm">
+                                        <thead>
+                                            <tr className="border-b border-slate-200">
+                                                <th className="text-start py-2 px-2 font-medium text-slate-600">תאריך</th>
+                                                <th className="text-start py-2 px-2 font-medium text-slate-600">כיוון</th>
+                                                <th className="text-start py-2 px-2 font-medium text-slate-600">משך</th>
+                                                <th className="text-start py-2 px-2 font-medium text-slate-600">האזנה</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {callLogs.map((log) => {
+                                                const hasRecording = log.hasStoredRecording;
+                                                const isPlaying = playingLog?.uniqueId === log.uniqueId;
+                                                return (
+                                                    <tr key={log.uniqueId} className="border-b border-slate-100">
+                                                        <td className="py-2 px-2 text-slate-700">{formatCallDateTime(log.startDate)}</td>
+                                                        <td className="py-2 px-2 text-slate-700">{log.direction === 'incoming' ? 'נכנס' : log.direction === 'outgoing' ? 'יוצא' : '—'}</td>
+                                                        <td className="py-2 px-2 text-slate-700">{formatCallDuration(log.durationSeconds ?? 0)}</td>
+                                                        <td className="py-2 px-2">
+                                                            {hasRecording ? (
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => setPlayingLog(isPlaying ? null : log)}
+                                                                    disabled={playingAudioLoading && isPlaying}
+                                                                    className="text-primary hover:underline text-xs"
+                                                                >
+                                                                    {playingAudioLoading && isPlaying ? '...' : isPlaying ? 'עצור' : 'האזן'}
+                                                                </button>
+                                                            ) : (
+                                                                <span className="text-slate-400">—</span>
+                                                            )}
+                                                        </td>
+                                                    </tr>
+                                                );
+                                            })}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            )}
+                            {playingAudioUrl && (
+                                <audio src={playingAudioUrl} autoPlay onEnded={() => setPlayingLog(null)} className="mt-2 w-full max-w-xs" controls />
+                            )}
                         </div>
                     </div>
                 )}
@@ -1279,7 +1397,7 @@ const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, custo
     )
 };
 
-const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, setCustomersLocal, orders, setOrders, addActivity, onNavigateToOrder, statusConfigs, vatRate }) => {
+const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, setCustomersLocal, orders, setOrders, addActivity, onNavigateToOrder, statusConfigs, vatRate, selectedCustomerId, setSelectedCustomerId, newCustomerWithPhone, onClearedNewCustomerWithPhone }) => {
     const { trackViewStart, trackViewEnd } = useViewTracker();
     const [isNewCustomerModalOpen, setIsNewCustomerModalOpen] = useState(false);
     const [isDetailModalOpen, setIsDetailModalOpen] = useState(false);
@@ -1347,6 +1465,34 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
     useEffect(() => {
         setCurrentPage(1);
     }, [debouncedSearchTerm]);
+
+    // Open customer when navigated from Call Center (selectedCustomerId)
+    useEffect(() => {
+        if (!selectedCustomerId || !setSelectedCustomerId) return;
+        let cancelled = false;
+        mongoService.getCustomerById(selectedCustomerId).then((customer) => {
+            if (cancelled) return;
+            if (customer) {
+                setViewingCustomer(customer);
+                trackViewStart(`customer_${customer.id}`, 'customer', customer.id, customer.name);
+                setIsDetailModalOpen(true);
+            }
+            setSelectedCustomerId(null);
+        }).catch(() => {
+            if (!cancelled) setSelectedCustomerId(null);
+        });
+        return () => { cancelled = true; };
+    }, [selectedCustomerId, setSelectedCustomerId, trackViewStart]);
+
+    // Open new-customer modal with phone pre-filled when navigated from Call Center
+    const [initialPhoneForNewCustomer, setInitialPhoneForNewCustomer] = useState<string>('');
+    useEffect(() => {
+        if (newCustomerWithPhone) {
+            setInitialPhoneForNewCustomer(newCustomerWithPhone);
+            setIsNewCustomerModalOpen(true);
+            onClearedNewCustomerWithPhone?.();
+        }
+    }, [newCustomerWithPhone, onClearedNewCustomerWithPhone]);
 
     // Use paginated customers for display; dedupe by logical key as safety net (server already dedupes)
     const filteredCustomers = useMemo(() => {
@@ -1474,6 +1620,8 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
             setTotalCount(prev => prev + 1);
             addActivity(`לקוח חדש נוסף: ${savedCustomer.name}`, { entityType: 'customer', entityId: savedCustomer.id, action: 'create', metadata: { name: savedCustomer.name } });
             setIsNewCustomerModalOpen(false);
+            setInitialPhoneForNewCustomer('');
+            onClearedNewCustomerWithPhone?.();
             setPendingNewCustomer(null);
             setDuplicateFound(null);
             // Refresh list in background to get server truth (debt, order) — don't block UI
@@ -1522,6 +1670,8 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
             setDuplicateFound(null);
             setPendingNewCustomer(null);
             setIsNewCustomerModalOpen(false);
+            setInitialPhoneForNewCustomer('');
+            onClearedNewCustomerWithPhone?.();
         } catch (err: any) {
             console.error('Merge with existing failed:', err);
             alert(err?.message || 'שמירת המיזוג נכשלה. נסה שוב.');
@@ -1880,8 +2030,8 @@ ${results.errors?.length > 0 ? `\n- שגיאות: ${results.errors.length}` : ''
             
             {/* New Customer Modal */}
             {isNewCustomerModalOpen && (
-                <Modal title="הוספת לקוח חדש" onClose={() => { setIsNewCustomerModalOpen(false); setDuplicateFound(null); }} size="2xl">
-                    <NewCustomerForm onSave={handleSaveNewCustomer} onCancel={() => setIsNewCustomerModalOpen(false)} saving={isSavingNewCustomer} />
+                <Modal title="הוספת לקוח חדש" onClose={() => { setIsNewCustomerModalOpen(false); setDuplicateFound(null); setInitialPhoneForNewCustomer(''); onClearedNewCustomerWithPhone?.(); }} size="2xl">
+                    <NewCustomerForm initialPhone={initialPhoneForNewCustomer} onSave={handleSaveNewCustomer} onCancel={() => { setIsNewCustomerModalOpen(false); setInitialPhoneForNewCustomer(''); onClearedNewCustomerWithPhone?.(); }} saving={isSavingNewCustomer} />
                 </Modal>
             )}
 

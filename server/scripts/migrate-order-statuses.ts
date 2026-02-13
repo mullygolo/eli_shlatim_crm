@@ -8,7 +8,7 @@
  */
 
 import 'dotenv/config';
-import { MongoClient, Db } from 'mongodb';
+import { MongoClient, Db, type AnyBulkWriteOperation, type Document } from 'mongodb';
 
 const MONGO_URI = process.env.MONGO_URI || '';
 const DB_NAME = process.env.DB_NAME || 'elishlatim';
@@ -45,7 +45,7 @@ async function runMigration(db: Db): Promise<void> {
   console.log('');
 
   const orders = await ordersCol.find({}).toArray();
-  const bulkOps: Parameters<typeof ordersCol.bulkWrite>[0] = [];
+  const bulkOps: AnyBulkWriteOperation<Document>[] = [];
   const changesByMapping: Record<string, number> = {};
 
   for (const order of orders) {

@@ -4094,7 +4094,7 @@ export async function getCallLogsPaginated(
     try {
         const database = await getDb();
         const collection = database.collection<CallLog & { recordingData?: Buffer }>('callLogs');
-        const query: Record<string, unknown> = {};
+        let query: Record<string, unknown> = {};
 
         if (filters.searchTerm && filters.searchTerm.trim()) {
             const term = filters.searchTerm.trim();
@@ -4308,8 +4308,12 @@ export async function inferCallLogDirectionForUnknown(): Promise<{ updated: numb
         const database = await getDb();
         const collection = database.collection<CallLog>('callLogs');
         const cursor = collection.find({
-            $or: [{ direction: 'unknown' }, { direction: { $exists: false } }, { direction: null }],
-        });
+            $or: [
+                { direction: 'unknown' },
+                { direction: { $exists: false } },
+                { direction: { $eq: null } },
+            ],
+        } as import('mongodb').Filter<CallLog>);
         for await (const doc of cursor) {
             const caller = String(doc.caller ?? '').trim();
             const callee = String(doc.callee ?? '').trim();

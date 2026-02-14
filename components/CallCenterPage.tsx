@@ -74,6 +74,7 @@ const formatDateTime = (d: Date): string => {
         day: '2-digit',
         hour: '2-digit',
         minute: '2-digit',
+        second: '2-digit',
     });
 };
 
@@ -149,6 +150,14 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
     const [chartData, setChartData] = useState<CallLogsChartPoint[]>([]);
     const [chartLoading, setChartLoading] = useState(false);
 
+    /** Parse selected agent filter: value is "forward:X" or "callee:X" → { callee?, forward? } for API */
+    const agentFilter = React.useMemo(() => {
+        if (!statsCallee.trim()) return {};
+        if (statsCallee.startsWith('forward:')) return { forward: statsCallee.slice(8).trim() };
+        if (statsCallee.startsWith('callee:')) return { callee: statsCallee.slice(7).trim() };
+        return {};
+    }, [statsCallee]);
+
     const { chartGranularity, chartStartDate, chartEndDate } = React.useMemo(() => {
         let granularity: CallLogsChartGranularity = 'day';
         let start = statsStartDate;
@@ -188,7 +197,7 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
         getCallLogsStats({
             startDate: statsStartDate || undefined,
             endDate: statsEndDate || undefined,
-            callee: statsCallee || undefined,
+            ...agentFilter,
         })
             .then((data) => {
                 if (!cancelled) setStats(data);
@@ -200,7 +209,7 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
                 if (!cancelled) setStatsLoading(false);
             });
         return () => { cancelled = true; };
-    }, [statsStartDate, statsEndDate, statsCallee, refreshKey]);
+    }, [statsStartDate, statsEndDate, agentFilter, refreshKey]);
 
     useEffect(() => {
         let cancelled = false;
@@ -227,7 +236,7 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
         getCallLogsChartData({
             startDate: chartStartDate,
             endDate: chartEndDate,
-            callee: statsCallee || undefined,
+            ...agentFilter,
             granularity: chartGranularity,
         })
             .then((data) => {
@@ -240,7 +249,7 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
                 if (!cancelled) setChartLoading(false);
             });
         return () => { cancelled = true; };
-    }, [chartStartDate, chartEndDate, statsCallee, chartGranularity, refreshKey]);
+    }, [chartStartDate, chartEndDate, agentFilter, chartGranularity, refreshKey]);
 
     useEffect(() => {
         let cancelled = false;
@@ -251,7 +260,7 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
                 searchTerm: debouncedSearchTerm || undefined,
                 startDate: statsStartDate || undefined,
                 endDate: statsEndDate || undefined,
-                callee: statsCallee || undefined,
+                ...agentFilter,
             },
             currentPage,
             pageSize
@@ -271,7 +280,22 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
                 if (!cancelled) setLoading(false);
             });
         return () => { cancelled = true; };
-    }, [currentPage, pageSize, debouncedSearchTerm, statsStartDate, statsEndDate, statsCallee, refreshKey]);
+    }, [currentPage, pageSize, debouncedSearchTerm, statsStartDate, statsEndDate, agentFilter, refreshKey]);
+
+    useEffect(() => {
+        if (typeof document === 'undefined' || document.visibilityState !== 'visible') return;
+        const interval = setInterval(() => {
+            if (document.visibilityState === 'visible') setRefreshKey((k) => k + 1);
+        }, 8000);
+        return () => clearInterval(interval);
+    }, []);
+
+    useEffect(() => {
+        if (typeof document === 'undefined') return;
+        const onVisible = () => { if (document.visibilityState === 'visible') setRefreshKey((k) => k + 1); };
+        document.addEventListener('visibilitychange', onVisible);
+        return () => document.removeEventListener('visibilitychange', onVisible);
+    }, []);
 
     useEffect(() => {
         if (logs.length === 0) {
@@ -443,7 +467,7 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
                     searchTerm: debouncedSearchTerm || undefined,
                     startDate: statsStartDate || undefined,
                     endDate: statsEndDate || undefined,
-                    callee: statsCallee || undefined,
+                    ...agentFilter,
                 },
                 1,
                 pageSize
@@ -586,7 +610,7 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
                                     const total = Number(inc) + Number(out);
                                     return (
                                         <div className="bg-white border border-slate-200 rounded-lg shadow-lg text-sm">
-                                            <p className="font-medium text-slate-800 border-b border-slate-100 px-2 py-1">{formatLabel(label)}</p>
+                                            <p className="font-medium text-slate-800 border-b border-slate-100 px-2 py-1">{formatLabel(String(label))}</p>
                                             <div className="px-2 py-1.5 space-y-0.5">
                                                 <div className="text-emerald-700">נכנס: {inc} שיחות</div>
                                                 <div className="text-violet-700">יוצא: {out} שיחות</div>
@@ -682,8 +706,8 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
                     >
                         <option value="">הכל</option>
                         {agents.map((a) => (
-                            <option key={a.callee} value={a.callee}>
-                                {a.calleeName ? `${a.calleeName} (${a.callee})` : a.callee}
+                            <option key={a.value} value={a.value}>
+                                {a.label}
                             </option>
                         ))}
                     </select>
@@ -796,9 +820,11 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
                                 <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">כיוון</th>
                                 <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">לקוח</th>
                                 <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">מתקשר</th>
+                                <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider" title="המספר שהלקוח חייג אליו (קו)">לאיזה מספר חייג</th>
                                 <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">נציג</th>
                                 <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">משך</th>
-                                <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">זמן מענה</th>
+                                <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider" title="זמן עד מענה – כמה שניות צלצלה השיחה עד שנענתה">זמן מענה</th>
+                                <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider" title="משך השיחה מרגע המענה עד סיום – זמן הדיבור בפועל">דיבור בפועל</th>
                                 <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">מי ניתק</th>
                                 <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">סטטוס</th>
                                 <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">פעולה</th>
@@ -807,7 +833,7 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
                         <tbody className="bg-white divide-y divide-slate-200">
                             {loading && logs.length === 0 ? (
                                 <tr>
-                                    <td colSpan={9} className="px-4 py-12 text-center text-slate-500">
+                                    <td colSpan={12} className="px-4 py-12 text-center text-slate-500">
                                         טוען לוג שיחות...
                                     </td>
                                 </tr>
@@ -990,6 +1016,9 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
                                     <td className="px-4 py-3 whitespace-nowrap text-sm font-medium text-slate-900">
                                         {log.caller || '—'}
                                     </td>
+                                    <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-600" title="המספר שהלקוח חייג אליו">
+                                        {log.dialedNumber || '—'}
+                                    </td>
                                     <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-600">
                                         {log.forward != null
                                             ? `הפניה${log.forward ? ` (${log.forward})` : ''}`
@@ -998,7 +1027,10 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
                                     <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-600">
                                         {formatDuration(log.durationSeconds)}
                                     </td>
-                                    <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-600" title={log.answerSeconds == null && isAnswered(log.status) ? 'המרכזיה לא שלחה זמן מענה. ודא שה-webhook כולל שדה answer_sec / answer_time.' : undefined}>
+                                    <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-600" title="משך השיחה מרגע המענה עד סיום – זמן הדיבור בפועל">
+                                        {isAnswered(log.status) && log.answerSeconds != null ? formatDuration(Math.max(0, log.durationSeconds - log.answerSeconds)) : '—'}
+                                    </td>
+                                    <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-600" title={log.answerSeconds == null && isAnswered(log.status) ? 'המרכזיה לא שלחה זמן מענה. ודא שה-webhook כולל שדה answer_sec / answer_time.' : 'זמן עד מענה – כמה שניות צלצלה השיחה עד שנענתה'}>
                                         {log.answerSeconds != null ? `${log.answerSeconds} sec` : '—'}
                                     </td>
                                     <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-600">

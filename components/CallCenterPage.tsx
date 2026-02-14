@@ -4,7 +4,8 @@ import { CallLog, type Customer, type Contact } from '../types';
 import { PhoneIcon, ImportIcon } from './icons';
 import Modal from './Modal';
 import CustomerSyncBadges from './CustomerSyncBadges';
-import { getCallLogsPaginated, getCallLogsStats, getCallLogsAgents, inferCallLogDirection, syncCallLogs, getCallLogRecordingBlob, matchPhones, matchSupplierPhones, getRelevantOrdersForCustomers, getCustomersPaginated, getCustomerById, updateCustomer, type RelevantOrderSummary, type CallLogsStatsResult, type CallLogsAgentItem, type CustomerPhoneMatch, type SupplierPhoneMatch } from '../services/mongoService';
+import { getCallLogsPaginated, getCallLogsStats, getCallLogsAgents, getCallLogsChartData, inferCallLogDirection, syncCallLogs, getCallLogRecordingBlob, matchPhones, matchSupplierPhones, getRelevantOrdersForCustomers, getCustomersPaginated, getCustomerById, updateCustomer, type RelevantOrderSummary, type CallLogsStatsResult, type CallLogsAgentItem, type CustomerPhoneMatch, type SupplierPhoneMatch, type CallLogsChartPoint, type CallLogsChartGranularity } from '../services/mongoService';
+import { LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 
 const normalizePhone = (s: string): string => (s || '').replace(/\D/g, '');
 
@@ -145,6 +146,36 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
     const [statsLoading, setStatsLoading] = useState(false);
     const [refreshKey, setRefreshKey] = useState(0);
     const [inferLoading, setInferLoading] = useState(false);
+    const [chartData, setChartData] = useState<CallLogsChartPoint[]>([]);
+    const [chartLoading, setChartLoading] = useState(false);
+
+    const { chartGranularity, chartStartDate, chartEndDate } = React.useMemo(() => {
+        let granularity: CallLogsChartGranularity = 'day';
+        let start = statsStartDate;
+        let end = statsEndDate;
+        if (datePreset === 'all') {
+            const endDate = new Date();
+            const startDate = new Date();
+            startDate.setMonth(startDate.getMonth() - 12);
+            start = toDateString(startDate);
+            end = toDateString(endDate);
+            granularity = 'month';
+        } else if (datePreset === 'today') {
+            granularity = 'hour';
+        } else if (datePreset === '7d' || datePreset === '30d' || datePreset === 'month' || datePreset === 'prevMonth') {
+            granularity = 'day';
+        } else if (datePreset === 'year') {
+            granularity = 'month';
+        } else if (datePreset === 'custom' && customStartDate && customEndDate) {
+            const a = new Date(customStartDate);
+            const b = new Date(customEndDate);
+            const days = Math.round((b.getTime() - a.getTime()) / (24 * 60 * 60 * 1000));
+            if (days <= 31) granularity = 'day';
+            else if (days <= 90) granularity = 'week';
+            else granularity = 'month';
+        }
+        return { chartGranularity: granularity, chartStartDate: start, chartEndDate: end };
+    }, [datePreset, statsStartDate, statsEndDate, customStartDate, customEndDate]);
 
     useEffect(() => {
         const t = setTimeout(() => setDebouncedSearchTerm(searchTerm), 300);
@@ -185,6 +216,31 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
             });
         return () => { cancelled = true; };
     }, [statsStartDate, statsEndDate, refreshKey]);
+
+    useEffect(() => {
+        if (!chartStartDate || !chartEndDate) {
+            setChartData([]);
+            return;
+        }
+        let cancelled = false;
+        setChartLoading(true);
+        getCallLogsChartData({
+            startDate: chartStartDate,
+            endDate: chartEndDate,
+            callee: statsCallee || undefined,
+            granularity: chartGranularity,
+        })
+            .then((data) => {
+                if (!cancelled) setChartData(data || []);
+            })
+            .catch(() => {
+                if (!cancelled) setChartData([]);
+            })
+            .finally(() => {
+                if (!cancelled) setChartLoading(false);
+            });
+        return () => { cancelled = true; };
+    }, [chartStartDate, chartEndDate, statsCallee, chartGranularity, refreshKey]);
 
     useEffect(() => {
         let cancelled = false;
@@ -482,6 +538,72 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
                 </div>
             )}
 
+            {/* Chart: calls over time (incoming / outgoing) - same range as tab */}
+            <div className="rounded-lg border border-slate-200 bg-white p-4 mb-4">
+                <h3 className="text-sm font-semibold text-slate-800 mb-3">שיחות לאורך תקופה (נכנס / יוצא)</h3>
+                {chartLoading ? (
+                    <div className="h-[300px] flex items-center justify-center text-slate-500 text-sm">טוען גרף...</div>
+                ) : !chartStartDate || !chartEndDate ? (
+                    <div className="h-[300px] flex items-center justify-center text-slate-500 text-sm">בחר טווח תאריכים להצגת גרף</div>
+                ) : chartData.length === 0 ? (
+                    <div className="h-[300px] flex items-center justify-center text-slate-500 text-sm">אין שיחות בטווח הנבחר</div>
+                ) : (
+                    <ResponsiveContainer width="100%" height={300}>
+                        <LineChart data={chartData} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
+                            <XAxis
+                                dataKey="date"
+                                tick={{ fontSize: 11, fill: '#64748b' }}
+                                tickFormatter={(value) => {
+                                    if (chartGranularity === 'hour') {
+                                        const m = value.match(/(\d{4}-\d{2}-\d{2})T(\d{2})/);
+                                        return m ? `${m[2]}:00` : value;
+                                    }
+                                    if (chartGranularity === 'day' && value.length >= 10) {
+                                        const d = new Date(value + 'T12:00:00');
+                                        return d.toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' });
+                                    }
+                                    if (chartGranularity === 'month' && value.length >= 7) {
+                                        const d = new Date(value + '-01T12:00:00');
+                                        return d.toLocaleDateString('he-IL', { month: 'short', year: '2-digit' });
+                                    }
+                                    if (chartGranularity === 'week') return value;
+                                    return value;
+                                }}
+                            />
+                            <YAxis domain={[0, 'auto']} tick={{ fontSize: 11, fill: '#64748b' }} allowDecimals={false} />
+                            <Tooltip
+                                contentStyle={{ textAlign: 'right', direction: 'rtl', padding: '8px 12px' }}
+                                content={({ active, payload, label }) => {
+                                    if (!active || !payload?.length) return null;
+                                    const formatLabel = (value: string) => {
+                                        if (chartGranularity === 'hour') return `שעה: ${value}`;
+                                        if (chartGranularity === 'day') return new Date(value + 'T12:00:00').toLocaleDateString('he-IL');
+                                        if (chartGranularity === 'month') return new Date(value + '-01').toLocaleDateString('he-IL', { month: 'long', year: 'numeric' });
+                                        return value;
+                                    };
+                                    const inc = payload.find((p) => p.name === 'incoming')?.value ?? 0;
+                                    const out = payload.find((p) => p.name === 'outgoing')?.value ?? 0;
+                                    const total = Number(inc) + Number(out);
+                                    return (
+                                        <div className="bg-white border border-slate-200 rounded-lg shadow-lg text-sm">
+                                            <p className="font-medium text-slate-800 border-b border-slate-100 px-2 py-1">{formatLabel(label)}</p>
+                                            <div className="px-2 py-1.5 space-y-0.5">
+                                                <div className="text-emerald-700">נכנס: {inc} שיחות</div>
+                                                <div className="text-violet-700">יוצא: {out} שיחות</div>
+                                                <div className="text-slate-700 font-medium pt-1 border-t border-slate-100 mt-1">סה״כ: {total} שיחות</div>
+                                            </div>
+                                        </div>
+                                    );
+                                }}
+                            />
+                            <Legend wrapperStyle={{ direction: 'rtl' }} formatter={(label) => (label === 'incoming' ? 'נכנס' : 'יוצא')} />
+                            <Line type="monotone" dataKey="incoming" name="incoming" stroke="#10b981" strokeWidth={2} dot={{ r: 3 }} activeDot={{ r: 5 }} />
+                            <Line type="monotone" dataKey="outgoing" name="outgoing" stroke="#8b5cf6" strokeWidth={2} dot={{ r: 3 }} activeDot={{ r: 5 }} />
+                        </LineChart>
+                    </ResponsiveContainer>
+                )}
+            </div>
+
             {/* Summary stats: date range + agent filter + cards */}
             <div className="rounded-lg border border-slate-200 bg-white p-4 space-y-4">
                 <div className="flex flex-wrap items-center gap-2">
@@ -489,6 +611,7 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
                     <button
                         type="button"
                         onClick={() => { setDatePreset('all'); setCurrentPage(1); }}
+                        title="סיכום וגרף מוגבלים ל־12 חודשים אחרונים"
                         className={`px-3 py-1.5 text-sm rounded-lg border transition ${
                             datePreset === 'all' ? 'bg-primary text-white border-primary' : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
                         }`}
@@ -499,6 +622,14 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
                         <button
                             key={p}
                             type="button"
+                            title={
+                                p === 'today' ? 'שיחות מהיום בלבד' :
+                                p === '7d' ? 'שיחות מ־7 הימים האחרונים (כולל היום)' :
+                                p === '30d' ? 'שיחות מ־30 הימים האחרונים (כולל היום)' :
+                                p === 'month' ? 'שיחות מתחילת החודש הנוכחי עד היום' :
+                                p === 'prevMonth' ? 'שיחות מהחודש שעבר (כולו)' :
+                                'שיחות מתחילת השנה עד היום'
+                            }
                             onClick={() => { setDatePreset(p); setCurrentPage(1); }}
                             className={`px-3 py-1.5 text-sm rounded-lg border transition ${
                                 datePreset === p
@@ -516,6 +647,7 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
                     ))}
                     <button
                         type="button"
+                        title="בחר תאריך התחלה ותאריך סיום"
                         onClick={() => { setDatePreset('custom'); setCurrentPage(1); }}
                         className={`px-3 py-1.5 text-sm rounded-lg border transition ${
                             datePreset === 'custom' ? 'bg-primary text-white border-primary' : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
@@ -609,6 +741,32 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
                             <p className="text-xs text-slate-500 mb-0.5">זמן לא מסווג</p>
                             <p className="text-lg font-semibold text-slate-800">{formatDuration(stats.totalDurationUnknown ?? 0)}</p>
                         </div>
+                        {/* Average duration row */}
+                        {(() => {
+                            const answeredCount = stats.totalCalls - stats.unansweredCount;
+                            const avgAll = answeredCount > 0 ? Math.round(stats.totalDurationSeconds / answeredCount) : 0;
+                            const avgIn = stats.incomingCount > 0 ? Math.round(stats.totalDurationIncoming / stats.incomingCount) : 0;
+                            const avgOut = stats.outgoingCount > 0 ? Math.round(stats.totalDurationOutgoing / stats.outgoingCount) : 0;
+                            return (
+                                <>
+                                    <div className="rounded-lg bg-slate-50 border border-slate-200 p-3 col-span-2 sm:col-span-3 md:col-span-4 lg:col-span-8 border-t-2 border-slate-300">
+                                        <p className="text-xs font-medium text-slate-600 mb-1">זמן שיחה ממוצע</p>
+                                    </div>
+                                    <div className="rounded-lg bg-slate-50 border border-slate-200 p-3">
+                                        <p className="text-xs text-slate-500 mb-0.5">זמן ממוצע (כללי)</p>
+                                        <p className="text-lg font-semibold text-slate-800">{avgAll ? formatDuration(avgAll) : '—'}</p>
+                                    </div>
+                                    <div className="rounded-lg bg-slate-50 border border-slate-200 p-3">
+                                        <p className="text-xs text-slate-500 mb-0.5">זמן ממוצע נכנס</p>
+                                        <p className="text-lg font-semibold text-slate-800">{avgIn ? formatDuration(avgIn) : '—'}</p>
+                                    </div>
+                                    <div className="rounded-lg bg-slate-50 border border-slate-200 p-3">
+                                        <p className="text-xs text-slate-500 mb-0.5">זמן ממוצע יוצא</p>
+                                        <p className="text-lg font-semibold text-slate-800">{avgOut ? formatDuration(avgOut) : '—'}</p>
+                                    </div>
+                                </>
+                            );
+                        })()}
                     </div>
                 ) : null}
             </div>

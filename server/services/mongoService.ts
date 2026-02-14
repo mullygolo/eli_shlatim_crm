@@ -4271,6 +4271,109 @@ export async function getCallLogsStats(filters: { startDate?: string; endDate?: 
     }
 }
 
+export type CallLogsChartGranularity = 'hour' | 'day' | 'week' | 'month';
+
+export interface CallLogsChartPoint {
+    date: string;
+    incoming: number;
+    outgoing: number;
+}
+
+export async function getCallLogsChartData(filters: {
+    startDate?: string;
+    endDate?: string;
+    callee?: string;
+    granularity: CallLogsChartGranularity;
+}): Promise<CallLogsChartPoint[]> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<CallLog>('callLogs');
+        const match: Record<string, unknown> = {};
+        if (filters.startDate || filters.endDate) {
+            match.startDate = {} as Record<string, string>;
+            if (filters.startDate) {
+                (match.startDate as Record<string, string>).$gte = filters.startDate + 'T00:00:00.000Z';
+            }
+            if (filters.endDate) {
+                (match.startDate as Record<string, string>).$lte = filters.endDate + 'T23:59:59.999Z';
+            }
+        }
+        if (filters.callee && filters.callee.trim()) {
+            const calleeTerm = filters.callee.trim();
+            match.$or = [
+                { callee: new RegExp(calleeTerm, 'i') },
+                { calleeName: new RegExp(calleeTerm, 'i') },
+            ];
+        }
+        const gran = filters.granularity || 'day';
+        const pipeline: object[] = [{ $match: Object.keys(match).length ? match : {} }];
+        pipeline.push({ $addFields: { startDateDate: { $toDate: '$startDate' } } });
+
+        let bucketExpr: object;
+        if (gran === 'hour') {
+            bucketExpr = {
+                $dateToString: {
+                    date: '$startDateDate',
+                    format: '%Y-%m-%dT%H',
+                    timezone: 'Asia/Jerusalem',
+                },
+            };
+        } else if (gran === 'day') {
+            bucketExpr = {
+                $dateToString: {
+                    date: '$startDateDate',
+                    format: '%Y-%m-%d',
+                    timezone: 'Asia/Jerusalem',
+                },
+            };
+        } else if (gran === 'month') {
+            bucketExpr = {
+                $dateToString: {
+                    date: '$startDateDate',
+                    format: '%Y-%m',
+                    timezone: 'Asia/Jerusalem',
+                },
+            };
+        } else {
+            // week: group by year + week number (UTC)
+            bucketExpr = {
+                $concat: [
+                    { $toString: { $year: '$startDateDate' } },
+                    '-W',
+                    { $cond: [{ $lt: [{ $week: '$startDateDate' }, 10] }, '0', ''] },
+                    { $toString: { $week: '$startDateDate' } },
+                ],
+            };
+        }
+        pipeline.push({ $addFields: { bucket: bucketExpr } });
+        pipeline.push({
+            $group: {
+                _id: '$bucket',
+                incoming: { $sum: { $cond: [{ $eq: ['$direction', 'incoming'] }, 1, 0] } },
+                outgoing: { $sum: { $cond: [{ $eq: ['$direction', 'outgoing'] }, 1, 0] } },
+            },
+        });
+        pipeline.push({ $sort: { _id: 1 } });
+        pipeline.push({
+            $project: {
+                date: '$_id',
+                incoming: 1,
+                outgoing: 1,
+                _id: 0,
+            },
+        });
+        const result = await collection.aggregate(pipeline).toArray();
+        return (result as CallLogsChartPoint[]).map((r) => ({
+            date: r.date,
+            incoming: r.incoming ?? 0,
+            outgoing: r.outgoing ?? 0,
+        }));
+    } catch (error) {
+        console.error('Error in getCallLogsChartData:', error);
+        return [];
+    }
+}
+
 export async function getCallLogsAgents(filters: { startDate?: string; endDate?: string } = {}): Promise<{ callee: string; calleeName?: string }[]> {
     try {
         const database = await getDb();

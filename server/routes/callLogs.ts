@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { getCallLogs, getCallLogsPaginated, getCallLogsStats, getCallLogsAgents, inferCallLogDirectionForUnknown, getCallLogByUniqueId, upsertCallLogByUniqueId, getCallLogsForCustomer } from '../services/mongoService.js';
+import { getCallLogs, getCallLogsPaginated, getCallLogsStats, getCallLogsAgents, getCallLogsChartData, inferCallLogDirectionForUnknown, getCallLogByUniqueId, upsertCallLogByUniqueId, getCallLogsForCustomer } from '../services/mongoService.js';
 import { verifyToken } from '../middleware/auth.js';
 import { fetchCallLogsFromMasterPBX } from '../services/masterPBXService.js';
 import { parseDateTimeAsIsrael } from '../utils/timezone.js';
@@ -68,6 +68,37 @@ router.get('/stats', verifyToken, async (req, res) => {
         res.json(stats);
     } catch (error) {
         res.status(500).json({ error: 'Failed to fetch call logs stats' });
+    }
+});
+
+const CHART_GRANULARITIES = ['hour', 'day', 'week', 'month'] as const;
+
+/**
+ * GET /api/call-logs/chart?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD&callee=&granularity=hour|day|week|month
+ * Returns { date, incoming, outgoing }[] for chart (aligned with tab time range).
+ */
+router.get('/chart', verifyToken, async (req, res) => {
+    try {
+        const filters: { startDate?: string; endDate?: string; callee?: string; granularity: 'hour' | 'day' | 'week' | 'month' } = {
+            granularity: 'day',
+        };
+        if (typeof req.query.startDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.startDate)) {
+            filters.startDate = req.query.startDate;
+        }
+        if (typeof req.query.endDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.endDate)) {
+            filters.endDate = req.query.endDate;
+        }
+        if (typeof req.query.callee === 'string' && req.query.callee.trim()) {
+            filters.callee = req.query.callee.trim();
+        }
+        if (typeof req.query.granularity === 'string' && CHART_GRANULARITIES.includes(req.query.granularity as any)) {
+            filters.granularity = req.query.granularity as 'hour' | 'day' | 'week' | 'month';
+        }
+        const data = await getCallLogsChartData(filters);
+        res.json(data);
+    } catch (error) {
+        console.error('Error in GET /call-logs/chart:', error);
+        res.status(500).json({ error: 'Failed to fetch call logs chart data' });
     }
 });
 

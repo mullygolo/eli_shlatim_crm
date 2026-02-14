@@ -962,6 +962,28 @@ export interface CallLogsAgentItem {
     calleeName?: string;
 }
 
+export type CallLogsChartGranularity = 'hour' | 'day' | 'week' | 'month';
+
+export interface CallLogsChartPoint {
+    date: string;
+    incoming: number;
+    outgoing: number;
+}
+
+export async function getCallLogsChartData(filters: {
+    startDate?: string;
+    endDate?: string;
+    callee?: string;
+    granularity: CallLogsChartGranularity;
+}): Promise<CallLogsChartPoint[]> {
+    const params = new URLSearchParams();
+    if (filters.startDate) params.set('startDate', filters.startDate);
+    if (filters.endDate) params.set('endDate', filters.endDate);
+    if (filters.callee) params.set('callee', filters.callee);
+    params.set('granularity', filters.granularity);
+    return apiRequest<CallLogsChartPoint[]>(`/call-logs/chart?${params}`);
+}
+
 export async function getCallLogsAgents(filters: { startDate?: string; endDate?: string } = {}): Promise<CallLogsAgentItem[]> {
     const params = new URLSearchParams();
     if (filters.startDate) params.set('startDate', filters.startDate);

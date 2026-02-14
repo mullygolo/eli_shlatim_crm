@@ -1693,8 +1693,10 @@ export async function getViewEventsAggregated(filters: { from: string; to: strin
                             else: { $ifNull: ['$durationSeconds', 0] },
                         },
                     },
+                    userKey: { $cond: [{ $and: [{ $ne: ['$userId', ''] }, { $ne: ['$userId', null] }] }, '$userId', { $ifNull: ['$username', ''] }] },
                 },
             },
+            { $match: { userKey: { $ne: '' } } },
             {
                 $group: {
                     _id: { userId: '$userId', username: '$username', entityType: '$entityType', dateKey: '$dateKey' },
@@ -4099,7 +4101,7 @@ export async function getCallLogsForCustomer(customerId: string, limit: number =
 }
 
 export async function getCallLogsPaginated(
-    filters: { searchTerm?: string; startDate?: string; endDate?: string; callee?: string } = {},
+    filters: { searchTerm?: string; startDate?: string; endDate?: string; callee?: string; forward?: string } = {},
     page: number = 1,
     limit: number = 50
 ): Promise<{
@@ -4138,6 +4140,11 @@ export async function getCallLogsPaginated(
             const calleeRegex = { $regex: filters.callee.trim(), $options: 'i' as const };
             const calleeMatch = { $or: [{ callee: calleeRegex }, { calleeName: calleeRegex }] };
             query = { $and: [query, calleeMatch] };
+        }
+        if (filters.forward && filters.forward.trim()) {
+            const forwardTerm = filters.forward.trim();
+            const forwardMatch = { $or: [{ forward: forwardTerm }, { forward: { $regex: forwardTerm, $options: 'i' as const } }] };
+            query = { $and: [query, forwardMatch] };
         }
 
         const totalCount = await collection.countDocuments(query);
@@ -4179,7 +4186,7 @@ export interface CallLogsStatsResult {
     totalDurationUnknown: number;
 }
 
-export async function getCallLogsStats(filters: { startDate?: string; endDate?: string; callee?: string } = {}): Promise<CallLogsStatsResult> {
+export async function getCallLogsStats(filters: { startDate?: string; endDate?: string; callee?: string; forward?: string } = {}): Promise<CallLogsStatsResult> {
     const empty: CallLogsStatsResult = {
         totalCalls: 0,
         incomingCount: 0,
@@ -4211,7 +4218,29 @@ export async function getCallLogsStats(filters: { startDate?: string; endDate?: 
                 { calleeName: new RegExp(calleeTerm, 'i') },
             ];
         }
+        if (filters.forward && filters.forward.trim()) {
+            const forwardTerm = filters.forward.trim();
+            match.forward = new RegExp(forwardTerm, 'i');
+        }
         const pipeline: object[] = [{ $match: Object.keys(match).length ? match : {} }];
+        // דיבור בפועל = מרגע מענה עד סיום, רק בשיחות שנענו (ANSWER/ANSWERED) וכשיש answerSeconds
+        pipeline.push({
+            $addFields: {
+                talkSeconds: {
+                    $cond: {
+                        if: {
+                            $and: [
+                                { $in: [{ $toUpper: { $ifNull: ['$status', ''] } }, ['ANSWER', 'ANSWERED']] },
+                                { $ne: ['$answerSeconds', null] },
+                                { $gte: [{ $ifNull: ['$answerSeconds', -1] }, 0] },
+                            ],
+                        },
+                        then: { $max: [0, { $subtract: [{ $ifNull: ['$durationSeconds', 0] }, { $ifNull: ['$answerSeconds', 0] }] }] },
+                        else: 0,
+                    },
+                },
+            },
+        });
         pipeline.push({
             $group: {
                 _id: null,
@@ -4226,18 +4255,18 @@ export async function getCallLogsStats(filters: { startDate?: string; endDate?: 
                             0,
                         ] },
                 },
-                totalDurationSeconds: { $sum: { $ifNull: ['$durationSeconds', 0] } },
+                totalDurationSeconds: { $sum: '$talkSeconds' },
                 totalDurationIncoming: {
-                    $sum: { $cond: [{ $eq: ['$direction', 'incoming'] }, { $ifNull: ['$durationSeconds', 0] }, 0] },
+                    $sum: { $cond: [{ $eq: ['$direction', 'incoming'] }, '$talkSeconds', 0] },
                 },
                 totalDurationOutgoing: {
-                    $sum: { $cond: [{ $eq: ['$direction', 'outgoing'] }, { $ifNull: ['$durationSeconds', 0] }, 0] },
+                    $sum: { $cond: [{ $eq: ['$direction', 'outgoing'] }, '$talkSeconds', 0] },
                 },
                 totalDurationUnknown: {
                     $sum: {
                         $cond: [
                             { $not: { $in: ['$direction', ['incoming', 'outgoing']] } },
-                            { $ifNull: ['$durationSeconds', 0] },
+                            '$talkSeconds',
                             0,
                         ] },
                 },
@@ -4283,6 +4312,7 @@ export async function getCallLogsChartData(filters: {
     startDate?: string;
     endDate?: string;
     callee?: string;
+    forward?: string;
     granularity: CallLogsChartGranularity;
 }): Promise<CallLogsChartPoint[]> {
     try {
@@ -4304,6 +4334,9 @@ export async function getCallLogsChartData(filters: {
                 { callee: new RegExp(calleeTerm, 'i') },
                 { calleeName: new RegExp(calleeTerm, 'i') },
             ];
+        }
+        if (filters.forward && filters.forward.trim()) {
+            match.forward = new RegExp(filters.forward.trim(), 'i');
         }
         const gran = filters.granularity || 'day';
         const pipeline: object[] = [{ $match: Object.keys(match).length ? match : {} }];
@@ -4374,12 +4407,14 @@ export async function getCallLogsChartData(filters: {
     }
 }
 
-export async function getCallLogsAgents(filters: { startDate?: string; endDate?: string } = {}): Promise<{ callee: string; calleeName?: string }[]> {
+/** Agent/extension option for filter: value is "forward:X" or "callee:X" for API filter; label is display (e.g. "הפניה (972...)" or "025... שלוחה"). */
+export type CallLogsAgentOption = { value: string; label: string };
+
+export async function getCallLogsAgents(filters: { startDate?: string; endDate?: string } = {}): Promise<CallLogsAgentOption[]> {
     try {
         const database = await getDb();
         const collection = database.collection<CallLog>('callLogs');
         const match: Record<string, unknown> = {};
-        // startDate in DB is stored as ISO string (serializeDates), so filter by string range
         if (filters.startDate || filters.endDate) {
             match.startDate = {} as Record<string, string>;
             if (filters.startDate) {
@@ -4391,13 +4426,31 @@ export async function getCallLogsAgents(filters: { startDate?: string; endDate?:
         }
         const pipeline: object[] = [
             { $match: Object.keys(match).length ? match : {} },
-            { $group: { _id: { callee: { $ifNull: ['$callee', ''] }, calleeName: { $ifNull: ['$calleeName', ''] } } } },
-            { $match: { '_id.callee': { $ne: '' } } },
-            { $sort: { '_id.callee': 1 } },
-            { $project: { callee: '$_id.callee', calleeName: '$_id.calleeName', _id: 0 } },
+            {
+                $addFields: {
+                    agentKey: {
+                        $cond: {
+                            if: { $and: [{ $ne: ['$forward', null] }, { $gt: [{ $strLenCP: { $ifNull: ['$forward', ''] } }, 0] }] },
+                            then: { $concat: ['forward:', '$forward'] },
+                            else: { $concat: ['callee:', { $ifNull: ['$callee', ''] }] },
+                        },
+                    },
+                    agentLabel: {
+                        $cond: {
+                            if: { $and: [{ $ne: ['$forward', null] }, { $gt: [{ $strLenCP: { $ifNull: ['$forward', ''] } }, 0] }] },
+                            then: { $concat: ['הפניה (', '$forward', ')'] },
+                            else: { $trim: { input: { $concat: [{ $ifNull: ['$callee', ''] }, ' ', { $ifNull: ['$calleeName', ''] }] } } },
+                        },
+                    },
+                },
+            },
+            { $match: { agentKey: { $nin: ['callee:', 'forward:'] } } },
+            { $group: { _id: '$agentKey', label: { $first: '$agentLabel' } } },
+            { $sort: { label: 1 } },
+            { $project: { value: '$_id', label: 1, _id: 0 } },
         ];
         const result = await collection.aggregate(pipeline).toArray();
-        return (result as { callee: string; calleeName?: string }[]).filter((x) => x.callee);
+        return (result as CallLogsAgentOption[]).filter((x) => x.value && x.label);
     } catch (error) {
         console.error('Error in getCallLogsAgents:', error);
         return [];
@@ -4425,7 +4478,9 @@ export async function inferCallLogDirectionForUnknown(): Promise<{ updated: numb
     let updated = 0;
     try {
         const agents = await getCallLogsAgents({});
-        const agentSet = phoneSetForDirectionInference(agents.map((a) => a.callee || '').filter(Boolean));
+        const agentSet = phoneSetForDirectionInference(
+            agents.map((a) => (a.value.startsWith('forward:') ? a.value.slice(8) : a.value.startsWith('callee:') ? a.value.slice(7) : '')).filter(Boolean)
+        );
         const database = await getDb();
         const collection = database.collection<CallLog>('callLogs');
         const cursor = collection.find({
@@ -4465,6 +4520,54 @@ export async function inferCallLogDirectionForUnknown(): Promise<{ updated: numb
     return { updated };
 }
 
+/** True if string looks like Israeli full phone number (9–10 digits), not extension. */
+function isIsraeliFullNumber(s: string): boolean {
+    const digits = (s || '').replace(/\D/g, '');
+    if (digits.length !== 9 && digits.length !== 10) return false;
+    const first = digits[0];
+    const second = digits[1];
+    if (digits.length === 10) return first === '0' && second >= '2' && second <= '9';
+    if (digits.length === 9) return (first === '0' && second >= '2' && second <= '9') || (first >= '2' && first <= '9');
+    return false;
+}
+
+/**
+ * Backfill dialedNumber from callee for incoming calls where PBX sent the line number in callee.
+ * Use once to fix existing records; new calls get dialedNumber from webhook fallback.
+ */
+export async function backfillCallLogsDialedNumber(): Promise<{ updated: number }> {
+    let updated = 0;
+    try {
+        const database = await getDb();
+        const collection = database.collection<CallLog>('callLogs');
+        const cursor = collection.find({
+            direction: 'incoming',
+            callee: { $exists: true, $ne: null, $ne: '' },
+            $or: [
+                { dialedNumber: { $exists: false } },
+                { dialedNumber: null },
+                { dialedNumber: '' },
+            ],
+        });
+        for await (const doc of cursor) {
+            const callee = String(doc.callee ?? '').trim();
+            if (!callee || !isIsraeliFullNumber(callee)) continue;
+            await collection.updateOne(
+                { uniqueId: doc.uniqueId },
+                { $set: { dialedNumber: callee } }
+            );
+            updated++;
+        }
+        if (updated > 0) {
+            console.log('[CallLogs] backfillDialedNumber: updated', updated, 'records');
+        }
+    } catch (error) {
+        console.error('Error in backfillCallLogsDialedNumber:', error);
+        throw error;
+    }
+    return { updated };
+}
+
 export async function createCallLog(callLog: CallLog): Promise<CallLog> {
     try {
         const database = await getDb();
@@ -4483,7 +4586,11 @@ export async function upsertCallLogByUniqueId(callLog: CallLog): Promise<CallLog
         const database = await getDb();
         const collection = database.collection<CallLog>('callLogs');
         const serialized = serializeDates(callLog) as any;
-        const { _id, ...doc } = serialized;
+        const { _id, dialedNumber, ...rest } = serialized;
+        const doc: Record<string, unknown> = { ...rest };
+        if (dialedNumber !== undefined && dialedNumber !== null && String(dialedNumber).trim() !== '') {
+            doc.dialedNumber = dialedNumber;
+        }
         await collection.updateOne(
             { uniqueId: callLog.uniqueId },
             { $set: doc },

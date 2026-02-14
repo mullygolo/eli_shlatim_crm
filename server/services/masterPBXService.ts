@@ -27,6 +27,14 @@ export interface MasterPBXCallLog {
     calleeName?: string;
     agent_name?: string;
     extension_name?: string;
+    /** Number the customer dialed (line). We map when API returns it. */
+    dialed_number?: string;
+    called_number?: string;
+    destination?: string;
+    line?: string;
+    trunk?: string;
+    did?: string;
+    dnis?: string;
 }
 
 export interface MasterPBXCallLogResponse {

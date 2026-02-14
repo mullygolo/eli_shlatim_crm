@@ -73,7 +73,7 @@ const UsageAndViewsTab: React.FC<UsageAndViewsTabProps> = ({ employees }) => {
     }, [loadAggregated]);
 
     const [showRaw, setShowRaw] = useState(false);
-    const [rawFrom, setRawFrom] = useState(todayIsrael());
+    const [rawFrom, setRawFrom] = useState(daysAgoIsrael(6));
     const [rawTo, setRawTo] = useState(todayIsrael());
     const [rawUserId, setRawUserId] = useState('');
     const [rawEntityType, setRawEntityType] = useState('');

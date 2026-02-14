@@ -949,17 +949,19 @@ export interface CallLogsStatsResult {
     totalDurationUnknown: number;
 }
 
-export async function getCallLogsStats(filters: { startDate?: string; endDate?: string; callee?: string } = {}): Promise<CallLogsStatsResult> {
+export async function getCallLogsStats(filters: { startDate?: string; endDate?: string; callee?: string; forward?: string } = {}): Promise<CallLogsStatsResult> {
     const params = new URLSearchParams();
     if (filters.startDate) params.set('startDate', filters.startDate);
     if (filters.endDate) params.set('endDate', filters.endDate);
     if (filters.callee) params.set('callee', filters.callee);
+    if (filters.forward) params.set('forward', filters.forward);
     return apiRequest<CallLogsStatsResult>(`/call-logs/stats?${params}`);
 }
 
+/** value is "forward:X" or "callee:X" for filtering; label is display (e.g. "הפניה (972...)" or extension). */
 export interface CallLogsAgentItem {
-    callee: string;
-    calleeName?: string;
+    value: string;
+    label: string;
 }
 
 export type CallLogsChartGranularity = 'hour' | 'day' | 'week' | 'month';
@@ -974,12 +976,14 @@ export async function getCallLogsChartData(filters: {
     startDate?: string;
     endDate?: string;
     callee?: string;
+    forward?: string;
     granularity: CallLogsChartGranularity;
 }): Promise<CallLogsChartPoint[]> {
     const params = new URLSearchParams();
     if (filters.startDate) params.set('startDate', filters.startDate);
     if (filters.endDate) params.set('endDate', filters.endDate);
     if (filters.callee) params.set('callee', filters.callee);
+    if (filters.forward) params.set('forward', filters.forward);
     params.set('granularity', filters.granularity);
     return apiRequest<CallLogsChartPoint[]>(`/call-logs/chart?${params}`);
 }
@@ -996,7 +1000,7 @@ export async function inferCallLogDirection(): Promise<{ updated: number }> {
 }
 
 export async function getCallLogsPaginated(
-    filters: { searchTerm?: string; startDate?: string; endDate?: string; callee?: string } = {},
+    filters: { searchTerm?: string; startDate?: string; endDate?: string; callee?: string; forward?: string } = {},
     page: number = 1,
     limit: number = 50
 ): Promise<CallLogsPaginatedResult> {
@@ -1005,6 +1009,7 @@ export async function getCallLogsPaginated(
     if (filters.startDate) params.set('startDate', filters.startDate);
     if (filters.endDate) params.set('endDate', filters.endDate);
     if (filters.callee) params.set('callee', filters.callee);
+    if (filters.forward) params.set('forward', filters.forward);
     return apiRequest<CallLogsPaginatedResult>(`/call-logs/paginated?${params}`);
 }
 

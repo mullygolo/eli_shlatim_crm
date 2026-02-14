@@ -25,7 +25,7 @@ import callLogsRouter from './routes/callLogs.js';
 import performanceMetricsRouter from './routes/performanceMetrics.js';
 import notificationsRouter from './routes/notifications.js';
 import viewEventsRouter from './routes/viewEvents.js';
-import { initializeDefaultAdmin, autoCloseOldAttendanceRecords, initializeAttendanceIndexes, initializeCallLogsIndex, initializeViewEventsIndexes, initializeStatusConfigs, getDb } from './services/mongoService.js';
+import { initializeDefaultAdmin, autoCloseOldAttendanceRecords, initializeAttendanceIndexes, initializeCallLogsIndex, backfillCallLogsDialedNumber, initializeViewEventsIndexes, initializeStatusConfigs, getDb } from './services/mongoService.js';
 import { getDateStringIsrael } from './utils/timezone.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -167,6 +167,9 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
     try {
         await initializeCallLogsIndex();
         console.log('✓ Call logs index initialization completed');
+        backfillCallLogsDialedNumber()
+            .then((r) => { if (r.updated > 0) console.log('[Startup] Backfilled dialedNumber for', r.updated, 'call logs'); })
+            .catch((e) => console.warn('[Startup] backfillDialedNumber:', e instanceof Error ? e.message : e));
     } catch (error) {
         console.error('✗ Failed to initialize call logs index:', error);
     }

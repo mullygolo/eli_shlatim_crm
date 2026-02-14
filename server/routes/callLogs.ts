@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { getCallLogs, getCallLogsPaginated, getCallLogsStats, getCallLogsAgents, getCallLogsChartData, inferCallLogDirectionForUnknown, getCallLogByUniqueId, upsertCallLogByUniqueId, getCallLogsForCustomer } from '../services/mongoService.js';
+import { getCallLogs, getCallLogsPaginated, getCallLogsStats, getCallLogsAgents, getCallLogsChartData, inferCallLogDirectionForUnknown, backfillCallLogsDialedNumber, getCallLogByUniqueId, upsertCallLogByUniqueId, getCallLogsForCustomer } from '../services/mongoService.js';
 import { verifyToken } from '../middleware/auth.js';
 import { fetchCallLogsFromMasterPBX } from '../services/masterPBXService.js';
 import { parseDateTimeAsIsrael } from '../utils/timezone.js';
@@ -41,6 +41,9 @@ router.get('/paginated', verifyToken, async (req, res) => {
         if (typeof req.query.callee === 'string' && req.query.callee.trim()) {
             filters.callee = req.query.callee.trim();
         }
+        if (typeof req.query.forward === 'string' && req.query.forward.trim()) {
+            filters.forward = req.query.forward.trim();
+        }
         const result = await getCallLogsPaginated(filters, page, limit);
         res.json(result);
     } catch (error) {
@@ -63,6 +66,9 @@ router.get('/stats', verifyToken, async (req, res) => {
         }
         if (typeof req.query.callee === 'string' && req.query.callee.trim()) {
             filters.callee = req.query.callee.trim();
+        }
+        if (typeof req.query.forward === 'string' && req.query.forward.trim()) {
+            filters.forward = req.query.forward.trim();
         }
         const stats = await getCallLogsStats(filters);
         res.json(stats);
@@ -90,6 +96,9 @@ router.get('/chart', verifyToken, async (req, res) => {
         }
         if (typeof req.query.callee === 'string' && req.query.callee.trim()) {
             filters.callee = req.query.callee.trim();
+        }
+        if (typeof req.query.forward === 'string' && req.query.forward.trim()) {
+            filters.forward = req.query.forward.trim();
         }
         if (typeof req.query.granularity === 'string' && CHART_GRANULARITIES.includes(req.query.granularity as any)) {
             filters.granularity = req.query.granularity as 'hour' | 'day' | 'week' | 'month';
@@ -132,6 +141,19 @@ router.post('/infer-direction', verifyToken, async (req, res) => {
         res.json(result);
     } catch (error) {
         res.status(500).json({ error: 'Failed to infer call direction' });
+    }
+});
+
+/**
+ * POST /api/call-logs/backfill-dialed-number
+ * Backfill dialedNumber from callee for incoming calls where PBX sent the line in callee. Run once for existing data.
+ */
+router.post('/backfill-dialed-number', verifyToken, async (req, res) => {
+    try {
+        const result = await backfillCallLogsDialedNumber();
+        res.json(result);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to backfill dialed number' });
     }
 });
 
@@ -260,6 +282,8 @@ router.post('/sync', verifyToken, async (req, res) => {
             const hangupReasonSync = hangupRaw != null && String(hangupRaw).trim() !== '' ? String(hangupRaw).trim() : undefined;
             const calleeNameRaw = pbxAny.callee_name ?? pbxAny.calleeName ?? pbxAny.agent_name ?? pbxAny.extension_name;
             const calleeNameSync = calleeNameRaw != null && String(calleeNameRaw).trim() !== '' ? String(calleeNameRaw).trim() : undefined;
+            const dialedRaw = pbxAny.dialed_number ?? pbxAny.called_number ?? pbxAny.destination ?? pbxAny.line ?? pbxAny.trunk ?? pbxAny.did ?? pbxAny.dnis ?? pbxAny.called_to ?? pbxAny.dialed_to;
+            const dialedNumberSync = dialedRaw != null && String(dialedRaw).trim() !== '' ? String(dialedRaw).trim() : undefined;
 
             const callLog: CallLog = {
                 id: `call_${Date.now()}_${uniqueId}`,
@@ -276,6 +300,7 @@ router.post('/sync', verifyToken, async (req, res) => {
                 direction,
                 hangupReason: hangupReasonSync,
                 forward: pbxLog.forward?.trim() || undefined,
+                dialedNumber: dialedNumberSync,
             };
 
             try {

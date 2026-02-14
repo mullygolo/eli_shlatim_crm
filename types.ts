@@ -738,6 +738,8 @@ export interface CallLog {
     hangupReason?: string;
     /** Forward target when call was forwarded; if set, show "הפניה" in agent column. */
     forward?: string;
+    /** Number the customer dialed (e.g. main line). From PBX when provided. */
+    dialedNumber?: string;
     /** True when the recording binary is stored in MongoDB (use GET /api/call-logs/recording/:uniqueId to play). */
     hasStoredRecording?: boolean;
 }

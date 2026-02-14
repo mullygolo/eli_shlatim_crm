@@ -729,6 +729,8 @@ export interface CallLog {
     direction: 'incoming' | 'outgoing' | 'unknown';
     hangupReason?: string;
     forward?: string;
+    /** Number the customer dialed (e.g. main line 0505348555). From PBX: dialed_number, called_number, destination, etc. */
+    dialedNumber?: string;
     /** Recording audio stored in MongoDB (Buffer). Not sent to client; use hasStoredRecording + GET /recording/:uniqueId. */
     recordingData?: Buffer;
 }

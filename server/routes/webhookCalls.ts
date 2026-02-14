@@ -102,6 +102,7 @@ function fetchAndStoreRecording(uniqueId: string, recordingUrl: string): void {
  * Forward (target of forward): forward, forward_number, forward_to, forwarded_to
  * Hangup: hangup_reason, hangup_by, hangupBy (e.g. CALLER, CALLEE, NORMAL_CLEARING)
  * Callee name: callee_name, calleeName, agent_name, extension_name
+ * Dialed number (לאיזה מספר חייג – הקו שהלקוח חייג אליו): dialed_number, called_number, destination, line, trunk, did, dnis, called_to, dialed_to
  * Recording: file, sound_file, recording, recording_url (URL) or sound_file_base64, recording_base64 (base64)
  */
 const WEBHOOK_EXPECTED_FIELDS = {
@@ -111,6 +112,7 @@ const WEBHOOK_EXPECTED_FIELDS = {
     forward: ['forward', 'forward_number', 'forward_to', 'forwarded_to'],
     hangup: ['hangup_reason', 'hangup_by', 'hangupBy'],
     calleeName: ['callee_name', 'calleeName', 'agent_name', 'extension_name'],
+    dialedNumber: ['dialed_number', 'called_number', 'destination', 'line', 'trunk', 'did', 'dnis', 'called_to', 'dialed_to'],
 };
 
 /**
@@ -199,7 +201,7 @@ router.post('/calls', async (req: Request, res: Response) => {
         if (direction === 'unknown') {
             try {
                 const agents = await getCallLogsAgents({});
-                const agentSet = phoneSetForMatch(agents.map((a) => a.callee || '').filter(Boolean));
+                const agentSet = phoneSetForMatch(agents.map((a) => (a.value.startsWith('callee:') ? a.value.slice(7) : a.value.startsWith('forward:') ? a.value.slice(8) : a.value)).filter(Boolean));
                 if (agentSet.size > 0) {
                     const callerNorm = callerStr.replace(/\D/g, '');
                     const calleeNorm = calleeStr.replace(/\D/g, '');
@@ -231,6 +233,12 @@ router.post('/calls', async (req: Request, res: Response) => {
         const rawCalleeName = firstOf(data, WEBHOOK_EXPECTED_FIELDS.calleeName);
         const calleeName = rawCalleeName !== undefined ? String(rawCalleeName).trim() : undefined;
 
+        const rawDialed = firstOf(data, WEBHOOK_EXPECTED_FIELDS.dialedNumber);
+        let dialedNumber: string | undefined = rawDialed !== undefined && String(rawDialed).trim() !== '' ? String(rawDialed).trim() : undefined;
+        if (!dialedNumber && direction === 'incoming' && calleeStr && /^0?5\d{8}$/.test(calleeStr.replace(/\D/g, ''))) {
+            dialedNumber = calleeStr.trim();
+        }
+
         const callLog: CallLog = {
             id: `call_${Date.now()}_${callid}`,
             uniqueId: callid,
@@ -246,6 +254,7 @@ router.post('/calls', async (req: Request, res: Response) => {
             direction,
             hangupReason: hangupReason || undefined,
             forward,
+            dialedNumber: dialedNumber || undefined,
         };
 
         await upsertCallLogByUniqueId(callLog);

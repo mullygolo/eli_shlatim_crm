@@ -193,7 +193,7 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
 
     useEffect(() => {
         let cancelled = false;
-        setStatsLoading(true);
+        if (stats === null) setStatsLoading(true);
         getCallLogsStats({
             startDate: statsStartDate || undefined,
             endDate: statsEndDate || undefined,
@@ -232,7 +232,7 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
             return;
         }
         let cancelled = false;
-        setChartLoading(true);
+        if (chartData.length === 0) setChartLoading(true);
         getCallLogsChartData({
             startDate: chartStartDate,
             endDate: chartEndDate,
@@ -253,7 +253,7 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
 
     useEffect(() => {
         let cancelled = false;
-        setLoading(true);
+        if (logs.length === 0) setLoading(true);
         setError(null);
         getCallLogsPaginated(
             {
@@ -282,11 +282,12 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
         return () => { cancelled = true; };
     }, [currentPage, pageSize, debouncedSearchTerm, statsStartDate, statsEndDate, agentFilter, refreshKey]);
 
+    // רענון אוטומטי כל 2 שניות – נתונים בזמן אמת מהשרת (מתעדכן דרך webhook מהמרכזיה)
     useEffect(() => {
         if (typeof document === 'undefined' || document.visibilityState !== 'visible') return;
         const interval = setInterval(() => {
             if (document.visibilityState === 'visible') setRefreshKey((k) => k + 1);
-        }, 8000);
+        }, 2000);
         return () => clearInterval(interval);
     }, []);
 

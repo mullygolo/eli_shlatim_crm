@@ -28,7 +28,7 @@ router.get('/paginated', verifyToken, async (req, res) => {
     try {
         const page = Math.max(1, parseInt(req.query.page as string) || 1);
         const limit = Math.min(500, Math.max(1, parseInt(req.query.limit as string) || 50));
-        const filters: { searchTerm?: string; startDate?: string; endDate?: string; callee?: string } = {};
+        const filters: { searchTerm?: string; startDate?: string; endDate?: string; callee?: string; forward?: string } = {};
         if (typeof req.query.searchTerm === 'string' && req.query.searchTerm.trim()) {
             filters.searchTerm = req.query.searchTerm.trim();
         }
@@ -57,7 +57,7 @@ router.get('/paginated', verifyToken, async (req, res) => {
  */
 router.get('/stats', verifyToken, async (req, res) => {
     try {
-        const filters: { startDate?: string; endDate?: string; callee?: string } = {};
+        const filters: { startDate?: string; endDate?: string; callee?: string; forward?: string } = {};
         if (typeof req.query.startDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.startDate)) {
             filters.startDate = req.query.startDate;
         }
@@ -85,7 +85,7 @@ const CHART_GRANULARITIES = ['hour', 'day', 'week', 'month'] as const;
  */
 router.get('/chart', verifyToken, async (req, res) => {
     try {
-        const filters: { startDate?: string; endDate?: string; callee?: string; granularity: 'hour' | 'day' | 'week' | 'month' } = {
+        const filters: { startDate?: string; endDate?: string; callee?: string; forward?: string; granularity: 'hour' | 'day' | 'week' | 'month' } = {
             granularity: 'day',
         };
         if (typeof req.query.startDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.startDate)) {

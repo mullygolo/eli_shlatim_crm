@@ -4542,13 +4542,12 @@ export async function backfillCallLogsDialedNumber(): Promise<{ updated: number 
         const collection = database.collection<CallLog>('callLogs');
         const cursor = collection.find({
             direction: 'incoming',
-            callee: { $exists: true, $ne: null, $ne: '' },
+            callee: { $exists: true, $nin: [null, ''] },
             $or: [
                 { dialedNumber: { $exists: false } },
-                { dialedNumber: null },
-                { dialedNumber: '' },
+                { dialedNumber: { $in: [null, ''] } },
             ],
-        });
+        } as import('mongodb').Filter<CallLog>);
         for await (const doc of cursor) {
             const callee = String(doc.callee ?? '').trim();
             if (!callee || !isIsraeliFullNumber(callee)) continue;

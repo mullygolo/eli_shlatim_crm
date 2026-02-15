@@ -4223,24 +4223,7 @@ export async function getCallLogsStats(filters: { startDate?: string; endDate?: 
             match.forward = new RegExp(forwardTerm, 'i');
         }
         const pipeline: object[] = [{ $match: Object.keys(match).length ? match : {} }];
-        // דיבור בפועל = מרגע מענה עד סיום, רק בשיחות שנענו (ANSWER/ANSWERED) וכשיש answerSeconds
-        pipeline.push({
-            $addFields: {
-                talkSeconds: {
-                    $cond: {
-                        if: {
-                            $and: [
-                                { $in: [{ $toUpper: { $ifNull: ['$status', ''] } }, ['ANSWER', 'ANSWERED']] },
-                                { $ne: ['$answerSeconds', null] },
-                                { $gte: [{ $ifNull: ['$answerSeconds', -1] }, 0] },
-                            ],
-                        },
-                        then: { $max: [0, { $subtract: [{ $ifNull: ['$durationSeconds', 0] }, { $ifNull: ['$answerSeconds', 0] }] }] },
-                        else: 0,
-                    },
-                },
-            },
-        });
+        // זמן מענה = סכום answerSeconds (כמה שניות עד שנענו) – להצגה בסיכומים
         pipeline.push({
             $group: {
                 _id: null,
@@ -4255,18 +4238,18 @@ export async function getCallLogsStats(filters: { startDate?: string; endDate?: 
                             0,
                         ] },
                 },
-                totalDurationSeconds: { $sum: '$talkSeconds' },
+                totalDurationSeconds: { $sum: { $ifNull: ['$answerSeconds', 0] } },
                 totalDurationIncoming: {
-                    $sum: { $cond: [{ $eq: ['$direction', 'incoming'] }, '$talkSeconds', 0] },
+                    $sum: { $cond: [{ $eq: ['$direction', 'incoming'] }, { $ifNull: ['$answerSeconds', 0] }, 0] },
                 },
                 totalDurationOutgoing: {
-                    $sum: { $cond: [{ $eq: ['$direction', 'outgoing'] }, '$talkSeconds', 0] },
+                    $sum: { $cond: [{ $eq: ['$direction', 'outgoing'] }, { $ifNull: ['$answerSeconds', 0] }, 0] },
                 },
                 totalDurationUnknown: {
                     $sum: {
                         $cond: [
                             { $not: { $in: ['$direction', ['incoming', 'outgoing']] } },
-                            '$talkSeconds',
+                            { $ifNull: ['$answerSeconds', 0] },
                             0,
                         ] },
                 },
@@ -4698,8 +4681,8 @@ export async function getSettings(): Promise<Settings> {
     }
 }
 
-/** Metrics start date (Israeli 5.2.26 = 2026-02-05). All calculations use orders from this date onward. */
-const METRICS_START_DATE = '2026-02-05';
+/** Lower bound for createdAt so we don't scan from year zero. Actual range is from/to (order.date). */
+const METRICS_START_DATE = '2020-01-01';
 
 /** Activity score points by action (for Activity Score metric). */
 const ACTIVITY_SCORE_POINTS: Record<string, number> = {
@@ -4795,9 +4778,9 @@ export async function getPerformanceMetrics(
 
     const orderQuery: Record<string, unknown> = { createdAt: { $gte: metricsStart } };
     if (dateStart || dateEnd) {
-        orderQuery.date = {} as Record<string, Date>;
-        if (dateStart) (orderQuery.date as Record<string, Date>).$gte = dateStart;
-        if (dateEnd) (orderQuery.date as Record<string, Date>).$lte = dateEnd;
+        orderQuery.date = {} as Record<string, string>;
+        if (dateStart) (orderQuery.date as Record<string, string>).$gte = dateStart.toISOString();
+        if (dateEnd) (orderQuery.date as Record<string, string>).$lte = dateEnd.toISOString();
     }
     if (filters.employeeId) orderQuery.employeeId = filters.employeeId;
 
@@ -5142,7 +5125,7 @@ export async function getPerformanceMetrics(
     return {
         from: filters.from,
         to: filters.to,
-        metricsStartDate: METRICS_START_DATE,
+        metricsStartDate: filters.from ?? METRICS_START_DATE,
         business: {
             totalOrders: businessTotalOrders,
             totalAmount: businessTotalAmount,

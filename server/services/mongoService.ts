@@ -4138,7 +4138,7 @@ export async function getCallLogsPaginated(
         }
         if (filters.callee && filters.callee.trim()) {
             const calleeRegex = { $regex: filters.callee.trim(), $options: 'i' as const };
-            const calleeMatch = { $or: [{ callee: calleeRegex }, { calleeName: calleeRegex }] };
+            const calleeMatch = { $or: [{ callee: calleeRegex }, { calleeName: calleeRegex }, { caller: calleeRegex }] };
             query = { $and: [query, calleeMatch] };
         }
         if (filters.forward && filters.forward.trim()) {
@@ -4216,6 +4216,7 @@ export async function getCallLogsStats(filters: { startDate?: string; endDate?: 
             match.$or = [
                 { callee: new RegExp(calleeTerm, 'i') },
                 { calleeName: new RegExp(calleeTerm, 'i') },
+                { caller: new RegExp(calleeTerm, 'i') },
             ];
         }
         if (filters.forward && filters.forward.trim()) {
@@ -4316,6 +4317,7 @@ export async function getCallLogsChartData(filters: {
             match.$or = [
                 { callee: new RegExp(calleeTerm, 'i') },
                 { calleeName: new RegExp(calleeTerm, 'i') },
+                { caller: new RegExp(calleeTerm, 'i') },
             ];
         }
         if (filters.forward && filters.forward.trim()) {

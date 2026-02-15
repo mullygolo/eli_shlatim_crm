@@ -313,7 +313,8 @@ router.post('/orders/:orderId/link-document', async (req, res) => {
         const totals = calculateOrderTotals(order);
         const orderTotalWithVat = totals.totalAmount * (1 + (order.vatRate ?? vatRate) / 100);
         const remainingBalance = orderTotalWithVat - totals.totalPaid;
-        if (allocAmount > remainingBalance + 0.01) {
+        const allocationTolerance = 2; // עד ₪2 מעל היתרה – הפרשי עיגול/חשבונית
+        if (allocAmount > remainingBalance + allocationTolerance) {
             return res.status(400).json({
                 error: `ההקצאה (₪${allocAmount.toFixed(2)}) חורגת מיתרת ההזמנה לתשלום (₪${remainingBalance.toFixed(2)})`,
                 errors: [`יתרה לתשלום בהזמנה ${order.orderNumber}: ₪${remainingBalance.toFixed(2)}`]
@@ -385,7 +386,8 @@ router.post('/documents/link-orders', async (req, res) => {
             const orderTotalWithVat = totals.totalAmount * (1 + (o.vatRate ?? defaultVatRate) / 100);
             const remainingBalance = orderTotalWithVat - totals.totalPaid;
             const alloc = allocations[o.id] || 0;
-            if (alloc > remainingBalance + 0.01) {
+            const allocationTolerance = 2; // עד ₪2 מעל היתרה – הפרשי עיגול/חשבונית
+            if (alloc > remainingBalance + allocationTolerance) {
                 return res.status(400).json({
                     error: `ההקצאה להזמנה ${o.orderNumber} (₪${alloc.toFixed(2)}) חורגת מיתרת ההזמנה לתשלום (₪${remainingBalance.toFixed(2)})`,
                     errors: [`יתרה לתשלום בהזמנה ${o.orderNumber}: ₪${remainingBalance.toFixed(2)}`]

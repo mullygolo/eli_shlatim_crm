@@ -1392,11 +1392,24 @@ const OrderForm: React.FC<{
         if (type === 'checkbox') {
             const { checked } = e.target as HTMLInputElement;
             setFormData(prev => ({...prev, [name]: checked }));
+        } else if (name === 'orderStatus') {
+            const config = statusConfigs?.find((c: { label: string }) => c.label === value);
+            const isActiveDeal = config?.isActiveDeal ?? false;
+            setFormData(prev => {
+                const newDealStartDate = (isActiveDeal && !prev.dealStartDate) ? new Date() : prev.dealStartDate;
+                return {
+                    ...prev,
+                    orderStatus: value,
+                    orderStatusId: config?.id ?? prev.orderStatusId,
+                    ...(newDealStartDate !== prev.dealStartDate ? { dealStartDate: newDealStartDate } : {}),
+                    ...(user?.id && employees.some(emp => emp.id === user.id) ? { employeeId: user.id } : {}),
+                };
+            });
+            if (isActiveDeal) setDealStartDateString(new Date().toISOString().split('T')[0]);
         } else {
             setFormData(prev => ({
                 ...prev,
                 [name]: name === 'vatRate' ? (parseFloat(value) || 0) : value,
-                ...(name === 'orderStatus' && user?.id && employees.some(emp => emp.id === user.id) ? { employeeId: user.id } : {}),
             }));
         }
         if (name === 'date') {

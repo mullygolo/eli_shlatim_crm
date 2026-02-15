@@ -4223,7 +4223,7 @@ export async function getCallLogsStats(filters: { startDate?: string; endDate?: 
             match.forward = new RegExp(forwardTerm, 'i');
         }
         const pipeline: object[] = [{ $match: Object.keys(match).length ? match : {} }];
-        // זמן מענה = סכום answerSeconds (כמה שניות עד שנענו) – להצגה בסיכומים
+        // דיבור בפועל = סכום answerSeconds (במערכת שדה זה מייצג משך דיבור בשניות) – להצגה בסיכומים
         pipeline.push({
             $group: {
                 _id: null,

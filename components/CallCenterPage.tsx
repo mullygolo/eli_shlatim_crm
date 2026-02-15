@@ -750,23 +750,23 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
                             <p className="text-xs text-slate-500 mb-0.5">לא נענו</p>
                             <p className="text-lg font-semibold text-slate-800">{stats.unansweredCount}</p>
                         </div>
-                        <div className="rounded-lg bg-slate-50 border border-slate-200 p-3" title="סכום זמן מענה – כמה שניות בסך הכול עד שנענו לכל השיחות">
-                            <p className="text-xs text-slate-500 mb-0.5">זמן מענה מצטבר</p>
+                        <div className="rounded-lg bg-slate-50 border border-slate-200 p-3" title="סכום דיבור בפועל – משך הדיבור מרגע מענה עד סיום (שניות)">
+                            <p className="text-xs text-slate-500 mb-0.5">דיבור בפועל מצטבר</p>
                             <p className="text-lg font-semibold text-slate-800">{formatDuration(stats.totalDurationSeconds)}</p>
                         </div>
-                        <div className="rounded-lg bg-slate-50 border border-slate-200 p-3" title="סכום זמן מענה בשיחות נכנסות">
-                            <p className="text-xs text-slate-500 mb-0.5">זמן מענה נכנס</p>
+                        <div className="rounded-lg bg-slate-50 border border-slate-200 p-3" title="סכום דיבור בפועל בשיחות נכנסות">
+                            <p className="text-xs text-slate-500 mb-0.5">דיבור בפועל נכנס</p>
                             <p className="text-lg font-semibold text-slate-800">{formatDuration(stats.totalDurationIncoming)}</p>
                         </div>
-                        <div className="rounded-lg bg-slate-50 border border-slate-200 p-3" title="סכום זמן מענה בשיחות יוצאות">
-                            <p className="text-xs text-slate-500 mb-0.5">זמן מענה יוצא</p>
+                        <div className="rounded-lg bg-slate-50 border border-slate-200 p-3" title="סכום דיבור בפועל בשיחות יוצאות">
+                            <p className="text-xs text-slate-500 mb-0.5">דיבור בפועל יוצא</p>
                             <p className="text-lg font-semibold text-slate-800">{formatDuration(stats.totalDurationOutgoing)}</p>
                         </div>
                         <div className="rounded-lg bg-slate-50 border border-slate-200 p-3" title="שיחות שהמרכזיה לא שלחה עבורן כיוון (נכנס/יוצא)">
-                            <p className="text-xs text-slate-500 mb-0.5">זמן מענה לא מסווג</p>
+                            <p className="text-xs text-slate-500 mb-0.5">דיבור בפועל לא מסווג</p>
                             <p className="text-lg font-semibold text-slate-800">{formatDuration(stats.totalDurationUnknown ?? 0)}</p>
                         </div>
-                        {/* ממוצע זמן מענה */}
+                        {/* ממוצע דיבור בפועל */}
                         {(() => {
                             const answeredCount = stats.totalCalls - stats.unansweredCount;
                             const avgAll = answeredCount > 0 ? Math.round(stats.totalDurationSeconds / answeredCount) : 0;
@@ -775,18 +775,18 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
                             return (
                                 <>
                                     <div className="rounded-lg bg-slate-50 border border-slate-200 p-3 col-span-2 sm:col-span-3 md:col-span-4 lg:col-span-8 border-t-2 border-slate-300">
-                                        <p className="text-xs font-medium text-slate-600 mb-1">זמן מענה ממוצע</p>
+                                        <p className="text-xs font-medium text-slate-600 mb-1">דיבור בפועל ממוצע</p>
                                     </div>
                                     <div className="rounded-lg bg-slate-50 border border-slate-200 p-3">
-                                        <p className="text-xs text-slate-500 mb-0.5">זמן מענה ממוצע (כללי)</p>
+                                        <p className="text-xs text-slate-500 mb-0.5">דיבור בפועל ממוצע (כללי)</p>
                                         <p className="text-lg font-semibold text-slate-800">{avgAll ? formatDuration(avgAll) : '—'}</p>
                                     </div>
                                     <div className="rounded-lg bg-slate-50 border border-slate-200 p-3">
-                                        <p className="text-xs text-slate-500 mb-0.5">זמן מענה ממוצע נכנס</p>
+                                        <p className="text-xs text-slate-500 mb-0.5">דיבור בפועל ממוצע נכנס</p>
                                         <p className="text-lg font-semibold text-slate-800">{avgIn ? formatDuration(avgIn) : '—'}</p>
                                     </div>
                                     <div className="rounded-lg bg-slate-50 border border-slate-200 p-3">
-                                        <p className="text-xs text-slate-500 mb-0.5">זמן מענה ממוצע יוצא</p>
+                                        <p className="text-xs text-slate-500 mb-0.5">דיבור בפועל ממוצע יוצא</p>
                                         <p className="text-lg font-semibold text-slate-800">{avgOut ? formatDuration(avgOut) : '—'}</p>
                                     </div>
                                 </>
@@ -823,8 +823,8 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
                                 <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">מתקשר</th>
                                 <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider" title="המספר שהלקוח חייג אליו (קו)">לאיזה מספר חייג</th>
                                 <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">נציג</th>
-                                <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider" title="משך השיחה מרגע המענה עד סיום – זמן הדיבור בפועל">דיבור בפועל</th>
-                                <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider" title="זמן עד מענה – כמה שניות צלצלה השיחה עד שנענתה">זמן מענה</th>
+                                <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider" title="דיבור בפועל – משך הדיבור (שניות) מרגע מענה עד סיום">דיבור בפועל</th>
+                                <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider" title="זמן מענה – כמה שניות צלצלה השיחה עד שנענתה">זמן מענה</th>
                                 <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">משך</th>
                                 <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">מי ניתק</th>
                                 <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">סטטוס</th>
@@ -1025,10 +1025,12 @@ const CallCenterPage: React.FC<CallCenterPageProps> = ({ onNavigateToPage, setSe
                                             ? `הפניה${log.forward ? ` (${log.forward})` : ''}`
                                             : [log.callee, log.calleeName].filter(Boolean).join(' ') || '—'}
                                     </td>
-                                    <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-600" title={log.answerSeconds == null && isAnswered(log.status) ? 'המרכזיה לא שלחה זמן מענה. ודא שה-webhook כולל שדה answer_sec / answer_time.' : 'זמן עד מענה – כמה שניות צלצלה השיחה עד שנענתה'}>
+                                    {/* דיבור בפועל – משך הדיבור (שדה answerSeconds) */}
+                                    <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-600" title={log.answerSeconds == null && isAnswered(log.status) ? 'המרכזיה לא שלחה דיבור בפועל. ודא שה-webhook כולל שדה answer_sec / answer_time.' : 'דיבור בפועל – משך הדיבור מרגע מענה עד סיום (שניות)'}>
                                         {log.answerSeconds != null ? `${log.answerSeconds} sec` : '—'}
                                     </td>
-                                    <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-600" title="משך השיחה מרגע המענה עד סיום – זמן הדיבור בפועל">
+                                    {/* זמן מענה – זמן עד שנענו (duration − answerSeconds) */}
+                                    <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-600" title="זמן מענה – כמה שניות צלצלה השיחה עד שנענתה">
                                         {isAnswered(log.status) && log.answerSeconds != null ? formatDuration(Math.max(0, log.durationSeconds - log.answerSeconds)) : '—'}
                                     </td>
                                     <td className="px-4 py-3 whitespace-nowrap text-sm text-slate-600">

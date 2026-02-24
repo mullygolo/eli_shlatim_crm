@@ -1182,7 +1182,7 @@ export async function getPayableItems(
                         costGross: costGross,
                         paidAmount,
                         remainingAmount: Math.max(0, remainingAmount),
-                        orderDate: ensureDate(order.date),
+                        orderDate: ensureDate(calculationBaseDate),
                         dueDate,
                         isCustomDueDate: !!costItem.customDueDate,
                         status,
@@ -1792,9 +1792,23 @@ export async function getViewEventsChartData(
         };
 
         if (chartType === 'byHour') {
+            // שעה בשעון ישראל (Asia/Jerusalem) כדי שהגרף יתאים לפירוט האירועים
             const pipeline = [
                 { $match: match },
-                { $addFields: { durationSeconds: durationField, hour: { $hour: { $toDate: '$startedAt' } } } },
+                {
+                    $addFields: {
+                        durationSeconds: durationField,
+                        hour: {
+                            $toInt: {
+                                $dateToString: {
+                                    format: '%H',
+                                    date: { $toDate: '$startedAt' },
+                                    timezone: 'Asia/Jerusalem',
+                                },
+                            },
+                        },
+                    },
+                },
                 { $group: { _id: '$hour', totalDurationSeconds: { $sum: '$durationSeconds' }, viewCount: { $sum: 1 } } },
                 { $sort: { _id: 1 } },
                 { $project: { hour: '$_id', totalDurationSeconds: 1, viewCount: 1, _id: 0 } },

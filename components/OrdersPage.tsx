@@ -1405,7 +1405,13 @@ const OrderForm: React.FC<{
                     ...(user?.id && employees.some(emp => emp.id === user.id) ? { employeeId: user.id } : {}),
                 };
             });
-            if (isActiveDeal) setDealStartDateString(new Date().toISOString().split('T')[0]);
+            if (isActiveDeal) {
+                if (formData.dealStartDate) {
+                    setDealStartDateString(new Date(formData.dealStartDate).toISOString().split('T')[0]);
+                } else {
+                    setDealStartDateString(new Date().toISOString().split('T')[0]);
+                }
+            }
         } else {
             setFormData(prev => ({
                 ...prev,

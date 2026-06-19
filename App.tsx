@@ -3,7 +3,7 @@ import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { Customer, Order, Activity, AddActivityOptions, Supplier, Employee, Page, OrderStatusConfiguration, FixedExpense, VariableExpense, Loan, EquityInvestment, Debt, AttendanceRecord, ManualEvent, PayrollOverrideMap, Receivable } from './types';
 import { useAuth } from './contexts/AuthContext';
 import { useViewTracker } from './contexts/ViewTrackerContext';
-import ProtectedRoute from './components/ProtectedRoute';
+import LoginPage from './components/LoginPage';
 import {
     getCustomers, createCustomer, updateCustomer, deleteCustomer,
     getOrders, createOrder, updateOrder, deleteOrder,
@@ -63,7 +63,7 @@ export const PAGE_TITLES: Record<Page, string> = {
 };
 
 const App: React.FC = () => {
-    const { user } = useAuth();
+    const { user, logout, isAuthenticated, isLoading: authIsLoading } = useAuth();
     const { trackViewStart, trackViewEnd } = useViewTracker();
     const prevPageRef = useRef<Page | null>(null);
     const [currentPage, setCurrentPage] = useState<Page>('Dashboard');
@@ -98,13 +98,10 @@ const App: React.FC = () => {
     // Calendar Manual Events
     const [manualEvents, setManualEvents] = useState<ManualEvent[]>([]);
 
-    // Loading and Error States
-    const [isLoading, setIsLoading] = useState<boolean>(true);
+    // Loading and Error States (data loading – only after auth)
+    const [isLoading, setIsLoading] = useState<boolean>(false);
     const [error, setError] = useState<string | null>(null);
     const [backgroundLoadError, setBackgroundLoadError] = useState<string | null>(null);
-    
-    // Auth context
-    const { logout, isAuthenticated } = useAuth();
     
     // Redirect EMPLOYEE away from restricted pages (Finance allows "ניהול צ'קים נכנסים" only)
     useEffect(() => {
@@ -146,8 +143,9 @@ const App: React.FC = () => {
         };
     }, [isAuthenticated, logout]);
 
-    // Track page/route views for usage analytics
+    // Track page/route views for usage analytics (authenticated only)
     useEffect(() => {
+        if (!isAuthenticated) return;
         const key = `route_${currentPage}`;
         const label = PAGE_TITLES[currentPage];
         if (prevPageRef.current !== null) {
@@ -155,7 +153,7 @@ const App: React.FC = () => {
         }
         trackViewStart(key, 'route', undefined, label);
         prevPageRef.current = currentPage;
-    }, [currentPage, trackViewStart, trackViewEnd]);
+    }, [currentPage, trackViewStart, trackViewEnd, isAuthenticated]);
 
     // Load data in two phases: critical first (show app fast), then rest in background
     const CRITICAL_TIMEOUT_MS = 10000;
@@ -228,6 +226,11 @@ const App: React.FC = () => {
     }, []);
 
     useEffect(() => {
+        if (!isAuthenticated) {
+            setIsLoading(false);
+            return;
+        }
+
         let cancelled = false;
         const cancelledRef = { current: false };
 
@@ -315,7 +318,7 @@ const App: React.FC = () => {
             cancelledRef.current = true;
             clearInterval(attendanceRefreshInterval);
         };
-    }, [loadBackgroundData]);
+    }, [isAuthenticated, loadBackgroundData]);
 
     const [openOrderId, setOpenOrderId] = useState<string | null>(null);
     const [openNewOrderRequest, setOpenNewOrderRequest] = useState(false);
@@ -336,10 +339,11 @@ const App: React.FC = () => {
 
     // When opening Dashboard, Reports, or Orders, refresh orders so data is up-to-date (including changes by other users)
     useEffect(() => {
+        if (!isAuthenticated) return;
         if (currentPage === 'Dashboard' || currentPage === 'Reports' || currentPage === 'Orders') {
             getOrders().then(setOrders).catch((err) => console.error('Error refreshing orders:', err));
         }
-    }, [currentPage]);
+    }, [currentPage, isAuthenticated]);
 
     // Performance page is ADMIN only; redirect others to Dashboard
     useEffect(() => {
@@ -934,6 +938,21 @@ return <CustomersPage
         }
     }, []);
 
+    if (authIsLoading) {
+        return (
+            <div className="min-h-screen flex items-center justify-center" dir="rtl">
+                <div className="text-center">
+                    <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600"></div>
+                    <p className="mt-4 text-slate-600">טוען...</p>
+                </div>
+            </div>
+        );
+    }
+
+    if (!isAuthenticated) {
+        return <LoginPage />;
+    }
+
     if (isLoading) {
         return (
             <div className="flex h-screen bg-light-bg items-center justify-center" dir="rtl">
@@ -963,7 +982,6 @@ return <CustomersPage
     }
 
     return (
-        <ProtectedRoute>
             <div className="flex h-screen bg-light-bg min-h-[100dvh]" dir="rtl" style={{ paddingLeft: 'env(safe-area-inset-left)', paddingRight: 'env(safe-area-inset-right)', paddingTop: 'env(safe-area-inset-top)', paddingBottom: 'env(safe-area-inset-bottom)' } as React.CSSProperties}>
                 {/* Desktop sidebar: visible from md up */}
                 <div className="hidden md:flex md:w-64 md:flex-shrink-0 md:flex-col">
@@ -1038,7 +1056,6 @@ return <CustomersPage
                     </main>
                 </div>
             </div>
-        </ProtectedRoute>
     );
 };
 

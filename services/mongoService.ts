@@ -30,6 +30,10 @@ async function apiRequest<T>(endpoint: string, options: RequestInit = {}): Promi
     });
 
     if (!response.ok) {
+        if (response.status === 401) {
+            localStorage.removeItem('authToken');
+            localStorage.removeItem('rememberMe');
+        }
         const text = await response.text();
         let detail = `${response.status} ${response.statusText}`;
         try {

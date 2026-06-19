@@ -25,6 +25,7 @@ import callLogsRouter from './routes/callLogs.js';
 import performanceMetricsRouter from './routes/performanceMetrics.js';
 import notificationsRouter from './routes/notifications.js';
 import viewEventsRouter from './routes/viewEvents.js';
+import { verifyToken } from './middleware/auth.js';
 import { initializeDefaultAdmin, autoCloseOldAttendanceRecords, initializeAttendanceIndexes, initializeCallLogsIndex, backfillCallLogsDialedNumber, inferCallLogDirectionForUnknown, initializeViewEventsIndexes, initializeStatusConfigs, getDb } from './services/mongoService.js';
 import { getDateStringIsrael } from './utils/timezone.js';
 
@@ -47,26 +48,27 @@ app.use(express.json({ limit: '50mb' })); // Increase limit for base64 images
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // API Routes (חשוב - לפני static files)
+// Public: auth (login/reset), webhooks, health. All other API routes require JWT.
 app.use('/api/auth', authRouter);
-app.use('/api/customers', customersRouter);
-app.use('/api/orders', ordersRouter);
-app.use('/api/suppliers', suppliersRouter);
-app.use('/api/employees', employeesRouter);
-app.use('/api/activities', activitiesRouter);
-app.use('/api/status-configs', statusConfigsRouter);
-app.use('/api/finance', financeRouter);
-app.use('/api/attendance', attendanceRouter);
-app.use('/api/manual-events', manualEventsRouter);
-app.use('/api/wall-posts', wallPostsRouter);
-app.use('/api/improvement-suggestions', improvementSuggestionsRouter);
-app.use('/api/settings', settingsRouter);
-app.use('/api/price-list', priceListRouter);
-app.use('/api/green-invoice', greenInvoiceRouter);
 app.use('/api/webhook', webhookCallsRouter);
-app.use('/api/call-logs', callLogsRouter);
-app.use('/api/performance-metrics', performanceMetricsRouter);
-app.use('/api/notifications', notificationsRouter);
-app.use('/api/view-events', viewEventsRouter);
+app.use('/api/customers', verifyToken, customersRouter);
+app.use('/api/orders', verifyToken, ordersRouter);
+app.use('/api/suppliers', verifyToken, suppliersRouter);
+app.use('/api/employees', verifyToken, employeesRouter);
+app.use('/api/activities', verifyToken, activitiesRouter);
+app.use('/api/status-configs', verifyToken, statusConfigsRouter);
+app.use('/api/finance', verifyToken, financeRouter);
+app.use('/api/attendance', verifyToken, attendanceRouter);
+app.use('/api/manual-events', verifyToken, manualEventsRouter);
+app.use('/api/wall-posts', verifyToken, wallPostsRouter);
+app.use('/api/improvement-suggestions', verifyToken, improvementSuggestionsRouter);
+app.use('/api/settings', verifyToken, settingsRouter);
+app.use('/api/price-list', verifyToken, priceListRouter);
+app.use('/api/green-invoice', verifyToken, greenInvoiceRouter);
+app.use('/api/call-logs', verifyToken, callLogsRouter);
+app.use('/api/performance-metrics', verifyToken, performanceMetricsRouter);
+app.use('/api/notifications', verifyToken, notificationsRouter);
+app.use('/api/view-events', verifyToken, viewEventsRouter);
 
 // Health check
 app.get('/api/health', (req, res) => {

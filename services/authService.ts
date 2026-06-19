@@ -30,6 +30,10 @@ async function apiRequest<T>(endpoint: string, options: RequestInit = {}): Promi
     });
 
     if (!response.ok) {
+        if (response.status === 401 && !endpoint.startsWith('/auth/login')) {
+            localStorage.removeItem('authToken');
+            localStorage.removeItem('rememberMe');
+        }
         const error: AuthError = await response.json().catch(() => ({ error: response.statusText }));
         throw new Error(error.error || `API request failed: ${response.statusText}`);
     }

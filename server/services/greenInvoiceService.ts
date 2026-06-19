@@ -7,7 +7,8 @@ import {
     CreateClientRequest,
     RecordPaymentRequest,
     GreenInvoiceError,
-    GreenInvoiceDocumentType
+    GreenInvoiceDocumentType,
+    GreenInvoiceAuthResponse
 } from '../types/greenInvoice.js';
 import { normalizeIsraeliIdOrCompanyNumber } from '../utils/israeliId.js';
 
@@ -39,83 +40,66 @@ async function authenticate(): Promise<string> {
     }
 
     try {
-        // Try multiple authentication endpoints
-        // Python SDK uses /v1/account/token with base URL https://api.greeninvoice.co.il/api
-        const authEndpoints = [
-            '/v1/account/token',  // Python SDK format (correct)
-            '/account/token'      // Fallback
-        ];
-        
-        let lastError: any = null;
+        // Morning API: POST {base}/v1/account/token with { id, secret } → { token, expires }
+        const authEndpoints = ['/v1/account/token', '/account/token'];
+
+        let lastError: Error | null = null;
         let response: Response | null = null;
-        
+
         for (const endpoint of authEndpoints) {
             try {
-                console.log(`Trying authentication endpoint: ${endpoint}`);
                 response = await fetch(`${GREENINVOICE_API_URL}${endpoint}`, {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         id: GREENINVOICE_API_KEY,
-                        secret: GREENINVOICE_API_SECRET
-                    })
+                        secret: GREENINVOICE_API_SECRET,
+                    }),
                 });
 
-                if (response.ok) {
-                    console.log(`Authentication successful with endpoint: ${endpoint}`);
-                    break; // Success, exit loop
-                } else {
-                    const errRes = response;
-                    const errorText = await errRes.text().catch(() => errRes.statusText);
-                    lastError = new Error(`Authentication failed (${endpoint}): ${errorText || errRes.statusText}`);
-                    console.log(`Authentication endpoint ${endpoint} failed:`, lastError.message);
-                    response = null;
-                }
-            } catch (error: any) {
-                lastError = error;
-                console.log(`Authentication endpoint ${endpoint} threw error:`, error.message);
+                if (response.ok) break;
+
+                const errorText = await response.text().catch(() => response!.statusText);
+                lastError = new Error(`Authentication failed (${endpoint}): ${errorText || response.statusText}`);
+                response = null;
+            } catch (error: unknown) {
+                lastError = error instanceof Error ? error : new Error(String(error));
                 response = null;
             }
         }
-        
-        if (!response || !response.ok) {
-            throw lastError || new Error('Authentication failed: All endpoints failed');
+
+        if (!response?.ok) {
+            throw lastError ?? new Error('Authentication failed: All endpoints failed');
         }
 
         const text = await response.text();
-        let token: string | null =
+        let authData: GreenInvoiceAuthResponse | null = null;
+        if (text) {
+            try {
+                authData = JSON.parse(text) as GreenInvoiceAuthResponse;
+            } catch {
+                /* ignore */
+            }
+        }
+
+        const token =
+            authData?.token ||
             response.headers.get('X-Authorization-Bearer') ||
             response.headers.get('x-authorization-bearer');
 
-        if (!token && text) {
-            try {
-                const data = JSON.parse(text) as { token?: string };
-                token = data.token || null;
-            } catch {
-                /* ignore */
-            }
-        }
-
         if (!token) {
-            console.error('GreenInvoice auth: no token in header or body. Body preview:', text.slice(0, 200));
-            throw new Error('Token not found in response (header X-Authorization-Bearer or body.token)');
+            console.error('GreenInvoice auth: no token in body or header. Body preview:', text.slice(0, 200));
+            throw new Error('Token not found in response (body.token or X-Authorization-Bearer header)');
         }
 
-        let expiry = Math.floor(Date.now() / 1000) + 3600;
-        if (text) {
-            try {
-                const data = JSON.parse(text) as { expiry?: number };
-                if (typeof data.expiry === 'number') expiry = data.expiry;
-            } catch {
-                /* ignore */
-            }
-        }
+        const expiry =
+            (typeof authData?.expires === 'number' ? authData.expires : undefined) ??
+            (typeof authData?.expiry === 'number' ? authData.expiry : undefined) ??
+            Math.floor(Date.now() / 1000) + 1800;
 
         authToken = token;
         tokenExpiry = expiry;
-        return authToken;
+        return token;
     } catch (error) {
         console.error('GreenInvoice authentication error:', error);
         throw error;

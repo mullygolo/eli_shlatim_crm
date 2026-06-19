@@ -1,10 +1,13 @@
 // GreenInvoice API Types
 
 export interface GreenInvoiceAuthResponse {
-    status: string;
+    status?: string;
     token: string;
-    type: string;
-    expiry: number;
+    type?: string;
+    /** New Morning API field */
+    expires?: number;
+    /** Legacy field (pre-migration) */
+    expiry?: number;
 }
 
 export interface GreenInvoiceClient {

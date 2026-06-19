@@ -1,26 +1,49 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { Order, Customer, Supplier, Employee, PaymentStatus, LineItem, LineItemUnit, Attachment, Contact, PaymentMethod, AdditionalService, TimelineEvent, AttachmentCategory, OrderType, OrderStatusConfiguration, CustomerPayment, FieldChange } from '../types';
+import { Order, Customer, Supplier, Employee, PaymentStatus, LineItem, LineItemUnit, Attachment, Contact, PaymentMethod, AdditionalService, TimelineEvent, AttachmentCategory, OrderType, OrderStatusConfiguration, CustomerPayment, FieldChange, SalesHistoryEntry, AdHocProduct, PriceListProduct, WallPost } from '../types';
 import { PAYMENT_STATUSES_ORDERED, PAYMENT_TERMS_OPTIONS, CUSTOMER_CATEGORIES } from '../constants';
-import { PlusIcon, EditIcon, DeleteIcon, WhatsAppIcon, EmailIcon, PhoneIcon, NoteIcon, TaskIcon, LogIcon, SettingsIcon, LockIcon, CashIcon, DownloadIcon } from './icons';
+import { PlusIcon, EditIcon, DeleteIcon, WhatsAppIcon, EmailIcon, PhoneIcon, NoteIcon, TaskIcon, LogIcon, SettingsIcon, LockIcon, CashIcon, DownloadIcon, TruckIcon, InstallationIcon, CustomersIcon } from './icons';
 import Modal from './Modal';
-import { calculateOrderTotals, calculateDueDate } from '../utils/calculations';
+import ProductSelectorModal from './ProductSelectorModal';
+import SendItemToSuppliersModal from './SendItemToSuppliersModal';
+import SendOrderToSuppliersModal from './SendOrderToSuppliersModal';
+import CreateDocumentModal from './CreateDocumentModal';
+import DocumentViewer from './DocumentViewer';
+import OrdersImportModal from './OrdersImportModal';
+import SearchableSelect from './SearchableSelect';
+import AutoResizeTextarea from './AutoResizeTextarea';
+import { calculateOrderTotals, calculateDueDate, getLineItemEffectiveQuantity } from '../utils/calculations';
+import { getStatusConfigForOrder, getOrderStatusLabel, getStatusConfigByIdOrLabel } from '../utils/statusHelpers';
 import MultiSelectFilter from './MultiSelectFilter';
 import * as mongoService from '../services/mongoService';
+import { getProducts } from '../services/priceListService';
+import { addSalesHistoryEntry, createAdHocProduct, sendQuoteRequests } from '../services/priceListService';
+import { calculateProductPrice } from '../utils/priceCalculations';
+import { useAsyncAction } from '../hooks/useAsyncAction';
+import { useAuth } from '../contexts/AuthContext';
+import { useViewTracker } from '../contexts/ViewTrackerContext';
 
 interface OrdersPageProps {
     orders: Order[];
     setOrders: React.Dispatch<React.SetStateAction<Order[]>>;
+    setOrdersLocal: (updater: (prev: Order[]) => Order[]) => void;
     customers: Customer[];
     setCustomers: React.Dispatch<React.SetStateAction<Customer[]>>;
     suppliers: Supplier[];
     setSuppliers: React.Dispatch<React.SetStateAction<Supplier[]>>;
     employees: Employee[];
-    addActivity: (description: string) => void;
+    addActivity: (description: string, options?: import('../types').AddActivityOptions) => void;
     initialOpenOrderId?: string | null;
     onOrderOpened?: () => void;
+    openNewOrderRequest?: boolean;
+    onClearedOpenNewOrderRequest?: () => void;
+    openNewOrderWithCustomerId?: string | null;
+    openNewOrderWithPhone?: string | null;
+    onClearedNewOrderPrefill?: () => void;
     statusConfigs: OrderStatusConfiguration[];
     getNextOrderNumber: () => string;
     vatRate: number;
+    onNavigateToPage?: (page: import('../types').Page) => void;
+    setSelectedCustomerId?: (id: string | null) => void;
 }
 
 const getProfitMarginColor = (markup: number): string => {
@@ -126,11 +149,82 @@ const PaymentDocumentsViewer: React.FC<{
     );
 };
 
+type ServiceDetailsPayload = {
+    scheduledDate?: Date;
+    address?: string;
+    siteContactName?: string;
+    siteContactDetails?: string;
+    notes?: string;
+};
+
+const ServiceDetailsModal: React.FC<{
+    scheduledDate?: Date;
+    address: string;
+    siteContactName: string;
+    siteContactDetails: string;
+    notes: string;
+    onClose: () => void;
+    onSave: (payload: ServiceDetailsPayload) => void;
+}> = ({ scheduledDate, address, siteContactName, siteContactDetails, notes, onClose, onSave }) => {
+    const [scheduledDateVal, setScheduledDateVal] = useState(scheduledDate ? (() => {
+        const d = new Date(scheduledDate);
+        const pad = (n: number) => n < 10 ? '0' + n : n;
+        return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    })() : '');
+    const [addressVal, setAddressVal] = useState(address);
+    const [siteContactNameVal, setSiteContactNameVal] = useState(siteContactName);
+    const [siteContactDetailsVal, setSiteContactDetailsVal] = useState(siteContactDetails);
+    const [notesVal, setNotesVal] = useState(notes);
+
+    const handleSave = () => {
+        onSave({
+            scheduledDate: scheduledDateVal ? new Date(scheduledDateVal) : undefined,
+            address: addressVal || undefined,
+            siteContactName: siteContactNameVal || undefined,
+            siteContactDetails: siteContactDetailsVal || undefined,
+            notes: notesVal || undefined,
+        });
+    };
+
+    return (
+        <Modal title="פרטי משלוח/התקנה" onClose={onClose} size="lg">
+            <div className="p-4 space-y-4">
+                <div>
+                    <label className="block text-xs font-medium text-slate-600">תאריך ושעה</label>
+                    <input type="datetime-local" value={scheduledDateVal} onChange={e => setScheduledDateVal(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" />
+                </div>
+                <div>
+                    <label className="block text-xs font-medium text-slate-600">כתובת למשלוח/התקנה</label>
+                    <input type="text" value={addressVal} onChange={e => setAddressVal(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" />
+                </div>
+                <div>
+                    <label className="block text-xs font-medium text-slate-600">איש קשר בשטח</label>
+                    <input type="text" value={siteContactNameVal} onChange={e => setSiteContactNameVal(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" />
+                </div>
+                <div>
+                    <label className="block text-xs font-medium text-slate-600">פרטי התקשרות</label>
+                    <input type="text" value={siteContactDetailsVal} onChange={e => setSiteContactDetailsVal(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" />
+                </div>
+                <div>
+                    <label className="block text-xs font-medium text-slate-600">הערות</label>
+                    <AutoResizeTextarea value={notesVal} onChange={e => setNotesVal(e.target.value)} minHeight={44} maxHeight={220} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" />
+                </div>
+            </div>
+            <div className="flex justify-end gap-2 p-4 border-t border-slate-200">
+                <button type="button" onClick={onClose} className="px-4 py-2 bg-slate-200 text-slate-800 rounded-md hover:bg-slate-300">ביטול</button>
+                <button type="button" onClick={handleSave} className="px-4 py-2 bg-primary text-white rounded-md hover:bg-indigo-700">שמור</button>
+            </div>
+        </Modal>
+    );
+};
+
 const SmartCustomerSearch: React.FC<{
     customers: Customer[];
     selectedCustomerId: string;
     onSelect: (customerId: string) => void;
-}> = ({ customers, selectedCustomerId, onSelect }) => {
+    showAddNewOption?: boolean;
+    onAddNewCustomer?: (nameFromSearch: string) => void;
+}> = ({ customers, selectedCustomerId, onSelect, showAddNewOption, onAddNewCustomer }) => {
     const [searchTerm, setSearchTerm] = useState('');
     const [isOpen, setIsOpen] = useState(false);
     const wrapperRef = useRef<HTMLDivElement>(null);
@@ -201,9 +295,23 @@ const SmartCustomerSearch: React.FC<{
                 </div>
             </div>
             {isOpen && (
-                <ul className="absolute z-50 mt-1 w-full bg-white shadow-lg max-h-60 rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 overflow-auto focus:outline-none sm:text-sm border border-slate-200">
-                    {filteredCustomers.length === 0 ? (
-                        <li className="text-gray-500 select-none relative py-2 pl-3 pr-9 text-center">לא נמצאו תוצאות</li>
+                <ul className="absolute z-50 mt-1 w-full bg-white shadow-lg max-h-60 rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 overflow-auto focus:outline-none sm:text-sm border border-slate-200" role="listbox">
+                    {filteredCustomers.length === 0 && (!showAddNewOption || !searchTerm.trim()) ? (
+                        <li className="text-gray-500 select-none relative py-2 pl-3 pr-9 text-center" role="option">לא נמצאו תוצאות</li>
+                    ) : filteredCustomers.length === 0 && showAddNewOption && searchTerm.trim() ? (
+                        <>
+                            <li
+                                role="option"
+                                className="text-indigo-700 bg-indigo-50 hover:bg-indigo-100 cursor-pointer select-none relative py-2.5 pl-3 pr-4 border-b border-indigo-100 font-medium"
+                                onClick={() => {
+                                    onAddNewCustomer?.(searchTerm.trim());
+                                    setIsOpen(false);
+                                }}
+                            >
+                                <span className="block truncate text-start">הוסף לקוח חדש: {searchTerm.trim()}</span>
+                            </li>
+                            <li className="sticky bottom-0 bg-slate-50 border-t border-slate-200 p-2 text-center text-xs text-slate-500">לא נמצא – ניתן להוסיף לקוח חדש</li>
+                        </>
                     ) : (
                         filteredCustomers.map(customer => {
                             let matchLabel = '';
@@ -240,9 +348,11 @@ const SmartCustomerSearch: React.FC<{
                             );
                         })
                     )}
-                    <li className="sticky bottom-0 bg-slate-50 border-t border-slate-200 p-2 text-center text-xs text-slate-500">
-                         מציג {filteredCustomers.length} תוצאות
-                    </li>
+                    {filteredCustomers.length > 0 && (
+                        <li className="sticky bottom-0 bg-slate-50 border-t border-slate-200 p-2 text-center text-xs text-slate-500">
+                             מציג {filteredCustomers.length} תוצאות
+                        </li>
+                    )}
                 </ul>
             )}
         </div>
@@ -266,19 +376,19 @@ const NewSupplierForm: React.FC<{ onSave: (supplier: { name: string; contactPers
         <form onSubmit={handleSubmit} className="space-y-4 text-start">
             <div>
                 <label className="block text-sm font-medium text-slate-700">שם הספק</label>
-                <input type="text" name="name" value={formData.name} onChange={handleChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" required />
+                <input type="text" name="name" value={formData.name} onChange={handleChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" required />
             </div>
             <div>
                 <label className="block text-sm font-medium text-slate-700">איש קשר ראשי</label>
-                <input type="text" name="contactPerson" value={formData.contactPerson} onChange={handleChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+                <input type="text" name="contactPerson" value={formData.contactPerson} onChange={handleChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" />
             </div>
             <div>
                 <label className="block text-sm font-medium text-slate-700">אימייל</label>
-                <input type="email" name="email" value={formData.email} onChange={handleChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+                <input type="email" name="email" value={formData.email} onChange={handleChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" />
             </div>
             <div>
                 <label className="block text-sm font-medium text-slate-700">טלפון</label>
-                <input type="tel" name="phone" value={formData.phone} onChange={handleChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+                <input type="tel" name="phone" value={formData.phone} onChange={handleChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" />
             </div>
             <div className="flex justify-end space-x-2 pt-4 space-x-reverse">
                 <button type="button" onClick={onCancel} className="px-4 py-2 bg-slate-200 text-slate-800 rounded-md hover:bg-slate-300">ביטול</button>
@@ -576,6 +686,8 @@ const OrderFileManager: React.FC<{
 
 const OrderForm: React.FC<{
     order: Order | null;
+    initialCustomerId?: string;
+    initialNewCustomerPhone?: string;
     customers: Customer[];
     setCustomers: React.Dispatch<React.SetStateAction<Customer[]>>;
     suppliers: Supplier[];
@@ -584,18 +696,23 @@ const OrderForm: React.FC<{
     onSave: (order: Order, keepOpen?: boolean) => void;
     onDraftCreate: (order: Order) => void;
     onCancel: () => void;
-    addActivity: (description: string) => void;
-    allOrders?: Order[]; 
+    addActivity: (description: string, options?: import('../types').AddActivityOptions) => void;
     onSwitchOrder: (orderId: string) => void; 
     statusConfigs: OrderStatusConfiguration[];
     getNextOrderNumber: () => string;
     vatRate: number;
-}> = ({ order, customers, setCustomers, suppliers, setSuppliers, employees, onSave, onDraftCreate, onCancel, addActivity, allOrders = [], onSwitchOrder, statusConfigs, getNextOrderNumber, vatRate }) => {
+    setHeaderContent?: (node: React.ReactNode) => void;
+    readOnly?: boolean;
+    lockedByUserName?: string;
+    onNavigateToPage?: (page: import('../types').Page) => void;
+    setSelectedCustomerId?: (id: string | null) => void;
+}> = ({ order, initialCustomerId, initialNewCustomerPhone, customers, setCustomers, suppliers, setSuppliers, employees, onSave, onDraftCreate, onCancel, addActivity, onSwitchOrder, statusConfigs, getNextOrderNumber, vatRate, setHeaderContent, readOnly, lockedByUserName, onNavigateToPage, setSelectedCustomerId }) => {
     
     // Find Dynamic Initial Status
     const initialStatus = useMemo(() => statusConfigs.find(c => c.isLead)?.label || 'ליד חדש', [statusConfigs]);
 
     const [customerMode, setCustomerMode] = useState<'EXISTING' | 'NEW'>('EXISTING');
+    const [showNewCustomerForm, setShowNewCustomerForm] = useState(false);
     const [newCustomerData, setNewCustomerData] = useState({
         name: '',
         contactName: '',
@@ -604,10 +721,14 @@ const OrderForm: React.FC<{
         address: '',
         category: '',
         paymentMethod: PaymentMethod.BANK_TRANSFER,
-        paymentTerms: 'שוטף 30',
+        paymentTerms: 'תשלום מיידי',
     });
 
     const isEditMode = !!order;
+    const { user } = useAuth();
+    const isAdmin = user?.roleType === 'ADMIN';
+    /** שם המשתמש המחובר — לכתיבה ביומן (מי שבפועל ביצע את הפעולה) */
+    const loggedInUserName = (user && employees.find(e => e.id === user.id)?.name) || user?.name || 'מערכת';
 
     const [formData, setFormData] = useState<Omit<Order, 'id' | 'orderNumber'>>(
         order 
@@ -620,7 +741,7 @@ const OrderForm: React.FC<{
             dealStartDate: undefined,
             customerId: order ? order['customerId'] : '', 
             contactId: '',
-            employeeId: employees.length > 0 ? employees[0].id : '',
+            employeeId: (user?.id && employees.some(e => e.id === user.id)) ? user.id : (employees.length > 0 ? employees[0].id : ''),
             orderStatus: initialStatus,
             paymentStatus: PaymentStatus.UNPAID,
             payments: [], 
@@ -633,6 +754,7 @@ const OrderForm: React.FC<{
             timeline: [],
             statusHistory: [],
             vatRate: vatRate, // Initialize with system default
+            hiddenFromSalesGoal: false,
         }
     );
      const [dateString, setDateString] = useState(() => {
@@ -650,9 +772,23 @@ const OrderForm: React.FC<{
              return '';
          }
      });
+    const [createdAtString, setCreatedAtString] = useState(() => {
+        try {
+            const d = formData.createdAt ? new Date(formData.createdAt) : (formData.date ? new Date(formData.date) : new Date());
+            return d && !isNaN(d.getTime()) ? d.toISOString().split('T')[0] : new Date().toISOString().split('T')[0];
+        } catch (e) {
+            return new Date().toISOString().split('T')[0];
+        }
+    });
 
-     const [isNewSupplierModalOpen, setIsNewSupplierModalOpen] = useState(false);
-     const [newServiceSupplierFor, setNewServiceSupplierFor] = useState<number | null>(null);
+    const [isNewSupplierModalOpen, setIsNewSupplierModalOpen] = useState(false);
+    const [newServiceSupplierFor, setNewServiceSupplierFor] = useState<number | null>(null);
+    const [isProductSelectorOpen, setIsProductSelectorOpen] = useState(false);
+    const [productSelectorFor, setProductSelectorFor] = useState<{ type: 'lineItem' | 'additionalService'; index: number } | null>(null);
+    const [sendItemModalOpen, setSendItemModalOpen] = useState(false);
+    const [sendItemForIndex, setSendItemForIndex] = useState<number | null>(null);
+    const [serviceDetailsModalForIndex, setServiceDetailsModalForIndex] = useState<number | null>(null);
+    const [sendOrderModalOpen, setSendOrderModalOpen] = useState(false);
      const [timelineFilter, setTimelineFilter] = useState<'ALL' | 'HUMAN' | 'SYSTEM'>('HUMAN');
      const [newTimelineEntry, setNewTimelineEntry] = useState({
         type: 'NOTE' as 'NOTE' | 'TASK',
@@ -661,33 +797,483 @@ const OrderForm: React.FC<{
         dueDate: new Date().toISOString().split('T')[0], 
     });
 
-    const [isAddingPayment, setIsAddingPayment] = useState(false);
+    const [preparationStatusSuggestions, setPreparationStatusSuggestions] = useState<string[]>([]);
+    useEffect(() => {
+        mongoService.getPreparationStatusSuggestions().then(setPreparationStatusSuggestions).catch(() => setPreparationStatusSuggestions([]));
+    }, []);
+
+    // Prefill from call center: open new order with customer or phone
+    useEffect(() => {
+        if (order) return;
+        if (initialCustomerId) {
+            setFormData(prev => ({ ...prev, customerId: initialCustomerId }));
+            setCustomerMode('EXISTING');
+            setShowNewCustomerForm(false);
+        }
+        if (initialNewCustomerPhone) {
+            setCustomerMode('NEW');
+            setShowNewCustomerForm(true);
+            setNewCustomerData(prev => ({ ...prev, phone: initialNewCustomerPhone }));
+        }
+    }, [order, initialCustomerId, initialNewCustomerPhone]);
+
     const [paymentIdToDelete, setPaymentIdToDelete] = useState<string | null>(null); 
-    const [newPaymentData, setNewPaymentData] = useState<Partial<CustomerPayment>>({
-        amount: 0,
-        date: new Date(),
-        method: PaymentMethod.BANK_TRANSFER,
-        reference: '',
-        repaymentDate: undefined
-    });
-    const [newPaymentAttachments, setNewPaymentAttachments] = useState<Attachment[]>([]);
     const [viewingPaymentDocuments, setViewingPaymentDocuments] = useState<Attachment[] | null>(null);
+    /** For each check payment id, whether it has attachments (images/PDF) – used to show eye icon only when relevant. */
+    const [checkHasAttachments, setCheckHasAttachments] = useState<Record<string, boolean>>({});
+    const [isCreateDocumentModalOpen, setIsCreateDocumentModalOpen] = useState(false);
+    const [createDocumentModalMode, setCreateDocumentModalMode] = useState<'full' | 'from-document'>('full');
+    const [createDocumentModalFromType, setCreateDocumentModalFromType] = useState<'invoice' | 'receipt' | 'credit' | 'estimate' | undefined>(undefined);
+    const [createDocumentModalSourceId, setCreateDocumentModalSourceId] = useState<string | undefined>(undefined);
+    const [invoiceSummary, setInvoiceSummary] = useState<{ invoicedAmount: number; creditsAmount: number; netInvoiced: number; hasInvoices: boolean; hasReceipts: boolean } | null>(null);
+    const [collectionInfoExpanded, setCollectionInfoExpanded] = useState(false);
+
+    // Load which check payments have attachments (for eye icon in מסמכים column)
+    useEffect(() => {
+        const checkPayments = (formData.payments || []).filter(p => p.method === PaymentMethod.CHECK);
+        setCheckHasAttachments(prev => {
+            const next: Record<string, boolean> = {};
+            checkPayments.forEach(p => { if (prev[p.id] !== undefined) next[p.id] = prev[p.id]; });
+            return next;
+        });
+        if (checkPayments.length === 0) return;
+        let cancelled = false;
+        checkPayments.forEach(p => {
+            mongoService.getCheckAttachments(p.id).then(atts => {
+                if (!cancelled) setCheckHasAttachments(prev => ({ ...prev, [p.id]: atts.length > 0 }));
+            }).catch(() => {
+                if (!cancelled) setCheckHasAttachments(prev => ({ ...prev, [p.id]: false }));
+            });
+        });
+        return () => { cancelled = true; };
+    }, [formData.payments]);
+
+    // GreenInvoice document creation handlers
+    const handleCreateDocumentInternal = async (
+        documentType: 'invoice' | 'receipt' | 'invoice_receipt' | 'credit_invoice' | 'estimate' | 'work_order' | 'delivery_note' | 'transaction_account',
+        method: 'api' | 'window',
+        paymentsOverride?: Array<{ id: string; amount: number; date: Date; method: string; reference?: string; repaymentDate?: Date }>,
+        options?: { sourceDocumentId?: string }
+    ) => {
+        const documentTypeForApi = documentType;
+        const sourceId = options?.sourceDocumentId ?? createDocumentModalSourceId;
+        if (!order || !order.id) {
+            throw new Error('שגיאה: לא נמצאה הזמנה');
+        }
+
+        const selectedCustomer = customers.find(c => c.id === formData.customerId);
+        if (!selectedCustomer) {
+            throw new Error('שגיאה: לא נמצא לקוח');
+        }
+
+        if (method === 'api') {
+            const body: Record<string, unknown> = {
+                orderId: order.id,
+                documentType: documentTypeForApi,
+                customerId: selectedCustomer.id,
+                ...(sourceId && (documentTypeForApi === 'receipt' || documentTypeForApi === 'credit_invoice') && { sourceDocumentId: sourceId })
+            };
+            if (paymentsOverride && (documentTypeForApi === 'receipt' || documentTypeForApi === 'invoice_receipt')) {
+                body.paymentsOverride = paymentsOverride.map((p) => ({
+                    amount: p.amount,
+                    date: typeof p.date === 'string' ? p.date : (p.date as Date).toISOString().split('T')[0],
+                    method: p.method,
+                    reference: p.reference,
+                    repaymentDate: p.repaymentDate ? (typeof p.repaymentDate === 'string' ? p.repaymentDate : (p.repaymentDate as Date).toISOString().split('T')[0]) : undefined
+                }));
+            }
+            const response = await fetch('/api/green-invoice/orders/create-document', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${localStorage.getItem('authToken')}`
+                },
+                body: JSON.stringify(body)
+            });
+
+            if (!response.ok) {
+                let errorBody: { error?: string; fallbackUrl?: string } = {};
+                try {
+                    errorBody = await response.json();
+                } catch (_) {}
+                if (errorBody.fallbackUrl) {
+                    const newWindow = window.open(errorBody.fallbackUrl, 'greeninvoice_fallback', 'width=1200,height=800,scrollbars=yes,resizable=yes');
+                    if (newWindow) newWindow.focus();
+                    addActivity(`יצירת מסמך דרך API אינה זמינה — נפתחה חשבונית ירוקה ליצירה ידנית (הזמנה ${order.orderNumber})`);
+                    setIsCreateDocumentModalOpen(false);
+                    alert((errorBody.error || 'יצירת מסמכים דרך API זמינה למנויי Best ומעלה. פתחנו עבורך את חשבונית ירוקה — צור את המסמך ידנית.') + (newWindow ? '' : '\n\nאם החלון נחסם, אפשר לפתוח ידנית: ' + errorBody.fallbackUrl));
+                    return;
+                }
+                const errorMessage = errorBody.error || errorBody.message || (errorBody as any).detail || `שגיאה ${response.status}: ${response.statusText}`;
+                throw new Error(errorMessage);
+            }
+
+            const result = await response.json();
+            const docLabel = getDocumentTypeLabel(documentType);
+            const docLogEvent: TimelineEvent = {
+                id: `log_doc_${Date.now()}`,
+                timestamp: new Date(),
+                user: loggedInUserName,
+                type: 'LOG',
+                content: `נוצר מסמך ${docLabel} בחשבונית ירוקה`
+            };
+            // Update order with document IDs and add timeline event
+            const updatedOrder: Order = {
+                ...order,
+                ...result.orderUpdates,
+                timeline: [docLogEvent, ...(order.timeline || [])]
+            };
+
+            await onSave(updatedOrder, true);
+            addActivity(`נוצר מסמך ${docLabel} בחשבונית ירוקה`, { entityType: 'order', entityId: order.id, action: 'update', metadata: { orderNumber: order.orderNumber, docType: docLabel } });
+            setIsCreateDocumentModalOpen(false);
+            alert('המסמך נוצר בהצלחה בחשבונית ירוקה!');
+        } else {
+            // קבלה מתוך חשבונית + פתח חלון: פותחים את החשבונית המקורית בחשבונית ירוקה — המשתמש לוחץ שם על + להנפקת קבלה (הקבלה תהיה מקושרת לחשבונית)
+            if (documentTypeForApi === 'receipt' && sourceId) {
+                handleOpenInGreenInvoice(sourceId, 'invoice');
+                addActivity(`נפתחה החשבונית בחשבונית ירוקה — לחץ על + להנפקת קבלה מתוך החשבונית (הזמנה ${order.orderNumber})`);
+                setIsCreateDocumentModalOpen(false);
+                return;
+            }
+            // פתיחת חלון לעריכה: יוצרים טיוטה ממולאת (פריטים, לקוח, פרטי הזמנה) ב-API, פותחים לעריכה בחשבונית ירוקה — המשתמש לוחץ "הפקת מסמך" כשמוכן
+            const response = await fetch('/api/green-invoice/orders/create-document', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${localStorage.getItem('authToken')}`
+                },
+                body: JSON.stringify({
+                    orderId: order.id,
+                    documentType: documentTypeForApi,
+                    customerId: selectedCustomer.id,
+                    draft: true,
+                    ...(sourceId && (documentTypeForApi === 'receipt' || documentTypeForApi === 'credit_invoice') && { sourceDocumentId: sourceId })
+                })
+            });
+
+            if (!response.ok) {
+                let errorBody: { error?: string; fallbackUrl?: string } = {};
+                try {
+                    errorBody = await response.json();
+                } catch (_) {}
+                if (errorBody.fallbackUrl) {
+                    const newWindow = window.open(errorBody.fallbackUrl, 'greeninvoice_fallback', 'width=1200,height=800,scrollbars=yes,resizable=yes');
+                    if (newWindow) newWindow.focus();
+                    addActivity(`יצירת מסמך דרך API אינה זמינה — נפתחה חשבונית ירוקה ליצירה ידנית (הזמנה ${order.orderNumber})`);
+                    setIsCreateDocumentModalOpen(false);
+                    alert((errorBody.error || 'יצירת מסמכים דרך API זמינה למנויי Best ומעלה. פתחנו עבורך את חשבונית ירוקה — צור את המסמך ידנית.') + (newWindow ? '' : '\n\nאם החלון נחסם, אפשר לפתוח ידנית: ' + errorBody.fallbackUrl));
+                    return;
+                }
+                const errMsg = errorBody.error || errorBody.message || (errorBody as any).detail || 'שגיאה ביצירת טיוטה';
+                throw new Error(errMsg);
+            }
+
+            const result = await response.json();
+            const draftDocLabel = getDocumentTypeLabel(documentType);
+            const draftLogEvent: TimelineEvent = {
+                id: `log_draft_${Date.now()}`,
+                timestamp: new Date(),
+                user: loggedInUserName,
+                type: 'LOG',
+                content: `נוצרה טיוטת מסמך ${draftDocLabel} בחשבונית ירוקה`
+            };
+            const updatedOrder: Order = {
+                ...order,
+                ...result.orderUpdates,
+                timeline: [draftLogEvent, ...(order.timeline || [])]
+            };
+            await onSave(updatedOrder, true);
+
+            if (result.editUrl) {
+                console.log('[DRAFT] Opening GreenInvoice document for editing:', result.editUrl);
+                console.log('[DRAFT] Document ID:', result.invoice?.id);
+                console.log('[DRAFT] Document should be a draft (not issued) - user will click "הפקת מסמך" when ready');
+                
+                // Open in new window and keep it focused
+                // Use a unique window name to prevent multiple windows from opening
+                const windowName = `greeninvoice_draft_${result.invoice?.id || Date.now()}`;
+                const newWindow = window.open(result.editUrl, windowName, 'width=1200,height=800,scrollbars=yes,resizable=yes,location=yes,menubar=yes,toolbar=yes');
+                
+                if (newWindow) {
+                    // Focus the new window and keep it open
+                    newWindow.focus();
+                    
+                    // Add a small delay to ensure window is fully loaded
+                    setTimeout(() => {
+                        if (newWindow.closed) {
+                            console.warn('[DRAFT] Window was closed, user may need to allow popups');
+                        } else {
+                            console.log('[DRAFT] Window is open and ready for editing');
+                        }
+                    }, 1000);
+                    
+                    addActivity(`נוצרה טיוטה ממולאת (פריטים + לקוח) ונפתחה בחשבונית ירוקה לעריכה — הזמנה ${order.orderNumber}. לחץ על "הפקת מסמך" בחשבונית ירוקה כשמוכן.`);
+                } else {
+                    // If popup was blocked, show alert with URL and instructions
+                    const message = `טיוטה נוצרה בהצלחה!\n\nהחלון נחסם על ידי הדפדפן. לחץ על הקישור כדי לפתוח בחשבונית ירוקה:\n${result.editUrl}\n\nבחשבונית ירוקה תראה את המסמך עם הכפתורים:\n- "הפקת מסמך" (כשמוכן)\n- "שמירת טיוטה"\n- "תצוגה מקדימה"`;
+                    alert(message);
+                    addActivity(`נוצרה טיוטה ממולאת (פריטים + לקוח) — הזמנה ${order.orderNumber}. פתח את הקישור בחשבונית ירוקה לעריכה.`);
+                }
+            } else {
+                alert('טיוטה נוצרה בהצלחה, אבל לא נמצא URL לעריכה. אנא פתח את המסמך ידנית בחשבונית ירוקה.');
+                addActivity(`נוצרה טיוטה ממולאת (פריטים + לקוח) — הזמנה ${order.orderNumber}`);
+            }
+            setIsCreateDocumentModalOpen(false);
+        }
+    };
+
+    const { execute: handleCreateDocument, isLoading: isCreatingDocument } = useAsyncAction(
+        handleCreateDocumentInternal,
+        {
+            preventDoubleClick: true,
+            onError: (error: any) => {
+                console.error('Error creating document:', error);
+                const msg = error?.message || 'שגיאה לא ידועה';
+                const isNetworkError = msg === 'Failed to fetch' || msg.includes('NetworkError') || msg.includes('Load failed');
+                const hint = isNetworkError
+                    ? '\n\nבדוק: שהשרת רץ (פורט 3002), שאין חסימת חומת אש, ושהפרוקסי של Vite פעיל.'
+                    : '';
+                alert(`שגיאה ביצירת מסמך: ${msg}${hint}`);
+            }
+        }
+    );
+
+    const getDocumentTypeLabel = (type: string): string => {
+        const labels: Record<string, string> = {
+            'estimate': 'הצעת מחיר',
+            'work_order': 'הזמנה עבודה',
+            'invoice': 'חשבונית מס',
+            'receipt': 'קבלה',
+            'invoice_receipt': 'חשבונית מס / קבלה',
+            'credit_invoice': 'חשבונית זיכוי',
+            'delivery_note': 'תעודת משלוח',
+            'transaction_account': 'חשבון עסקה'
+        };
+        return labels[type] || type;
+    };
+
+    const handleDownloadDocument = async (documentId: string, type: 'invoice' | 'receipt' | 'credit' | 'estimate') => {
+        try {
+            // Map type to API document type
+            let apiType: string;
+            if (type === 'credit') {
+                apiType = 'credit_invoice';
+            } else if (type === 'estimate') {
+                apiType = 'estimate';
+            } else {
+                apiType = type;
+            }
+            
+            const token = localStorage.getItem('authToken');
+            const response = await fetch(`/api/green-invoice/documents/${documentId}/pdf?type=${apiType}`, {
+                headers: {
+                    'Authorization': `Bearer ${token}`
+                }
+            });
+
+            if (!response.ok) {
+                const error = await response.json().catch(() => ({ error: 'שגיאה בהורדת המסמך' }));
+                throw new Error(error.error || 'שגיאה בהורדת המסמך');
+            }
+
+            const blob = await response.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            
+            // Determine file name based on type
+            const typeLabels: Record<string, string> = {
+                'invoice': 'חשבונית',
+                'receipt': 'קבלה',
+                'credit': 'זיכוי',
+                'estimate': 'הערכה'
+            };
+            a.download = `${typeLabels[type] || 'מסמך'}_${documentId}.pdf`;
+            
+            document.body.appendChild(a);
+            a.click();
+            window.URL.revokeObjectURL(url);
+            document.body.removeChild(a);
+            
+            addActivity(`הורד מסמך ${typeLabels[type] || 'חשבונאי'}`);
+        } catch (error: any) {
+            console.error('Error downloading document:', error);
+            alert(error.message || 'שגיאה בהורדת המסמך');
+        }
+    };
+
+    const handleOpenInGreenInvoice = (documentId: string, type: 'invoice' | 'invoice_receipt' | 'receipt' | 'credit' | 'estimate') => {
+        const baseUrl = 'https://app.greeninvoice.co.il';
+        // /invoice/id ו-/#/invoice/id פתחו עמוד ראשי. /incomes עובד — מנסים /incomes/{id} ו-/estimates/{id}
+        const path = type === 'estimate' ? `estimates/${documentId}` : `incomes/${documentId}`;
+        const url = `${baseUrl}/${path}`;
+        window.open(url, '_blank');
+    };
 
     useEffect(() => {
         if (order) {
-            setFormData({ ...order, type: order.type || OrderType.REGULAR, payments: order.payments || [], vatRate: order.vatRate ?? vatRate });
+            let lineItems = order.lineItems ?? [];
+            let additionalServices = order.additionalServices ?? [];
+            if (additionalServices.length > 0) {
+                const migrated: LineItem[] = additionalServices.map(s => ({
+                    id: s.id,
+                    description: s.description,
+                    quantity: 1,
+                    unitPrice: s.price,
+                    cost: s.cost,
+                    unitType: LineItemUnit.UNIT,
+                    supplierId: s.supplierId,
+                    supplierPayments: s.supplierPayments ?? [],
+                    serviceType: 'DELIVERY' as const,
+                    serviceDetails: {
+                        scheduledDate: s.scheduledDate,
+                        address: s.address,
+                        siteContactName: s.siteContactName,
+                        siteContactDetails: s.siteContactDetails,
+                        notes: s.notes,
+                    },
+                }));
+                lineItems = [...lineItems, ...migrated];
+                additionalServices = [];
+            }
+            setFormData({
+                ...order,
+                type: order.type || OrderType.REGULAR,
+                payments: order.payments || [],
+                vatRate: order.vatRate ?? vatRate,
+                lineItems,
+                additionalServices,
+            });
             try {
                 setDateString(new Date(order.date).toISOString().split('T')[0]);
                 const dsd = order.dealStartDate ? new Date(order.dealStartDate) : null;
                 setDealStartDateString(dsd && !isNaN(dsd.getTime()) ? dsd.toISOString().split('T')[0] : '');
+                const created = order.createdAt ? new Date(order.createdAt) : (order.date ? new Date(order.date) : new Date());
+                setCreatedAtString(created && !isNaN(created.getTime()) ? created.toISOString().split('T')[0] : new Date().toISOString().split('T')[0]);
             } catch (e) {
                 console.error("Error parsing order dates", e);
                 setDateString(new Date().toISOString().split('T')[0]);
                 setDealStartDateString('');
+                setCreatedAtString(new Date().toISOString().split('T')[0]);
             }
-            setCustomerMode('EXISTING'); 
+            setCustomerMode('EXISTING');
+            setShowNewCustomerForm(false);
         }
     }, [order]);
+
+    // Auto-sync payments from GreenInvoice when order has greenInvoiceId
+    useEffect(() => {
+        const syncPaymentsFromGreenInvoice = async () => {
+            if (!order?.greenInvoiceId || !formData.greenInvoiceId) return;
+            
+            try {
+                const token = localStorage.getItem('authToken');
+                const response = await fetch(`/api/green-invoice/invoices/${formData.greenInvoiceId}/sync-payments`, {
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                });
+                
+                if (!response.ok) {
+                    console.warn('Failed to sync payments from GreenInvoice');
+                    return;
+                }
+                
+                const { payments } = await response.json();
+                if (!payments || payments.length === 0) return;
+                
+                // Get existing payment IDs to avoid duplicates
+                const existingPaymentIds = new Set((formData.payments || []).map(p => p.id));
+                const existingPaymentAmounts = new Map((formData.payments || []).map(p => [p.amount, p.date.toISOString().split('T')[0]]));
+                
+                // Map GreenInvoice payment method to CRM payment method
+                const mapPaymentMethodFromGreenInvoice = (method?: string): PaymentMethod => {
+                    if (!method) return PaymentMethod.BANK_TRANSFER;
+                    const methodMap: Record<string, PaymentMethod> = {
+                        'Bank Transfer': PaymentMethod.BANK_TRANSFER,
+                        'Credit Card': PaymentMethod.CREDIT_CARD,
+                        'Cheque': PaymentMethod.CHECK,
+                        'Cash': PaymentMethod.CASH,
+                        'Standing Order': PaymentMethod.STANDING_ORDER,
+                        'Bit/PayBox': PaymentMethod.BIT
+                    };
+                    return methodMap[method] || PaymentMethod.BANK_TRANSFER;
+                };
+                
+                // Add new payments that don't exist yet
+                const newPayments: CustomerPayment[] = [];
+                payments.forEach((giPayment: any) => {
+                    const paymentDate = giPayment.date || new Date().toISOString().split('T')[0];
+                    const paymentAmount = giPayment.amount;
+                    
+                    // Check if this payment already exists (by amount and date)
+                    const existingKey = `${paymentAmount}_${paymentDate}`;
+                    const isDuplicate = Array.from(existingPaymentAmounts.entries()).some(
+                        ([amount, date]) => Math.abs(amount - paymentAmount) < 0.01 && date === paymentDate
+                    );
+                    
+                    if (!isDuplicate) {
+                        const method = mapPaymentMethodFromGreenInvoice(giPayment.method);
+                        newPayments.push({
+                            id: `gi_pay_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                            amount: paymentAmount,
+                            date: new Date(paymentDate),
+                            method,
+                            reference: giPayment.reference || '',
+                            repaymentDate: method === PaymentMethod.CHECK ? new Date(paymentDate) : undefined,
+                            status: 'CLEARED',
+                            notes: 'סונכרן מחשבונית ירוקה'
+                        });
+                    }
+                });
+                
+                if (newPayments.length > 0) {
+                    setFormData(prev => ({
+                        ...prev,
+                        payments: [...(prev.payments || []), ...newPayments]
+                    }));
+                    
+                    addActivity(`סונכרנו ${newPayments.length} תשלומים מחשבונית ירוקה`, { entityType: 'order', entityId: order.id, action: 'sync', metadata: { orderNumber: order.orderNumber, paymentsCount: newPayments.length } });
+                }
+            } catch (error) {
+                console.error('Error syncing payments from GreenInvoice:', error);
+                // Don't show error to user - silent sync
+            }
+        };
+        
+        syncPaymentsFromGreenInvoice();
+    }, [order?.greenInvoiceId, formData.greenInvoiceId]);
+
+    // Invoice summary (חויב נטו, יתרות) for ניהול גבייה — כולל מסמכים מזהים שמורים (greenInvoiceId וכו')
+    useEffect(() => {
+        const fetchSummary = async () => {
+            const orderNumber = order?.orderNumber;
+            if (!orderNumber) {
+                setInvoiceSummary(null);
+                return;
+            }
+            try {
+                const token = localStorage.getItem('authToken');
+                const q = new URLSearchParams();
+                if (order.id) q.set('orderId', order.id);
+                if (order.greenInvoiceId) q.set('invoiceId', order.greenInvoiceId);
+                if (order.greenInvoiceReceiptId) q.set('receiptId', order.greenInvoiceReceiptId);
+                if (order.greenInvoiceCreditId) q.set('creditId', order.greenInvoiceCreditId);
+                const suffix = q.toString() ? `?${q.toString()}` : '';
+                const r = await fetch(`/api/green-invoice/documents/invoice-summary/${orderNumber}${suffix}`, {
+                    headers: { Authorization: `Bearer ${token}` }
+                });
+                if (r.ok) {
+                    const s = await r.json();
+                    setInvoiceSummary(s);
+                } else setInvoiceSummary(null);
+            } catch {
+                setInvoiceSummary(null);
+            }
+        };
+        fetchSummary();
+    }, [order?.id, order?.orderNumber, order?.greenInvoiceId, order?.greenInvoiceReceiptId, order?.greenInvoiceCreditId]);
 
     const minDealDate = useMemo(() => {
         try {
@@ -707,6 +1293,14 @@ const OrderForm: React.FC<{
     const totalPaid = totals.totalPaid;
     const balanceDue = totalDueWithVat - totalPaid;
 
+    // When invoice is rounded (within ₪1 above order total), show invoice amount in ניהול גבייה summary line
+    const { displayTotal, displayBalance } = useMemo(() => {
+        const net = invoiceSummary?.netInvoiced ?? 0;
+        const useRounded = !!invoiceSummary?.hasInvoices && net > totalDueWithVat + 0.01 && net <= totalDueWithVat + 1;
+        const total = useRounded ? net : totalDueWithVat;
+        return { displayTotal: total, displayBalance: Math.max(0, total - totalPaid) };
+    }, [invoiceSummary?.hasInvoices, invoiceSummary?.netInvoiced, totalDueWithVat, totalPaid]);
+
     const derivedPaymentStatus = useMemo(() => {
         if (totalPaid <= 0) return PaymentStatus.UNPAID;
         if (totalPaid >= totalDueWithVat - 1) return PaymentStatus.PAID; 
@@ -722,9 +1316,43 @@ const OrderForm: React.FC<{
     const selectedCustomer = useMemo(() => customers.find(c => c.id === formData.customerId), [customers, formData.customerId]);
     const selectedContact = useMemo(() => selectedCustomer?.contacts.find(c => c.id === formData.contactId), [selectedCustomer, formData.contactId]);
     
-    const parentOrder = useMemo(() => formData.parentOrderId ? allOrders.find(o => o.id === formData.parentOrderId) : null, [formData.parentOrderId, allOrders]);
+    // Fetch parent order and child orders from API
+    const [parentOrder, setParentOrder] = useState<Order | null>(null);
+    const [childOrders, setChildOrders] = useState<Order[]>([]);
     
-    const childOrders = useMemo(() => order ? allOrders.filter(o => o.parentOrderId === order.id) : [], [order, allOrders]);
+    useEffect(() => {
+        const fetchParentOrder = async () => {
+            if (formData.parentOrderId) {
+                try {
+                    const parent = await mongoService.getOrderById(formData.parentOrderId);
+                    setParentOrder(parent);
+                } catch (error) {
+                    console.error('Error fetching parent order:', error);
+                    setParentOrder(null);
+                }
+            } else {
+                setParentOrder(null);
+            }
+        };
+        fetchParentOrder();
+    }, [formData.parentOrderId]);
+    
+    useEffect(() => {
+        const fetchChildOrders = async () => {
+            if (order?.id) {
+                try {
+                    const children = await mongoService.getOrdersByParentId(order.id);
+                    setChildOrders(children);
+                } catch (error) {
+                    console.error('Error fetching child orders:', error);
+                    setChildOrders([]);
+                }
+            } else {
+                setChildOrders([]);
+            }
+        };
+        fetchChildOrders();
+    }, [order?.id]);
 
     const openTasks = useMemo(() => 
         formData.timeline.filter(t => t.type === 'TASK' && !t.isCompleted),
@@ -764,8 +1392,31 @@ const OrderForm: React.FC<{
         if (type === 'checkbox') {
             const { checked } = e.target as HTMLInputElement;
             setFormData(prev => ({...prev, [name]: checked }));
+        } else if (name === 'orderStatus') {
+            const config = statusConfigs?.find((c: { label: string }) => c.label === value);
+            const isActiveDeal = config?.isActiveDeal ?? false;
+            setFormData(prev => {
+                const newDealStartDate = (isActiveDeal && !prev.dealStartDate) ? new Date() : prev.dealStartDate;
+                return {
+                    ...prev,
+                    orderStatus: value,
+                    orderStatusId: config?.id ?? prev.orderStatusId,
+                    ...(newDealStartDate !== prev.dealStartDate ? { dealStartDate: newDealStartDate } : {}),
+                    ...(user?.id && employees.some(emp => emp.id === user.id) ? { employeeId: user.id } : {}),
+                };
+            });
+            if (isActiveDeal) {
+                if (formData.dealStartDate) {
+                    setDealStartDateString(new Date(formData.dealStartDate).toISOString().split('T')[0]);
+                } else {
+                    setDealStartDateString(new Date().toISOString().split('T')[0]);
+                }
+            }
         } else {
-             setFormData(prev => ({ ...prev, [name]: name === 'vatRate' ? (parseFloat(value) || 0) : value }));
+            setFormData(prev => ({
+                ...prev,
+                [name]: name === 'vatRate' ? (parseFloat(value) || 0) : value,
+            }));
         }
         if (name === 'date') {
             setDateString(value);
@@ -773,95 +1424,21 @@ const OrderForm: React.FC<{
         if (name === 'dealStartDate') {
              setDealStartDateString(value);
         }
-    };
-
-    const handlePaymentFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-        if (e.target.files && e.target.files.length > 0) {
-            const files: File[] = Array.from(e.target.files);
-            const filePromises = files.map(file => {
-                return new Promise<Attachment>((resolve) => {
-                    const reader = new FileReader();
-                    reader.onload = (event) => {
-                        if (event.target?.result) {
-                            resolve({
-                                id: `pay_att_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
-                                fileName: file.name,
-                                dataUrl: event.target.result as string,
-                                type: file.type,
-                                category: 'DOCUMENTS'
-                            });
-                        }
-                    };
-                    reader.readAsDataURL(file);
-                });
-            });
-            Promise.all(filePromises).then(attachments => {
-                setNewPaymentAttachments(prev => [...prev, ...attachments]);
-            });
+        if (name === 'createdAt') {
+            setCreatedAtString(value);
+            setFormData(prev => ({ ...prev, createdAt: value ? new Date(value) : undefined }));
         }
-        e.target.value = ''; 
-    };
-
-    const removePaymentAttachment = (id: string) => {
-        setNewPaymentAttachments(prev => prev.filter(att => att.id !== id));
-    };
-
-    const handleAddPayment = () => {
-        if (!newPaymentData.amount || newPaymentData.amount <= 0) {
-            alert("אנא הזן סכום חיובי");
-            return;
-        }
-
-        if (newPaymentData.method === PaymentMethod.CHECK) {
-            if (!newPaymentData.reference) {
-                alert("חובה להזין מספר צ'ק בשדה אסמכתא");
-                return;
-            }
-            if (!newPaymentData.repaymentDate) {
-                alert("חובה לבחור תאריך פירעון לצ'ק");
-                return;
-            }
-        }
-        
-        const payment: CustomerPayment = {
-            id: `pay_${Date.now()}`,
-            amount: newPaymentData.amount,
-            date: new Date(newPaymentData.date || new Date()),
-            method: newPaymentData.method || PaymentMethod.BANK_TRANSFER,
-            reference: newPaymentData.reference || '',
-            repaymentDate: newPaymentData.method === PaymentMethod.CHECK ? new Date(newPaymentData.repaymentDate || new Date()) : undefined,
-            status: 'PENDING', 
-            attachments: newPaymentAttachments, 
-            attachment: newPaymentAttachments.length > 0 ? newPaymentAttachments[0] : undefined
-        };
-
-        setFormData(prev => ({
-            ...prev,
-            payments: [...prev.payments, payment],
-        }));
-
-        setIsAddingPayment(false);
-        setNewPaymentData({ amount: 0, date: new Date(), method: PaymentMethod.BANK_TRANSFER, reference: '', repaymentDate: undefined });
-        setNewPaymentAttachments([]);
-        
-        const logContent = `התקבל תשלום בסך ₪${payment.amount.toLocaleString()} (${payment.method})`;
-        setFormData(prev => ({
-            ...prev,
-            timeline: [{
-                id: `log_pay_${Date.now()}`,
-                timestamp: new Date(),
-                user: 'מערכת',
-                type: 'LOG',
-                content: logContent
-            }, ...prev.timeline]
-        }));
     };
 
     const confirmDeletePayment = () => {
         if (!paymentIdToDelete) return;
         
         const targetPayment = formData.payments.find(p => p.id === paymentIdToDelete);
-        const user = employees.find(emp => emp.id === formData.employeeId)?.name || 'מערכת';
+        const payDateStr = targetPayment?.date ? new Date(targetPayment.date).toLocaleDateString('he-IL') : '';
+        const parts = [`תשלום הוסר: ₪${targetPayment?.amount.toLocaleString()} (${targetPayment?.method})`, payDateStr];
+        if (targetPayment?.reference) parts.push(`אסמכתא: ${targetPayment.reference}`);
+        if (targetPayment?.repaymentDate) parts.push(`תאריך פירעון: ${new Date(targetPayment.repaymentDate).toLocaleDateString('he-IL')}`);
+        const content = parts.join(' · ');
 
         setFormData(prev => ({
             ...prev,
@@ -869,9 +1446,9 @@ const OrderForm: React.FC<{
             timeline: [{
                 id: `log_pay_del_${Date.now()}`,
                 timestamp: new Date(),
-                user,
+                user: loggedInUserName,
                 type: 'LOG',
-                content: `תשלום הוסר: ₪${targetPayment?.amount.toLocaleString()} (${targetPayment?.method})`
+                content
             }, ...prev.timeline]
         }));
         setPaymentIdToDelete(null);
@@ -882,17 +1459,73 @@ const OrderForm: React.FC<{
         setNewCustomerData(prev => ({ ...prev, [name]: value }));
     };
     
-    const handleLineItemChange = (index: number, e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
+    const handleLineItemChange = async (index: number, e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
         const { name, value } = e.target;
         const newLineItems = [...formData.lineItems];
         const item = { ...newLineItems[index] };
 
-        (item as any)[name] = (name === 'description' || name === 'unitType' || name === 'supplierId') ? value : parseFloat(value) || 0;
+        if (name === 'serviceType') {
+            (item as any).serviceType = value === '' || value === 'ITEM' ? undefined : (value as 'DELIVERY' | 'INSTALLATION');
+        } else {
+            (item as any)[name] = (name === 'description' || name === 'unitType' || name === 'supplierId' || name === 'notes' || name === 'preparationStatus') ? value : parseFloat(value) || 0;
+        }
 
-        if (item.unitType === LineItemUnit.M2) {
-            const width = item.width || 0;
-            const height = item.height || 0;
-            item.quantity = width * height;
+        // Note: Quantity is now independent of width/height for M2 units
+        // Users can specify both dimensions (e.g., 200x200) and quantity (e.g., 5 units)
+        // The total area will be calculated as: (width * height) * quantity
+
+        // Auto-update price if priceListProductId exists and relevant fields changed
+        if (item.priceListProductId && (name === 'quantity' || name === 'width' || name === 'height' || name === 'unitType' || name === 'supplierId')) {
+            try {
+                const products = await getProducts();
+                const product = products.find(p => p.id === item.priceListProductId);
+                if (product) {
+                    // אם supplierId ריק או לא קיים, הגדר cost = 0
+                    if (!item.supplierId || item.supplierId === '') {
+                        item.cost = 0;
+                        // unitPrice נשאר כמו שהוא (מחיר ללקוח לא תלוי בספק)
+                    } else {
+                        // בדוק אם לספק שנבחר יש מחירים במוצר
+                        const hasSupplierPricing = product.supplierPricings?.some(sp => {
+                            if (sp.supplierId !== item.supplierId) return false;
+                            // בדוק אם לספק יש לפחות אחד מהאופציות הבאות:
+                            return sp.baseCost !== undefined || 
+                                   (sp.priceTiers && sp.priceTiers.length > 0) ||
+                                   (sp.variantCosts && sp.variantCosts.length > 0) ||
+                                   (sp.costRange && sp.costRange.min !== undefined);
+                        });
+                        
+                        if (!hasSupplierPricing) {
+                            // לספק אין מחירים - הגדר cost = 0
+                            item.cost = 0;
+                            // unitPrice נשאר כמו שהוא
+                        } else {
+                            // לספק יש מחירים - חשב רגיל
+                            const size = item.unitType === LineItemUnit.M2 && item.width && item.height 
+                                ? { width: item.width, height: item.height } 
+                                : undefined;
+                            // For M2: price is calculated based on area (width * height), but quantity is separate
+                            // Example: 5 units of 200x200 = price per 40,000 sqm * 5 units
+                            const areaForPricing = item.unitType === LineItemUnit.M2 && item.width && item.height
+                                ? item.width * item.height
+                                : item.quantity;
+                            const calculated = calculateProductPrice(
+                                product,
+                                areaForPricing, // Use area for pricing tiers, not quantity
+                                size,
+                                item.selectedAddons,
+                                item.supplierId || undefined,
+                                item.variantId,
+                                item.unitType
+                            );
+                            item.unitPrice = calculated.unitPrice;
+                            item.cost = calculated.unitCost;
+                        }
+                    }
+                }
+            } catch (error) {
+                console.error('Error updating price:', error);
+            }
         }
 
         newLineItems[index] = item;
@@ -903,8 +1536,138 @@ const OrderForm: React.FC<{
         setFormData(prev => ({ ...prev, lineItems: [...prev.lineItems, { id: `li_${Date.now()}`, description: '', quantity: 1, unitPrice: 0, cost: 0, unitType: LineItemUnit.UNIT }]}));
     };
 
+    const addLineItemService = (serviceType: 'DELIVERY' | 'INSTALLATION') => {
+        setFormData(prev => ({
+            ...prev,
+            lineItems: [...prev.lineItems, { id: `li_${Date.now()}`, description: serviceType === 'DELIVERY' ? 'משלוח' : 'התקנה', quantity: 1, unitPrice: 0, cost: 0, unitType: LineItemUnit.UNIT, serviceType }]
+        }));
+    };
+
     const removeLineItem = (index: number) => {
+        const item = formData.lineItems[index];
+        const itemDescription = item?.description || 'פריט';
+        if (!window.confirm(`האם אתה בטוח שברצונך למחוק את הפריט "${itemDescription}"?`)) {
+            return;
+        }
         setFormData(prev => ({ ...prev, lineItems: prev.lineItems.filter((_, i) => i !== index)}));
+    };
+
+    const updateLineItemServiceDetails = (lineIndex: number, details: LineItem['serviceDetails']) => {
+        const newLineItems = [...formData.lineItems];
+        const item = { ...newLineItems[lineIndex], serviceDetails: details ?? undefined };
+        newLineItems[lineIndex] = item;
+        setFormData(prev => ({ ...prev, lineItems: newLineItems }));
+        setServiceDetailsModalForIndex(null);
+    };
+
+    // Track if this is the first product being added (to replace empty item) or subsequent ones (to add new items)
+    const productSelectionCounterRef = React.useRef<number>(0);
+
+    const handleProductSelect = (
+        product: PriceListProduct,
+        supplierId: string,
+        quantity: number,
+        size?: { width?: number; height?: number },
+        selectedAddons?: string[],
+        variantId?: string,
+        description?: string,
+        unitType?: LineItemUnit,
+        notes?: string
+    ) => {
+        if (!productSelectorFor) return;
+
+        try {
+            const calculated = calculateProductPrice(product, quantity, size, selectedAddons, supplierId, variantId, unitType);
+            const isFirstProduct = productSelectionCounterRef.current === 0;
+            productSelectionCounterRef.current++;
+            
+            // Use provided description or fall back to product name
+            const itemDescription = description || product.name;
+            // Use provided unitType or fall back to product baseUnit
+            const itemUnitType = unitType || product.baseUnit || LineItemUnit.UNIT;
+            
+            if (productSelectorFor.type === 'lineItem') {
+                // Create new line item
+                // Quantity is now independent of width/height for M2 units
+                // Users can specify both dimensions (e.g., 200x200) and quantity (e.g., 5 units)
+                const newItem: LineItem = {
+                    id: `li_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                    description: itemDescription,
+                    quantity: quantity || 1, // Default to 1 if quantity is 0
+                    unitPrice: calculated.unitPrice,
+                    cost: calculated.unitCost,
+                    supplierId: supplierId,
+                    priceListProductId: product.id,
+                    selectedAddons: selectedAddons,
+                    priceListNotes: product.notes,
+                    unitType: itemUnitType,
+                    variantId: variantId,
+                    notes: notes,
+                };
+                
+                // Set width and height if provided
+                if (size && size.width !== undefined && size.height !== undefined) {
+                    newItem.width = size.width;
+                    newItem.height = size.height;
+                }
+                
+                // Use functional update to ensure we're working with the latest state
+                setFormData(prev => {
+                    const currentLineItems = [...prev.lineItems];
+                    
+                    // If first product and item is empty, replace it; otherwise add new items
+                    if (isFirstProduct && currentLineItems[productSelectorFor.index] && currentLineItems[productSelectorFor.index].description === '') {
+                        // Replace empty item
+                        currentLineItems[productSelectorFor.index] = newItem;
+                    } else {
+                        // Add new item after the current index (or at the end for subsequent items)
+                        const insertIndex = isFirstProduct ? productSelectorFor.index + 1 : currentLineItems.length;
+                        currentLineItems.splice(insertIndex, 0, newItem);
+                    }
+                    
+                    return { ...prev, lineItems: currentLineItems };
+                });
+            } else if (productSelectorFor.type === 'additionalService') {
+                // Create new service
+                // For AdditionalService, price and cost are total (not per unit)
+                // For M2: calculate total area (width * height) * quantity, then multiply by unit price
+                const areaPerUnit = itemUnitType === LineItemUnit.M2 && size && size.width && size.height
+                    ? size.width * size.height
+                    : 1;
+                const totalQuantity = quantity || 1;
+                const totalArea = areaPerUnit * totalQuantity;
+                const newService: AdditionalService = {
+                    id: `as_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                    description: itemDescription,
+                    price: calculated.unitPrice * totalArea,
+                    cost: calculated.unitCost * totalArea,
+                    supplierId: supplierId,
+                    priceListProductId: product.id,
+                    selectedAddons: selectedAddons,
+                    priceListNotes: product.notes,
+                };
+                
+                // Use functional update to ensure we're working with the latest state
+                setFormData(prev => {
+                    const currentServices = [...prev.additionalServices];
+                    
+                    // If first product and service is empty, replace it; otherwise add new services
+                    if (isFirstProduct && currentServices[productSelectorFor.index] && currentServices[productSelectorFor.index].description === '') {
+                        // Replace empty service
+                        currentServices[productSelectorFor.index] = newService;
+                    } else {
+                        // Add new service after the current index (or at the end for subsequent items)
+                        const insertIndex = isFirstProduct ? productSelectorFor.index + 1 : currentServices.length;
+                        currentServices.splice(insertIndex, 0, newService);
+                    }
+                    
+                    return { ...prev, additionalServices: currentServices };
+                });
+            }
+        } catch (error) {
+            console.error('Error selecting product:', error);
+            alert('שגיאה בבחירת מוצר');
+        }
     };
 
     const handleAdditionalServiceChange = (index: number, e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
@@ -933,6 +1696,11 @@ const OrderForm: React.FC<{
     };
 
     const removeAdditionalService = (index: number) => {
+        const service = formData.additionalServices[index];
+        const serviceDescription = service?.description || 'שירות';
+        if (!window.confirm(`האם אתה בטוח שברצונך למחוק את השירות "${serviceDescription}"?`)) {
+            return;
+        }
         setFormData(prev => ({
             ...prev,
             additionalServices: prev.additionalServices.filter((_, i) => i !== index)
@@ -944,7 +1712,7 @@ const OrderForm: React.FC<{
             const newSupplier: Supplier = {
                 id: `supp_${Date.now()}`,
                 name: supplierData.name || 'ספק חדש',
-                paymentTerms: 'שוטף 30',
+                paymentTerms: 'שוטף 90',
                 contacts: [{
                     id: `sc_${Date.now()}`,
                     name: supplierData.contactPerson || '',
@@ -977,13 +1745,12 @@ const OrderForm: React.FC<{
 
     const handleAddTimelineEvent = () => {
         if (!newTimelineEntry.content.trim()) return;
-        const currentUser = employees.find(emp => emp.id === formData.employeeId)?.name || 'מערכת';
         const targetAssigneeId = newTimelineEntry.assigneeId || formData.employeeId;
 
         const newEvent: TimelineEvent = {
             id: `tl_${Date.now()}`,
             timestamp: new Date(),
-            user: currentUser, 
+            user: loggedInUserName, 
             type: newTimelineEntry.type,
             content: newTimelineEntry.content,
             ...(newTimelineEntry.type === 'TASK' && {
@@ -998,6 +1765,20 @@ const OrderForm: React.FC<{
             timeline: [newEvent, ...prev.timeline],
         }));
 
+        if (newTimelineEntry.type === 'NOTE' && newTimelineEntry.content.trim()) {
+            const wallPost: WallPost = {
+                id: `wall_${Date.now()}`,
+                authorId: user?.id ?? '',
+                authorName: user?.name ?? loggedInUserName,
+                content: newTimelineEntry.content.trim(),
+                createdAt: new Date(),
+                orderId: order?.id,
+                orderNumber: order?.orderNumber ?? formData.description ?? 'טיוטה',
+                timelineEventId: newEvent.id,
+            };
+            mongoService.createWallPost(wallPost).catch(err => console.error('Failed to add note to wall:', err));
+        }
+
         setNewTimelineEntry({ 
             type: 'NOTE', 
             content: '', 
@@ -1008,7 +1789,6 @@ const OrderForm: React.FC<{
     };
 
     const handleToggleTaskComplete = (eventId: string, currentStatus: boolean) => {
-        const currentUser = employees.find(emp => emp.id === formData.employeeId)?.name || 'מערכת';
         let taskContent = '';
 
         const updatedTimeline = formData.timeline.map(event => {
@@ -1019,20 +1799,20 @@ const OrderForm: React.FC<{
                     ...event, 
                     isCompleted: newStatus,
                     completedAt: newStatus ? new Date() : undefined,
-                    completedBy: newStatus ? currentUser : undefined 
+                    completedBy: newStatus ? loggedInUserName : undefined 
                 };
             }
             return event;
         });
 
         const logContent = !currentStatus
-            ? `משימה הושלמה ע"י ${currentUser}: "${taskContent}"`
-            : `משימה סומנה כלא הושלמה ע"י ${currentUser}: "${taskContent}"`;
+            ? `משימה הושלמה ע"י ${loggedInUserName}: "${taskContent}"`
+            : `משימה סומנה כלא הושלמה ע"י ${loggedInUserName}: "${taskContent}"`;
 
         const logEvent: TimelineEvent = {
             id: `tl_log_${Date.now()}`,
             timestamp: new Date(),
-            user: currentUser,
+            user: loggedInUserName,
             type: 'LOG',
             content: logContent,
         };
@@ -1115,6 +1895,16 @@ const OrderForm: React.FC<{
             const newContact = customer?.contacts.find(c => c.id === newOrder.contactId)?.name || 'לא נבחר';
             changes.push({ field: 'contactId', label: 'איש קשר', oldValue: oldContact, newValue: newContact, action: 'UPDATED' });
         }
+        if (oldOrder.customerId !== newOrder.customerId) {
+            const oldC = customers.find(c => c.id === oldOrder.customerId)?.name || 'לא נבחר';
+            const newC = customers.find(c => c.id === newOrder.customerId)?.name || 'לא נבחר';
+            changes.push({ field: 'customerId', label: 'לקוח', oldValue: oldC, newValue: newC, action: 'UPDATED' });
+        }
+        if ((oldOrder.supplierId ?? '') !== (newOrder.supplierId ?? '')) {
+            const oldS = suppliers.find(s => s.id === oldOrder.supplierId)?.name || 'לא נבחר';
+            const newS = suppliers.find(s => s.id === newOrder.supplierId)?.name || 'לא נבחר';
+            changes.push({ field: 'supplierId', label: 'ספק ראשי', oldValue: oldS, newValue: newS, action: 'UPDATED' });
+        }
         
         if (new Date(oldOrder.date).toDateString() !== new Date(newOrder.date).toDateString()) {
             changes.push({ 
@@ -1132,6 +1922,28 @@ const OrderForm: React.FC<{
                 changes.push({ field: 'dealStartDate', label: 'תאריך אישור עסקה', oldValue: oldVal, newValue: newVal, action: 'UPDATED' });
             }
         }
+        const oldCreated = oldOrder.createdAt ? new Date(oldOrder.createdAt).getTime() : (oldOrder.date ? new Date(oldOrder.date).getTime() : 0);
+        const newCreated = newOrder.createdAt ? new Date(newOrder.createdAt).getTime() : (newOrder.date ? new Date(newOrder.date).getTime() : 0);
+        if (oldCreated !== newCreated) {
+            const oldVal = oldOrder.createdAt ? new Date(oldOrder.createdAt).toLocaleDateString('he-IL') : (oldOrder.date ? new Date(oldOrder.date).toLocaleDateString('he-IL') : 'לא הוגדר');
+            const newVal = newOrder.createdAt ? new Date(newOrder.createdAt).toLocaleDateString('he-IL') : (newOrder.date ? new Date(newOrder.date).toLocaleDateString('he-IL') : 'לא הוגדר');
+            changes.push({ field: 'createdAt', label: 'תאריך יצירה', oldValue: oldVal, newValue: newVal, action: 'UPDATED' });
+        }
+
+        // GreenInvoice document links (show "שויך" / "לא שויך" only, not document IDs)
+        const gi = (v: string | undefined) => (v && v.trim() ? 'שויך' : 'לא שויך');
+        if ((oldOrder.greenInvoiceId ?? '') !== (newOrder.greenInvoiceId ?? '')) {
+            changes.push({ field: 'greenInvoiceId', label: 'חשבונית ירוקה – חשבונית', oldValue: gi(oldOrder.greenInvoiceId), newValue: gi(newOrder.greenInvoiceId), action: 'UPDATED' });
+        }
+        if ((oldOrder.greenInvoiceReceiptId ?? '') !== (newOrder.greenInvoiceReceiptId ?? '')) {
+            changes.push({ field: 'greenInvoiceReceiptId', label: 'חשבונית ירוקה – קבלה', oldValue: gi(oldOrder.greenInvoiceReceiptId), newValue: gi(newOrder.greenInvoiceReceiptId), action: 'UPDATED' });
+        }
+        if ((oldOrder.greenInvoiceCreditId ?? '') !== (newOrder.greenInvoiceCreditId ?? '')) {
+            changes.push({ field: 'greenInvoiceCreditId', label: 'חשבונית ירוקה – זיכוי', oldValue: gi(oldOrder.greenInvoiceCreditId), newValue: gi(newOrder.greenInvoiceCreditId), action: 'UPDATED' });
+        }
+        if ((oldOrder.greenInvoiceEstimateId ?? '') !== (newOrder.greenInvoiceEstimateId ?? '')) {
+            changes.push({ field: 'greenInvoiceEstimateId', label: 'חשבונית ירוקה – הערכה', oldValue: gi(oldOrder.greenInvoiceEstimateId), newValue: gi(newOrder.greenInvoiceEstimateId), action: 'UPDATED' });
+        }
 
         const oldItemsMap = new Map(oldOrder.lineItems.map(i => [i.id, i]));
         const newItemsMap = new Map(newOrder.lineItems.map(i => [i.id, i]));
@@ -1147,6 +1959,16 @@ const OrderForm: React.FC<{
                     action: 'REMOVED' 
                 });
             } else {
+                if ((oldItem.preparationStatus ?? '') !== (newItem.preparationStatus ?? '')) {
+                    changes.push({
+                        field: 'lineItems',
+                        label: 'סטטוס הכנה',
+                        subItemLabel: oldItem.description || newItem.description,
+                        oldValue: oldItem.preparationStatus || '—',
+                        newValue: newItem.preparationStatus || '—',
+                        action: 'UPDATED'
+                    });
+                }
                 if (oldItem.description !== newItem.description || oldItem.quantity !== newItem.quantity || oldItem.unitPrice !== newItem.unitPrice || oldItem.width !== newItem.width || oldItem.height !== newItem.height || oldItem.supplierId !== newItem.supplierId) {
                     const oldSName = suppliers.find(s => s.id === oldItem.supplierId)?.name || 'לא משויך';
                     const newSName = suppliers.find(s => s.id === newItem.supplierId)?.name || 'לא משויך';
@@ -1230,12 +2052,106 @@ const OrderForm: React.FC<{
             }
         });
 
+        // Payments: add/remove/update with full detail (amount, method, reference, repaymentDate, date)
+        const paymentDateStr = (d: Date | string | undefined) => d ? new Date(d).toLocaleDateString('he-IL') : '—';
+        const paymentSummary = (p: CustomerPayment) => {
+            const parts = [`₪${(p.amount ?? 0).toLocaleString()}`, p.method || '—', paymentDateStr(p.date)];
+            if (p.reference) parts.push(`אסמכתא: ${p.reference}`);
+            if (p.repaymentDate) parts.push(`פירעון: ${paymentDateStr(p.repaymentDate)}`);
+            return parts.join(', ');
+        };
+        const oldPayments = oldOrder.payments || [];
+        const newPayments = newOrder.payments || [];
+        const oldPayMap = new Map(oldPayments.map(p => [p.id, p]));
+        const newPayMap = new Map(newPayments.map(p => [p.id, p]));
+
+        oldPayments.forEach(oldPay => {
+            const newPay = newPayMap.get(oldPay.id);
+            if (!newPay) {
+                changes.push({
+                    field: 'payments',
+                    label: 'תשלום הוסר',
+                    oldValue: paymentSummary(oldPay),
+                    action: 'REMOVED'
+                });
+            } else {
+                if (oldPay.amount !== newPay.amount) {
+                    changes.push({
+                        field: 'payments',
+                        label: 'תשלום – סכום',
+                        subItemLabel: `₪${oldPay.amount.toLocaleString()} ${paymentDateStr(oldPay.date)}`,
+                        oldValue: `₪${oldPay.amount.toLocaleString()}`,
+                        newValue: `₪${newPay.amount.toLocaleString()}`,
+                        action: 'UPDATED'
+                    });
+                }
+                if ((oldPay.method ?? '') !== (newPay.method ?? '')) {
+                    changes.push({
+                        field: 'payments',
+                        label: 'תשלום – אמצעי תשלום',
+                        subItemLabel: `₪${oldPay.amount.toLocaleString()} ${paymentDateStr(oldPay.date)}`,
+                        oldValue: oldPay.method ?? '—',
+                        newValue: newPay.method ?? '—',
+                        action: 'UPDATED'
+                    });
+                }
+                const oldRef = (oldPay.reference ?? '').trim();
+                const newRef = (newPay.reference ?? '').trim();
+                if (oldRef !== newRef) {
+                    changes.push({
+                        field: 'payments',
+                        label: 'תשלום – אסמכתא (מס\' צ\'ק)',
+                        subItemLabel: `₪${oldPay.amount.toLocaleString()} ${paymentDateStr(oldPay.date)}`,
+                        oldValue: oldRef || '—',
+                        newValue: newRef || '—',
+                        action: 'UPDATED'
+                    });
+                }
+                const oldRep = oldPay.repaymentDate ? new Date(oldPay.repaymentDate).toISOString().split('T')[0] : '';
+                const newRep = newPay.repaymentDate ? new Date(newPay.repaymentDate).toISOString().split('T')[0] : '';
+                if (oldRep !== newRep) {
+                    changes.push({
+                        field: 'payments',
+                        label: 'תשלום – תאריך פירעון',
+                        subItemLabel: `₪${oldPay.amount.toLocaleString()} ${paymentDateStr(oldPay.date)}`,
+                        oldValue: paymentDateStr(oldPay.repaymentDate),
+                        newValue: paymentDateStr(newPay.repaymentDate),
+                        action: 'UPDATED'
+                    });
+                }
+                const oldDate = oldPay.date ? new Date(oldPay.date).toISOString().split('T')[0] : '';
+                const newDate = newPay.date ? new Date(newPay.date).toISOString().split('T')[0] : '';
+                if (oldDate !== newDate) {
+                    changes.push({
+                        field: 'payments',
+                        label: 'תשלום – תאריך',
+                        subItemLabel: `₪${oldPay.amount.toLocaleString()}`,
+                        oldValue: paymentDateStr(oldPay.date),
+                        newValue: paymentDateStr(newPay.date),
+                        action: 'UPDATED'
+                    });
+                }
+            }
+        });
+
+        newPayments.forEach(newPay => {
+            if (!oldPayMap.has(newPay.id)) {
+                changes.push({
+                    field: 'payments',
+                    label: 'תשלום נוסף',
+                    newValue: paymentSummary(newPay),
+                    action: 'ADDED'
+                });
+            }
+        });
+
         return changes;
     };
 
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
+        if (readOnly) return;
 
         let currentCustomerId = formData.customerId;
         let currentContactId = formData.contactId;
@@ -1291,13 +2207,11 @@ const OrderForm: React.FC<{
              }
         }
 
-        const user = employees.find(emp => emp.id === formData.employeeId)?.name || 'מערכת';
-        
         let finalDealStartDate = formData.dealStartDate;
         if (dealStartDateString) {
             finalDealStartDate = new Date(dealStartDateString);
         } else {
-             const statusConfig = statusConfigs.find(c => c.label === formData.orderStatus);
+             const statusConfig = getStatusConfigForOrder(formData, statusConfigs);
              if (statusConfig?.isActiveDeal && !finalDealStartDate) {
                  finalDealStartDate = new Date();
              }
@@ -1320,10 +2234,10 @@ const OrderForm: React.FC<{
                 id: `log_${Date.now()}`,
                 timestamp: new Date(),
                 content: 'הזמנה נוצרה',
-                user,
+                user: loggedInUserName,
                 type: 'LOG'
             });
-            updatedFormData.statusHistory = [{ status: updatedFormData.orderStatus, startDate: new Date() }];
+            updatedFormData.statusHistory = [{ status: updatedFormData.orderStatus, statusId: getStatusConfigForOrder(updatedFormData, statusConfigs)?.id, startDate: new Date() }];
         } else {
              const diff = generateDiff(originalOrder, { ...updatedFormData, id: order.id, orderNumber: order.orderNumber, date: new Date(dateString) } as Order);
              
@@ -1332,38 +2246,227 @@ const OrderForm: React.FC<{
                      id: `log_audit_${Date.now()}`,
                      timestamp: new Date(),
                      content: 'עדכון פרטי הזמנה',
-                     user,
+                     user: loggedInUserName,
                      type: 'LOG',
                      changes: diff
                  });
              }
 
-             if (originalOrder.orderStatus !== updatedFormData.orderStatus) {
+             if (originalOrder.orderStatus !== updatedFormData.orderStatus || originalOrder.orderStatusId !== updatedFormData.orderStatusId) {
+                 const statusConfig = getStatusConfigForOrder(updatedFormData, statusConfigs);
                  const newStatusHistory = updatedFormData.statusHistory ? [...updatedFormData.statusHistory] : [];
-                 newStatusHistory.push({ status: updatedFormData.orderStatus, startDate: new Date() });
+                 newStatusHistory.push({ status: updatedFormData.orderStatus, statusId: statusConfig?.id, startDate: new Date() });
                  updatedFormData.statusHistory = newStatusHistory;
              }
         }
         
+        const finalCreatedAt = (isAdmin && createdAtString) ? new Date(createdAtString) : (formData.createdAt ?? new Date());
+        const statusConfigForSave = getStatusConfigForOrder(updatedFormData, statusConfigs);
         const finalOrder = {
             ...updatedFormData,
             id: order?.id || `ord_${Date.now()}`,
             orderNumber: order?.orderNumber || getNextOrderNumber(), 
             date: new Date(dateString),
+            createdAt: finalCreatedAt,
             dealStartDate: updatedFormData.dealStartDate, 
             timeline: finalTimeline,
+            orderStatusId: statusConfigForSave?.id,
         };
+
+        // Save sales history and ad-hoc products
+        try {
+            const allProducts = await getProducts();
+            const productMap = new Map(allProducts.map(p => [p.id, p]));
+            const selectedCustomer = customers.find(c => c.id === finalOrder.customerId);
+
+            // Process line items
+            for (const item of finalOrder.lineItems) {
+                if (item.priceListProductId && item.supplierId) {
+                    // Save to sales history
+                    const product = productMap.get(item.priceListProductId);
+                    const supplier = suppliers.find(s => s.id === item.supplierId);
+                    
+                    if (product && supplier) {
+                        const historyEntry: SalesHistoryEntry = {
+                            id: `sh_${Date.now()}_${item.id}`,
+                            productId: item.priceListProductId,
+                            productName: product.name,
+                            orderId: finalOrder.id,
+                            orderNumber: finalOrder.orderNumber,
+                            supplierId: item.supplierId,
+                            supplierName: supplier.name,
+                            quantity: item.quantity,
+                            unitPrice: item.unitPrice,
+                            totalPrice: item.quantity * item.unitPrice,
+                            cost: item.cost,
+                            unitType: item.unitType,
+                            size: item.width && item.height ? { width: item.width, height: item.height } : undefined,
+                            addons: item.selectedAddons,
+                            date: finalOrder.date,
+                            customerId: finalOrder.customerId,
+                            customerName: selectedCustomer?.name,
+                            notes: item.priceListNotes
+                        };
+                        await addSalesHistoryEntry(historyEntry);
+                    }
+                } else if (!item.priceListProductId && item.description && item.supplierId) {
+                    // Save as ad-hoc product
+                    const supplier = suppliers.find(s => s.id === item.supplierId);
+                    const adHocProduct: AdHocProduct = {
+                        id: `ah_${Date.now()}_${item.id}`,
+                        name: item.description,
+                        orderId: finalOrder.id,
+                        orderNumber: finalOrder.orderNumber,
+                        supplierId: item.supplierId,
+                        supplierName: supplier?.name,
+                        quantity: item.quantity,
+                        unitPrice: item.unitPrice,
+                        cost: item.cost,
+                        unitType: item.unitType,
+                        date: finalOrder.date,
+                        customerId: finalOrder.customerId,
+                        customerName: selectedCustomer?.name,
+                        notes: item.priceListNotes
+                    };
+                    await createAdHocProduct(adHocProduct);
+                }
+            }
+
+            // Process additional services
+            for (const service of finalOrder.additionalServices) {
+                if (service.priceListProductId && service.supplierId) {
+                    // Save to sales history
+                    const product = productMap.get(service.priceListProductId);
+                    const supplier = suppliers.find(s => s.id === service.supplierId);
+                    
+                    if (product && supplier) {
+                        const historyEntry: SalesHistoryEntry = {
+                            id: `sh_${Date.now()}_${service.id}`,
+                            productId: service.priceListProductId,
+                            productName: product.name,
+                            orderId: finalOrder.id,
+                            orderNumber: finalOrder.orderNumber,
+                            supplierId: service.supplierId,
+                            supplierName: supplier.name,
+                            quantity: 1,
+                            unitPrice: service.price,
+                            totalPrice: service.price,
+                            cost: service.cost,
+                            unitType: LineItemUnit.UNIT,
+                            addons: service.selectedAddons,
+                            date: finalOrder.date,
+                            customerId: finalOrder.customerId,
+                            customerName: selectedCustomer?.name,
+                            notes: service.priceListNotes
+                        };
+                        await addSalesHistoryEntry(historyEntry);
+                    }
+                } else if (!service.priceListProductId && service.description && service.supplierId) {
+                    // Save as ad-hoc product
+                    const supplier = suppliers.find(s => s.id === service.supplierId);
+                    const adHocProduct: AdHocProduct = {
+                        id: `ah_${Date.now()}_${service.id}`,
+                        name: service.description,
+                        orderId: finalOrder.id,
+                        orderNumber: finalOrder.orderNumber,
+                        supplierId: service.supplierId,
+                        supplierName: supplier?.name,
+                        quantity: 1,
+                        unitPrice: service.price,
+                        cost: service.cost,
+                        unitType: LineItemUnit.UNIT,
+                        date: finalOrder.date,
+                        customerId: finalOrder.customerId,
+                        customerName: selectedCustomer?.name,
+                        notes: service.priceListNotes
+                    };
+                    await createAdHocProduct(adHocProduct);
+                }
+            }
+        } catch (error) {
+            console.error('Error saving sales history:', error);
+            // Don't block order save if history save fails
+        }
 
         onSave(finalOrder);
     };
     
-    const currentStatusConfig = statusConfigs.find(c => c.label === formData.orderStatus);
-    const isActiveDeal = currentStatusConfig ? currentStatusConfig.isActiveDeal : false;
+    const currentStatusConfig = getStatusConfigForOrder(formData, statusConfigs);
+    const isActiveDeal = currentStatusConfig ? (currentStatusConfig.isActiveDeal || currentStatusConfig.isCompleted) : false;
     const hasDealDate = !!formData.dealStartDate;
     const iDealActiveAndDated = isActiveDeal && hasDealDate;
 
+    const createdDateDisplay = formData.createdAt
+        ? new Date(formData.createdAt).toLocaleDateString('he-IL')
+        : (formData.date ? new Date(formData.date).toLocaleDateString('he-IL') : new Date().toLocaleDateString('he-IL'));
+
+    const dealDateDisplay = formData.dealStartDate
+        ? new Date(formData.dealStartDate).toLocaleDateString('he-IL')
+        : '—';
+
+    useEffect(() => {
+        if (!setHeaderContent) return;
+        setHeaderContent(
+            <div className="flex items-center gap-3 px-3 py-1.5 rounded-lg bg-slate-50 border border-slate-100 text-xs text-slate-600">
+                {isAdmin && (
+                    <>
+                        <label className="flex items-center gap-1.5 cursor-pointer select-none" title="הזמנה זו לא תיספר ביעד הכנסות חודשי בלוח הבקרה">
+                            <input
+                                type="checkbox"
+                                name="hiddenFromSalesGoal"
+                                checked={!!formData.hiddenFromSalesGoal}
+                                onChange={handleMasterChange}
+                                className="h-4 w-4 rounded border-slate-300 text-primary focus:ring-primary cursor-pointer"
+                            />
+                            <span className="font-medium text-slate-600">הכנסה נסתרת מיעדי מכירות</span>
+                        </label>
+                        <span className="w-px h-4 bg-slate-200 flex-shrink-0" aria-hidden />
+                    </>
+                )}
+                <span className="flex items-center gap-1.5" title="תאריך יצירה">
+                    <span className="text-slate-400 font-medium">נוצר:</span>
+                    {isAdmin ? (
+                        <input
+                            type="date"
+                            name="createdAt"
+                            value={createdAtString}
+                            onChange={handleMasterChange}
+                            className="w-[6.5rem] py-1 px-1.5 rounded border border-slate-200 text-slate-700 text-xs font-medium bg-white cursor-pointer"
+                        />
+                    ) : (
+                        <span className="font-mono font-semibold text-slate-700">{createdDateDisplay}</span>
+                    )}
+                </span>
+                <span className="w-px h-4 bg-slate-200 flex-shrink-0" aria-hidden />
+                <span className={`flex items-center gap-1.5 ${iDealActiveAndDated ? 'text-green-700' : 'text-slate-500'}`} title={hasDealDate ? 'תאריך אישור עסקה' : 'טרם אושרה עסקה'}>
+                    <span className="font-medium">{hasDealDate ? 'אישור עסקה:' : 'טרם אושרה'}</span>
+                    {isAdmin ? (
+                        <input
+                            type="date"
+                            name="dealStartDate"
+                            value={dealStartDateString}
+                            onChange={handleMasterChange}
+                            min={minDealDate}
+                            className={`w-[6.5rem] py-1 px-1.5 rounded border text-xs font-medium bg-white cursor-pointer ${iDealActiveAndDated ? 'border-green-200 text-green-700 bg-green-50/50' : hasDealDate ? 'border-slate-200 text-slate-600' : 'border-dashed border-slate-200 text-slate-400'}`}
+                        />
+                    ) : (
+                        <span className="font-mono font-semibold text-slate-700">{dealDateDisplay}</span>
+                    )}
+                </span>
+            </div>
+        );
+        return () => { setHeaderContent(null); };
+    }, [setHeaderContent, createdDateDisplay, createdAtString, dealDateDisplay, dealStartDateString, hasDealDate, iDealActiveAndDated, isAdmin, minDealDate, formData.hiddenFromSalesGoal]);
+
     return (
+        <>
         <form onSubmit={handleSubmit} className="space-y-8 text-start">
+             {readOnly && lockedByUserName && (
+                <div className="flex items-center gap-2 p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-800">
+                    <LockIcon className="w-5 h-5 flex-shrink-0" />
+                    <span>ההזמנה פתוחה לעריכה אצל <strong>{lockedByUserName}</strong>. צפייה בלבד.</span>
+                </div>
+             )}
              {isNewSupplierModalOpen && (
                 <Modal title="הוספת ספק חדש (שליח/מתקין)" onClose={() => setIsNewSupplierModalOpen(false)}>
                     <NewSupplierForm onSave={handleSaveNewSupplier} onCancel={() => setIsNewSupplierModalOpen(false)} />
@@ -1377,10 +2480,34 @@ const OrderForm: React.FC<{
                 />
             )}
 
-            {paymentIdToDelete && (
-                <Modal title="אישור מחיקת תשלום" onClose={() => setPaymentIdToDelete(null)} size="lg" zIndex={70}>
+            {isCreateDocumentModalOpen && order && (
+                <CreateDocumentModal
+                    order={order}
+                    customer={customers.find(c => c.id === formData.customerId) || customers[0]}
+                    onClose={() => setIsCreateDocumentModalOpen(false)}
+                    onCreate={(documentType, method, paymentsOverride) => handleCreateDocument(documentType, method, paymentsOverride)}
+                    balanceDue={balanceDue}
+                    balanceToIssue={Math.max(0, totalDueWithVat - (invoiceSummary?.netInvoiced ?? 0))}
+                    isActiveDeal={isActiveDeal}
+                    allowOnlyEstimateAndInvoice={!isAdmin}
+                    mode={createDocumentModalMode}
+                    fromDocumentType={createDocumentModalFromType}
+                    sourceDocumentId={createDocumentModalSourceId}
+                    isLoading={isCreatingDocument}
+                />
+            )}
+
+            {paymentIdToDelete && (() => {
+                const targetPayment = formData.payments?.find(p => p.id === paymentIdToDelete);
+                const isImportPlaceholder = targetPayment?.isImportPlaceholder || targetPayment?.notes === 'תקבול אוטומטי מייבוא';
+                return (
+                <Modal title={isImportPlaceholder ? 'מחיקת תקבול אוטומטי מייבוא' : 'אישור מחיקת תשלום'} onClose={() => setPaymentIdToDelete(null)} size="lg" zIndex={70}>
                     <div className="text-start">
-                        <p className="text-slate-700 mb-6">האם אתה בטוח שברצונך למחוק את רישום התשלום הזה? פעולה זו תעדכן את היתרה לתשלום.</p>
+                        <p className="text-slate-700 mb-6">
+                            {isImportPlaceholder
+                                ? 'התקבול נוסף אוטומטית בייבוא. אם תמחק אותו, ההזמנה תסומן כלא שולמה ותוכל לשייך מסמך חשבונאי (חשבונית/קבלה) לפי הלוגיקה הרגילה.'
+                                : 'האם אתה בטוח שברצונך למחוק את רישום התשלום הזה? פעולה זו תעדכן את היתרה לתשלום.'}
+                        </p>
                         <div className="flex justify-end gap-3">
                             <button 
                                 type="button" 
@@ -1394,12 +2521,13 @@ const OrderForm: React.FC<{
                                 onClick={confirmDeletePayment} 
                                 className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700"
                             >
-                                מחק תשלום
+                                {isImportPlaceholder ? 'מחק תקבול אוטומטי' : 'מחק תשלום'}
                             </button>
                         </div>
                     </div>
                 </Modal>
-            )}
+                );
+            })()}
 
             <div className="space-y-2">
                 {parentOrder && (
@@ -1430,88 +2558,32 @@ const OrderForm: React.FC<{
             </div>
 
             <div className="space-y-4">
-                <div className="flex justify-between items-center border-b pb-2">
-                    <div className="flex items-center gap-2">
-                        <h3 className="text-xl font-semibold text-slate-800">פרטי הזמנה ולקוח</h3>
-                        {formData.type === OrderType.SERVICE_CALL && (
-                            <span className="bg-red-100 text-red-800 text-xs px-2 py-1 rounded-full font-bold flex items-center">
-                                <SettingsIcon className="w-3 h-3 me-1" />
-                                קריאת שירות
-                            </span>
-                        )}
+                {formData.type === OrderType.SERVICE_CALL && (
+                    <div className="flex justify-between items-center border-b pb-2">
+                        <span className="bg-red-100 text-red-800 text-xs px-2 py-1 rounded-full font-bold flex items-center">
+                            <SettingsIcon className="w-3 h-3 me-1" />
+                            קריאת שירות
+                        </span>
                     </div>
-                    {!isEditMode && !formData.parentOrderId && (
-                        <div className="bg-slate-100 p-1 rounded-lg flex text-xs font-medium">
-                            <button type="button" onClick={() => setCustomerMode('EXISTING')} className={`px-3 py-1.5 rounded-md transition-all ${customerMode === 'EXISTING' ? 'bg-white text-primary shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>לקוח קיים</button>
-                             <button type="button" onClick={() => setCustomerMode('NEW')} className={`px-3 py-1.5 rounded-md transition-all ${customerMode === 'NEW' ? 'bg-white text-primary shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>+ לקוח חדש</button>
-                        </div>
-                    )}
-                </div>
+                )}
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
-                    <div className="bg-slate-50 rounded-lg p-2 border border-slate-200/60 flex flex-col relative">
-                        <div className="flex items-center gap-1 mb-1">
-                            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">נוצר בתאריך</span>
-                            <div className="text-slate-300"><SettingsIcon className="w-3 h-3"/></div>
-                        </div>
-                        <div className="font-mono text-sm font-semibold text-slate-600 bg-transparent border-none p-0">
-                            {formData.createdAt 
-                                ? new Date(formData.createdAt).toLocaleDateString('he-IL') 
-                                : (formData.date ? new Date(formData.date).toLocaleDateString('he-IL') : new Date().toLocaleDateString('he-IL'))
-                            }
-                        </div>
-                        <div className="absolute top-2 left-2 text-slate-300 text-xs" title="לקריאה בלבד">🔒</div>
-                    </div>
-
-                    <div className={`rounded-lg p-2 border transition-all flex flex-col relative group ${iDealActiveAndDated ? 'bg-green-50 border-green-200' : (hasDealDate ? 'bg-slate-50 border-slate-300' : 'bg-slate-50 border-slate-200 border-dashed')}`}>
-                        <div className="flex justify-between items-start mb-1">
-                            <label htmlFor="dealStartDate" className={`block text-[10px] font-bold uppercase tracking-wider cursor-pointer ${iDealActiveAndDated ? 'text-green-700' : 'text-slate-500'}`}>
-                                {hasDealDate ? 'תאריך אישור עסקה' : 'טרם אושרה עסקה'}
-                                <span className="text-xs text-slate-400 font-normal mr-1">(קובע תנאי תשלום)</span>
-                            </label>
-                             <div className={`text-[10px] px-1.5 rounded-full border flex items-center gap-1 ${isActiveDeal ? 'bg-green-100 text-green-700 border-green-200' : 'bg-slate-200 text-slate-500 border-slate-300'}`}>
-                                <span className={`w-1.5 h-1.5 rounded-full ${isActiveDeal ? 'bg-green-500 animate-pulse' : 'bg-slate-400'}`}></span>
-                                {isActiveDeal ? 'פעיל' : 'לא פעיל'}
-                            </div>
-                        </div>
-                        <input type="date" name="dealStartDate" id="dealStartDate" value={dealStartDateString} onChange={handleMasterChange} min={minDealDate} className={`block w-full text-sm font-semibold bg-transparent border-none p-0 focus:ring-0 cursor-pointer ${iDealActiveAndDated ? 'text-green-800' : 'text-slate-500'}`} />
-                    </div>
-                </div>
-
-                <div className={`p-4 rounded-lg border ${customerMode === 'NEW' ? 'bg-indigo-50 border-indigo-200' : 'bg-slate-50 border-slate-200'}`}>
-                    {customerMode === 'EXISTING' ? (
-                        <div className="space-y-4">
-                            <SmartCustomerSearch customers={customers} selectedCustomerId={formData.customerId} onSelect={(id) => setFormData(prev => ({ ...prev, customerId: id, contactId: '' }))} />
-                            <div>
-                                <label className="block text-sm font-medium text-slate-700">איש קשר</label>
-                                <select name="contactId" value={formData.contactId || ''} onChange={handleMasterChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" disabled={!selectedCustomer}>
-                                    <option value="">בחר איש קשר</option>
-                                    {selectedCustomer?.contacts.map(c => <option key={c.id} value={c.id}>{c.name} {c.isDefault ? '(★ ברירת מחדל)' : ''}</option>)}
-                                </select>
-                            </div>
-                            
-                            <div>
-                                <label className="block text-sm font-medium text-slate-700">תנאי תשלום</label>
-                                <div className="relative">
-                                    <input type="text" value={formData.paymentTerms || ''} readOnly className="mt-1 block w-full rounded-md border-slate-300 bg-slate-100 text-slate-500 shadow-sm sm:text-sm cursor-not-allowed pr-8" />
-                                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                                        <LockIcon className="h-4 w-4 text-slate-400" />
-                                    </div>
-                                </div>
-                                <p className="text-[10px] text-slate-400 mt-1">{selectedCustomer ? `(מוגדר עבור ${selectedCustomer.name})` : 'מוגדר בכרטיס לקוח'}</p>
-                            </div>
-
-                            {selectedContact && (
-                                <div className="mt-2 text-xs text-slate-500 bg-white p-2 rounded border border-slate-100">
-                                    <p><strong>תפקיד:</strong> {selectedContact.role}</p>
-                                    <p><strong>טלפון:</strong> {selectedContact.phone}</p>
-                                    <p><strong>מייל:</strong> {selectedContact.email}</p>
-                                </div>
-                            )}
-                        </div>
-                    ) : (
+                <div className={`p-4 rounded-lg border ${showNewCustomerForm ? 'bg-indigo-50 border-indigo-200' : 'bg-slate-50 border-slate-200'}`}>
+                    {showNewCustomerForm ? (
                         <div className="space-y-3">
-                            <h4 className="text-sm font-bold text-indigo-800 mb-2 border-b border-indigo-200 pb-1">פרטי לקוח חדש</h4>
+                            <div className="flex items-center justify-between gap-2 flex-wrap">
+                                <h4 className="text-sm font-bold text-indigo-800 border-b border-indigo-200 pb-1">פרטי לקוח חדש</h4>
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        setShowNewCustomerForm(false);
+                                        setCustomerMode('EXISTING');
+                                        setFormData(prev => ({ ...prev, customerId: '', contactId: '' }));
+                                    }}
+                                    className="text-xs font-medium text-indigo-600 hover:text-indigo-800 hover:underline"
+                                >
+                                    בחר לקוח קיים
+                                </button>
+                            </div>
                             <div className="grid grid-cols-2 gap-3">
                                 <div className="col-span-2">
                                     <label className="block text-xs font-medium text-slate-600">שם חברה <span className="text-red-500">*</span></label>
@@ -1534,7 +2606,7 @@ const OrderForm: React.FC<{
                                 </div>
                                 <div className="col-span-2">
                                     <label className="block text-xs font-medium text-slate-600">אימייל</label>
-                                    <input type="email" name="email" value={newCustomerData.email} onChange={handleNewCustomerChange} className="mt-1 block w-full rounded-md border-indigo-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-xs" required />
+                                    <input type="email" name="email" value={newCustomerData.email} onChange={handleNewCustomerChange} className="mt-1 block w-full rounded-md border-indigo-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-xs" />
                                 </div>
                                     <div className="col-span-2">
                                     <label className="block text-xs font-medium text-slate-600">כתובת</label>
@@ -1554,199 +2626,331 @@ const OrderForm: React.FC<{
                                 </div>
                             </div>
                         </div>
+                    ) : selectedCustomer ? (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div className="space-y-4">
+                                <SmartCustomerSearch
+                                    customers={customers}
+                                    selectedCustomerId={formData.customerId}
+                                    onSelect={(id) => setFormData(prev => ({ ...prev, customerId: id, contactId: '' }))}
+                                    showAddNewOption={!isEditMode && !formData.parentOrderId}
+                                    onAddNewCustomer={(name) => {
+                                        setNewCustomerData(prev => ({ ...prev, name }));
+                                        setCustomerMode('NEW');
+                                        setShowNewCustomerForm(true);
+                                        setFormData(prev => ({ ...prev, customerId: '', contactId: '' }));
+                                    }}
+                                />
+                                <div>
+                                    <label className="block text-sm font-medium text-slate-700">איש קשר</label>
+                                    <select name="contactId" value={formData.contactId || ''} onChange={handleMasterChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" disabled={!selectedCustomer}>
+                                        <option value="">בחר איש קשר</option>
+                                        {selectedCustomer?.contacts.map(c => <option key={c.id} value={c.id}>{c.name} {c.isDefault ? '(★ ברירת מחדל)' : ''}</option>)}
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-slate-700">תנאי תשלום</label>
+                                    <div className="relative">
+                                        <input type="text" value={formData.paymentTerms || ''} readOnly className="mt-1 block w-full rounded-md border-slate-300 bg-slate-100 text-slate-500 shadow-sm sm:text-sm cursor-not-allowed pr-8" />
+                                        <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                                            <LockIcon className="h-4 w-4 text-slate-400" />
+                                        </div>
+                                    </div>
+                                    <p className="text-[10px] text-slate-400 mt-1">{selectedCustomer ? `(מוגדר עבור ${selectedCustomer.name})` : 'מוגדר בכרטיס לקוח'}</p>
+                                </div>
+                            </div>
+                            <div className="space-y-4">
+                                {selectedContact && (
+                                    <div className="bg-white p-4 rounded-lg border border-slate-200 shadow-sm flex items-start gap-3">
+                                        {onNavigateToPage && setSelectedCustomerId && selectedCustomer && (
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    setSelectedCustomerId(selectedCustomer.id);
+                                                    onNavigateToPage('Customers');
+                                                }}
+                                                className="shrink-0 p-2 rounded-lg hover:bg-slate-100 text-primary transition-colors"
+                                                title="פתח כרטיס לקוח"
+                                            >
+                                                <CustomersIcon className="h-8 w-8" />
+                                            </button>
+                                        )}
+                                        <div className="flex-1 min-w-0">
+                                            <h5 className="text-sm font-semibold text-slate-800 mb-2">פרטי איש קשר</h5>
+                                            <p className="text-xs text-slate-700"><strong>תפקיד:</strong> {selectedContact.role}</p>
+                                            <p className="text-xs text-slate-700"><strong>טלפון:</strong> {selectedContact.phone}</p>
+                                            <p className="text-xs text-slate-700"><strong>מייל:</strong> {selectedContact.email}</p>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    ) : (
+                        <SmartCustomerSearch
+                            customers={customers}
+                            selectedCustomerId={formData.customerId}
+                            onSelect={(id) => setFormData(prev => ({ ...prev, customerId: id, contactId: '' }))}
+                            showAddNewOption={!isEditMode && !formData.parentOrderId}
+                            onAddNewCustomer={(name) => {
+                                setNewCustomerData(prev => ({ ...prev, name }));
+                                setCustomerMode('NEW');
+                                setShowNewCustomerForm(true);
+                                setFormData(prev => ({ ...prev, customerId: '', contactId: '' }));
+                            }}
+                        />
                     )}
                 </div>
             </div>
 
-            <div className="space-y-4">
-                <h3 className="text-xl font-semibold text-slate-800 border-b pb-2">סטטוסים ותהליך</h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div>
-                        <label className="block text-sm font-medium text-slate-700">סוכן מטפל</label>
-                        <select name="employeeId" value={formData.employeeId} onChange={handleMasterChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm">
-                            <option value="">בחר עובד</option>
-                            {employees.map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
-                        </select>
-                    </div>
-                    <div>
-                        <label className="block text-sm font-medium text-slate-700">סטטוס הזמנה</label>
-                        <select name="orderStatus" value={formData.orderStatus} onChange={handleMasterChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                    <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">סטטוס הזמנה</label>
+                    <div className={`rounded-xl border-2 p-4 ${currentStatusConfig?.color || 'bg-slate-100 text-slate-800'} border-current/20 shadow-sm`}>
+                        <select
+                            name="orderStatus"
+                            value={formData.orderStatus}
+                            onChange={handleMasterChange}
+                            className={`w-full rounded-lg py-3 px-4 text-lg font-bold bg-transparent border-0 cursor-pointer focus:ring-2 focus:ring-offset-2 focus:ring-primary appearance-none ${currentStatusConfig?.color || 'bg-slate-100 text-slate-800'}`}
+                        >
                             {statusConfigs.sort((a,b) => a.orderIndex - b.orderIndex).map(config => (
                                 <option key={config.id} value={config.label}>{config.label}</option>
                             ))}
                         </select>
                     </div>
                 </div>
-                <div className="flex space-x-4 space-x-reverse pt-2">
-                    <label className="flex items-center"><input type="checkbox" name="invoiceIssued" checked={formData.invoiceIssued} onChange={handleMasterChange} className="h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary me-2" /> הוצאה חשבונית</label>
-                    <label className="flex items-center"><input type="checkbox" name="receiptIssued" checked={formData.receiptIssued} onChange={handleMasterChange} className="h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary me-2" /> הוצאה קבלה</label>
+                <div>
+                    <label className="block text-sm font-medium text-slate-700">סוכן מטפל</label>
+                    <div className="mt-1 block w-full rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+                        {formData.employeeId ? (employees.find(e => e.id === formData.employeeId)?.name ?? formData.employeeId) : '—'}
+                    </div>
+                    <p className="mt-0.5 text-xs text-slate-500">מתעדכן אוטומטית לפי משנה הסטטוס</p>
                 </div>
             </div>
 
-            <div className="space-y-6">
-                <h3 className="text-xl font-semibold text-slate-800 border-b pb-2">פירוט הזמנה ועלויות</h3>
-                <div>
-                    <label className="block text-sm font-medium text-slate-700">כותרת הזמנה</label>
-                    <input type="text" name="description" value={formData.description} onChange={handleMasterChange} required className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+            <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-6 space-y-6">
+                <h3 className="text-2xl font-bold text-slate-900 border-b-2 border-primary pb-3">פירוט הזמנה ועלויות</h3>
+                <div className="bg-primary/5 rounded-lg p-4 border border-slate-200">
+                    <label className="block text-base font-semibold text-slate-800 mb-2">כותרת הזמנה</label>
+                    <input type="text" name="description" value={formData.description} onChange={handleMasterChange} required className="block w-full rounded-lg border-2 border-slate-200 bg-white py-2.5 px-3 text-base font-medium text-slate-800 focus:border-primary focus:ring-2 focus:ring-primary/20 shadow-sm" />
                 </div>
                 <div>
-                    <h4 className="text-lg font-medium text-slate-800 mb-2">פריטי הזמנה</h4>
-                    <div className="hidden md:grid text-[11px] grid-cols-12 gap-2 px-2 text-slate-500 font-bold uppercase tracking-tight">
-                        <div className="col-span-2">תיאור</div>
-                        <div className="col-span-1">סוג יח'</div>
-                        <div className="col-span-1">רוחב</div>
-                        <div className="col-span-1">גובה</div>
-                        <div className="col-span-1 text-center">כמות</div>
-                        <div className="col-span-1 text-center">מחיר</div>
-                        <div className="col-span-1 text-center">עלות</div>
-                        <div className="col-span-1 text-center bg-indigo-50 rounded-t py-0.5 border-x border-t border-indigo-100 text-indigo-700">רווח %</div>
-                        <div className="col-span-1 text-center">סה"כ</div>
-                        <div className="col-span-2">ספק</div>
+                    <div className="flex items-center justify-between mb-4">
+                        <h4 className="text-xl font-semibold text-slate-800">פריטי הזמנה</h4>
+                        <div className="flex items-center gap-2">
+                            {formData.lineItems.some(item => item.priceListProductId) && (
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        setSendOrderModalOpen(true);
+                                    }}
+                                    className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 flex items-center gap-2 text-sm font-medium"
+                                >
+                                    <EmailIcon className="w-4 h-4" />
+                                    שלח בקשות הצעת מחיר
+                                </button>
+                            )}
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    // מצא פריט ריק ראשון או הוסף בסוף
+                                    const emptyIndex = formData.lineItems.findIndex(item => !item.description || item.description === '');
+                                    const indexToUse = emptyIndex >= 0 ? emptyIndex : formData.lineItems.length;
+                                    setProductSelectorFor({ type: 'lineItem', index: indexToUse });
+                                    setIsProductSelectorOpen(true);
+                                    productSelectionCounterRef.current = 0;
+                                }}
+                                className="px-4 py-2 bg-primary text-white rounded-md hover:bg-primary-dark text-sm font-medium"
+                            >
+                                בחר מהמחירון
+                            </button>
+                        </div>
                     </div>
-                    <div className="space-y-3">
+                    <datalist id="preparation-status-list">
+                        {preparationStatusSuggestions.map(s => <option key={s} value={s} />)}
+                    </datalist>
+                    <div className="overflow-x-auto rounded-lg border-2 border-slate-300 bg-slate-100/80" style={{ minWidth: 'min(100%, 1610px)' }}>
+                        <div className="hidden md:grid text-xs font-semibold min-w-[1610px]" style={{ gridTemplateColumns: 'minmax(340px, 3fr) minmax(90px, 0.8fr) minmax(72px, 0.6fr) minmax(72px, 0.6fr) minmax(72px, 0.6fr) minmax(80px, 0.7fr) minmax(100px, 1fr) minmax(100px, 1fr) minmax(80px, 0.8fr) minmax(120px, 1.1fr) minmax(150px, 1fr) minmax(150px, 1fr) minmax(220px, 2fr)' }}>
+                            <div className="col-span-1 py-2.5 px-2 border-b-2 border-r border-slate-400 bg-slate-200 text-slate-800">תיאור</div>
+                            <div className="col-span-1 py-2.5 px-2 border-b-2 border-r border-slate-400 bg-slate-200 text-slate-800">סוג</div>
+                            <div className="col-span-1 py-2.5 px-2 border-b-2 border-r border-slate-400 bg-slate-200 text-slate-800">סוג יח'</div>
+                            <div className="col-span-1 py-2.5 px-2 border-b-2 border-r border-slate-400 bg-slate-200 text-slate-800">רוחב</div>
+                            <div className="col-span-1 py-2.5 px-2 border-b-2 border-r border-slate-400 bg-slate-200 text-slate-800">גובה</div>
+                            <div className="col-span-1 py-2.5 px-2 border-b-2 border-r border-slate-400 bg-slate-200 text-slate-800 text-center">כמות</div>
+                            <div className="col-span-1 py-2.5 px-2 border-b-2 border-r border-slate-400 bg-slate-200 text-slate-800 text-center">מחיר</div>
+                            <div className="col-span-1 py-2.5 px-2 border-b-2 border-r border-slate-400 bg-slate-200 text-slate-800 text-center">עלות</div>
+                            <div className="col-span-1 py-2.5 px-2 border-b-2 border-r border-slate-400 bg-indigo-100 text-indigo-800 text-center">רווח %</div>
+                            <div className="col-span-1 py-2.5 px-2 border-b-2 border-r border-slate-400 bg-slate-200 text-slate-800 text-center">סה"כ</div>
+                            <div className="col-span-2 py-2.5 px-2 border-b-2 border-r border-slate-400 bg-slate-200 text-slate-800">ספק</div>
+                            <div className="py-2.5 px-2 border-b-2 border-slate-400 bg-slate-200 text-slate-800">סטטוס הכנה</div>
+                        </div>
+                        <div className="divide-y-2 divide-slate-300">
                         {formData.lineItems.map((item, index) => {
+                            const effectiveQty = getLineItemEffectiveQuantity(item);
                             const itemMarkup = item.cost > 0 ? ((item.unitPrice - item.cost) / item.cost) * 100 : (item.unitPrice > 0 ? 100 : 0);
                             const markupColorClass = getProfitMarginColor(itemMarkup);
+                            const rowBg = index % 2 === 0 ? 'bg-white' : 'bg-slate-50';
+                            const cellBorder = 'border-r border-slate-300';
                             return (
-                                <div key={item.id} className="p-3 border rounded-lg bg-slate-50 md:p-0 md:border-none md:bg-transparent md:grid md:grid-cols-12 md:gap-2 md:items-center relative">
-                                    <button type="button" onClick={() => removeLineItem(index)} className="absolute top-2 left-2 text-red-500 hover:text-red-700 p-1 md:hidden"><DeleteIcon className="h-5 w-5"/></button>
-                                    <div className="md:col-span-2">
+                                <div key={item.id} className={`p-3 border border-slate-200 rounded-lg bg-slate-50 md:rounded-none md:border-0 md:border-b md:border-slate-300 md:py-2 md:px-0 md:grid md:gap-0 md:items-stretch md:min-w-[1610px] ${rowBg} relative hover:bg-slate-50/80 transition-colors ${item.serviceType === 'DELIVERY' ? 'md:bg-blue-50/60' : item.serviceType === 'INSTALLATION' ? 'md:bg-emerald-50/60' : ''}`} style={{ gridTemplateColumns: 'minmax(340px, 3fr) minmax(90px, 0.8fr) minmax(72px, 0.6fr) minmax(72px, 0.6fr) minmax(72px, 0.6fr) minmax(80px, 0.7fr) minmax(100px, 1fr) minmax(100px, 1fr) minmax(80px, 0.8fr) minmax(120px, 1.1fr) minmax(150px, 1fr) minmax(150px, 1fr) minmax(220px, 2fr)' }}>
+                                    <button type="button" onClick={() => removeLineItem(index)} className="absolute top-2 left-2 text-red-500 hover:text-red-700 p-1 md:hidden z-10"><DeleteIcon className="h-5 w-5"/></button>
+                                    <div className={`md:col-span-1 md:py-1.5 md:px-2 md:border-r md:border-slate-300 md:bg-inherit min-w-0 ${cellBorder}`}>
                                         <label className="text-xs font-medium text-slate-500 md:hidden">תיאור</label>
-                                        <input type="text" placeholder="תיאור" name="description" value={item.description} onChange={e => handleLineItemChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+                                        <AutoResizeTextarea
+                                            placeholder="תיאור"
+                                            name="description"
+                                            value={item.description ?? ''}
+                                            onChange={e => handleLineItemChange(index, e)}
+                                            title={item.description || 'תיאור'}
+                                            className="mt-1 md:mt-0 block w-full min-w-0 rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary box-border"
+                                            minHeight={40}
+                                            maxHeight={200}
+                                        />
                                     </div>
-                                    <div className="md:col-span-1">
+                                    <div className={`md:col-span-1 md:py-1.5 md:px-2 min-w-0 ${cellBorder}`}>
+                                        <label className="text-xs font-medium text-slate-500 md:hidden">סוג</label>
+                                        <div className="flex flex-col gap-1 mt-1 md:mt-0">
+                                            <select name="serviceType" value={item.serviceType ?? ''} onChange={e => handleLineItemChange(index, e)} className="block w-full min-w-0 rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary">
+                                                <option value="">פריט</option>
+                                                <option value="DELIVERY">משלוח</option>
+                                                <option value="INSTALLATION">התקנה</option>
+                                            </select>
+                                            {item.serviceType === 'DELIVERY' && (
+                                                <span className="inline-flex items-center gap-0.5 text-xs font-medium text-blue-700 bg-blue-100 rounded px-1.5 py-0.5 w-fit">
+                                                    <TruckIcon className="h-3.5 w-3.5" /> משלוח
+                                                </span>
+                                            )}
+                                            {item.serviceType === 'INSTALLATION' && (
+                                                <span className="inline-flex items-center gap-0.5 text-xs font-medium text-emerald-700 bg-emerald-100 rounded px-1.5 py-0.5 w-fit">
+                                                    <InstallationIcon className="h-3.5 w-3.5" /> התקנה
+                                                </span>
+                                            )}
+                                            {(item.serviceType === 'DELIVERY' || item.serviceType === 'INSTALLATION') && (
+                                                <button type="button" onClick={() => setServiceDetailsModalForIndex(index)} className="text-xs text-primary hover:text-indigo-800 font-medium w-fit">
+                                                    פרטים
+                                                </button>
+                                            )}
+                                        </div>
+                                    </div>
+                                    <div className={`md:col-span-1 md:py-1.5 md:px-2 min-w-0 ${cellBorder}`}>
                                         <label className="text-xs font-medium text-slate-500 md:hidden mt-2">סוג יחידה</label>
-                                        <select name="unitType" value={item.unitType} onChange={e => handleLineItemChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm">
+                                        <select name="unitType" value={item.unitType} onChange={e => handleLineItemChange(index, e)} className="mt-1 md:mt-0 block w-full min-w-0 max-w-full rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary">
                                             {Object.values(LineItemUnit).map(u => <option key={u} value={u}>{u}</option>)}
                                         </select>
                                     </div>
-                                    <div className="grid grid-cols-2 gap-x-2 mt-2 md:col-span-9 md:contents">
+                                    <div className="grid grid-cols-2 gap-x-2 mt-2 md:col-span-9 md:contents md:mt-0">
                                         {item.unitType === LineItemUnit.M2 ? (
                                             <>
-                                                <div className="md:col-span-1">
+                                                <div className={`md:col-span-1 md:py-1.5 md:px-2 ${cellBorder}`}>
                                                     <label className="text-xs font-medium text-slate-500 md:hidden">רוחב</label>
-                                                    <input type="number" placeholder="רוחב" name="width" value={item.width || ''} onChange={e => handleLineItemChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+                                                    <input type="number" placeholder="רוחב" name="width" value={item.width || ''} onChange={e => handleLineItemChange(index, e)} className="mt-1 md:mt-0 block w-full min-w-[4.5rem] rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary" />
                                                 </div>
-                                                <div className="md:col-span-1">
+                                                <div className={`md:col-span-1 md:py-1.5 md:px-2 ${cellBorder}`}>
                                                     <label className="text-xs font-medium text-slate-500 md:hidden">גובה</label>
-                                                    <input type="number" placeholder="גובה" name="height" value={item.height || ''} onChange={e => handleLineItemChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+                                                    <input type="number" placeholder="גובה" name="height" value={item.height || ''} onChange={e => handleLineItemChange(index, e)} className="mt-1 md:mt-0 block w-full min-w-[4.5rem] rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary" />
                                                 </div>
                                             </>
                                         ) : (
-                                            <div className="hidden md:block md:col-span-2"></div>
+                                            <div className="hidden md:block md:col-span-2 md:border-r md:border-slate-300"></div>
                                         )}
-                                        <div className="md:col-span-1">
+                                        <div className={`md:col-span-1 md:py-1.5 md:px-2 ${cellBorder}`}>
                                             <label className="text-xs font-medium text-slate-500 md:hidden">כמות</label>
-                                            <input type="number" placeholder="כמות" name="quantity" value={item.quantity} onChange={e => handleLineItemChange(index, e)} disabled={item.unitType === LineItemUnit.M2} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm disabled:bg-slate-100" />
+                                            <input type="number" placeholder="כמות" name="quantity" value={item.quantity} onChange={e => handleLineItemChange(index, e)} min="0" step="0.01" className="mt-1 md:mt-0 block w-full min-w-[4.5rem] rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary" />
                                         </div>
-                                        <div className="md:col-span-1">
+                                        <div className={`md:col-span-1 md:py-1.5 md:px-2 ${cellBorder}`}>
                                             <label className="text-xs font-medium text-slate-500 md:hidden">מחיר ליח'</label>
-                                            <input type="number" placeholder="מחיר" name="unitPrice" value={item.unitPrice} onChange={e => handleLineItemChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+                                            <input type="number" placeholder="מחיר" name="unitPrice" value={item.unitPrice} onChange={e => handleLineItemChange(index, e)} className="mt-1 md:mt-0 block w-full min-w-[5.5rem] rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary" />
                                         </div>
-                                        <div className="md:col-span-1">
+                                        <div className={`md:col-span-1 md:py-1.5 md:px-2 ${cellBorder}`}>
                                             <label className="text-xs font-medium text-slate-500 md:hidden">עלות ליח'</label>
-                                            <input type="number" placeholder="עלות" name="cost" value={item.cost} onChange={e => handleLineItemChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+                                            <input type="number" placeholder="עלות" name="cost" value={item.cost} onChange={e => handleLineItemChange(index, e)} className="mt-1 md:mt-0 block w-full min-w-[5.5rem] rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary" />
                                         </div>
-                                        <div className="md:col-span-1 flex items-center md:flex-col md:justify-center md:items-center mt-1 md:mt-0 bg-indigo-50/30 md:h-full rounded-b md:rounded-none">
+                                        <div className={`md:col-span-1 flex items-center md:flex-col md:justify-center md:items-center mt-1 md:mt-0 md:py-1.5 md:px-2 bg-indigo-50/50 md:border-r md:border-slate-300 ${cellBorder}`}>
                                             <label className="text-[10px] font-bold text-indigo-500 md:hidden w-20">רווח %</label>
                                             <span className={`text-xs font-black ${markupColorClass} font-mono`}>
                                                 {itemMarkup.toFixed(1)}%
                                             </span>
                                         </div>
-                                        <div className="md:col-span-1 flex items-center md:flex-col md:justify-center md:items-start mt-1 md:mt-0">
+                                        <div className={`md:col-span-1 flex items-center md:flex-col md:justify-center md:items-start mt-1 md:mt-0 md:py-1.5 md:px-2 ${cellBorder}`}>
                                             <label className="text-xs font-medium text-slate-500 md:hidden w-20">סה"כ</label>
                                             <div className="flex flex-col">
-                                                <span className="text-xs font-semibold text-slate-800">₪{(item.quantity * item.unitPrice).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                                                <span className="text-xs font-semibold text-slate-800">₪{(effectiveQty * item.unitPrice).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                                                 {item.cost > 0 && (
-                                                    <span className="text-[10px] text-slate-500" title="סה״כ עלות">
-                                                        (₪{(item.quantity * item.cost).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })})
+                                                    <span className="text-[10px] text-slate-500" title="סה״כ עלות לספק">
+                                                        (₪{(effectiveQty * item.cost).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })})
+                                                    </span>
+                                                )}
+                                                {item.unitType === LineItemUnit.M2 && item.width && item.height && (
+                                                    <span className="text-[10px] font-bold text-blue-600 mt-1" title="סה״כ מ״ר">
+                                                        {(item.width * item.height * (item.quantity || 1)).toFixed(2)} מ"ר
                                                     </span>
                                                 )}
                                             </div>
                                         </div>
-                                        <div className="col-span-2 md:col-span-2">
+                                        <div className={`col-span-2 md:col-span-2 md:py-1.5 md:px-2 md:min-w-0`}>
                                             <label className="text-xs font-medium text-slate-500 md:hidden">ספק</label>
-                                            <div className="flex items-center gap-1 mt-1">
-                                                <select name="supplierId" value={item.supplierId || ''} onChange={e => handleLineItemChange(index, e)} className="flex-grow block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" disabled={!item.cost || item.cost <= 0}>
-                                                    <option value="">בחר ספק</option>
-                                                    {suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-                                                </select>
-                                                <button type="button" onClick={() => removeLineItem(index)} className="hidden md:block text-red-500 hover:text-red-700 p-1"><DeleteIcon className="h-5 w-5"/></button>
+                                            <div className="flex items-center gap-1 mt-1 md:mt-0">
+                                                <div className="flex-grow min-w-0">
+                                                    <SearchableSelect
+                                                        options={suppliers.map(s => ({ value: s.id, label: s.name }))}
+                                                        value={item.supplierId || ''}
+                                                        onChange={value => handleLineItemChange(index, { target: { name: 'supplierId', value } } as React.ChangeEvent<HTMLSelectElement>)}
+                                                        placeholder="בחר ספק"
+                                                        title={item.supplierId ? (suppliers.find(s => s.id === item.supplierId)?.name || '') : 'בחר ספק'}
+                                                        className="w-full"
+                                                    />
+                                                </div>
+                                                {item.priceListProductId && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => {
+                                                            setSendItemForIndex(index);
+                                                            setSendItemModalOpen(true);
+                                                        }}
+                                                        className="px-2 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700 flex items-center gap-1 shrink-0"
+                                                        title="שלח לספק"
+                                                    >
+                                                        <EmailIcon className="w-3 h-3" />
+                                                    </button>
+                                                )}
+                                                <button type="button" onClick={() => removeLineItem(index)} className="hidden md:block text-red-500 hover:text-red-700 p-1 shrink-0"><DeleteIcon className="h-5 w-5"/></button>
                                             </div>
+                                        </div>
+                                        <div className="md:py-1.5 md:px-2 md:min-w-0">
+                                            <label className="text-xs font-medium text-slate-500 md:hidden mt-2">סטטוס הכנה</label>
+                                            <AutoResizeTextarea
+                                                placeholder="סטטוס הכנה"
+                                                name="preparationStatus"
+                                                value={item.preparationStatus ?? ''}
+                                                onChange={e => handleLineItemChange(index, e)}
+                                                title={item.preparationStatus ?? 'סטטוס הכנה'}
+                                                className="mt-1 md:mt-0 block w-full min-w-[12rem] rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary"
+                                                minHeight={40}
+                                                maxHeight={200}
+                                            />
+                                        </div>
+                                        <div className="col-span-12 mt-2 md:mt-2 md:py-1.5 md:px-2 md:border-t md:border-slate-200" style={{ gridColumn: '1 / -1' }}>
+                                            <label className="text-xs font-medium text-slate-500 md:hidden">הערה</label>
+                                            <AutoResizeTextarea
+                                                name="notes"
+                                                value={item.notes || ''}
+                                                onChange={e => handleLineItemChange(index, e)}
+                                                className="mt-1 md:mt-0 block w-full min-w-[16rem] rounded-md border-2 border-slate-300 bg-white py-1.5 px-2 text-sm focus:border-primary focus:ring-primary"
+                                                placeholder="הערות לפריט זה"
+                                                minHeight={40}
+                                                maxHeight={200}
+                                            />
                                         </div>
                                     </div>
                                 </div>
                             );
                         })}
+                        </div>
                     </div>
-                    <button type="button" onClick={addLineItem} className="mt-2 text-sm text-primary hover:text-indigo-800">+ הוסף פריט</button>
-                </div>
-                <div>
-                    <h4 className="text-lg font-medium text-slate-800 mb-2">שירותים נוספים (שליח / מתקין)</h4>
-                    <div className="space-y-4">
-                        {formData.additionalServices.map((service, index) => (
-                            <div key={service.id} className="p-4 border border-slate-200 rounded-lg relative bg-slate-50">
-                                <button type="button" onClick={() => removeAdditionalService(index)} className="absolute top-2 left-2 text-red-500 hover:text-red-700 p-1 bg-white rounded-full">
-                                    <DeleteIcon className="h-4 w-4"/>
-                                </button>
-                                <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-                                    <div className="md:col-span-2">
-                                        <label className="block text-xs font-medium text-slate-600">תיאור שירות</label>
-                                        <input type="text" name="description" value={service.description} onChange={e => handleAdditionalServiceChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
-                                    </div>
-                                    <div>
-                                        <label className="block text-xs font-medium text-slate-600">עלות (עבורנו)</label>
-                                        <input type="number" name="cost" value={service.cost} onChange={e => handleAdditionalServiceChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
-                                    </div>
-                                    <div>
-                                        <label className="block text-xs font-medium text-slate-600">מחיר (ללקוח)</label>
-                                        <input type="number" name="price" value={service.price} onChange={e => handleAdditionalServiceChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
-                                    </div>
-                                    <div className="md:col-span-2">
-                                        <label className="block text-xs font-medium text-slate-600">ספק שירות</label>
-                                        <div className="flex items-center gap-2">
-                                            <select name="supplierId" value={service.supplierId || ''} onChange={e => handleAdditionalServiceChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm">
-                                                <option value="">בחר ספק שירות</option>
-                                                {suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-                                            </select>
-                                            <button type="button" onClick={() => { setNewServiceSupplierFor(index); setIsNewSupplierModalOpen(true); }} className="mt-1 p-2 bg-primary text-white rounded-md hover:bg-indigo-700"><PlusIcon className="h-5 w-5"/></button>
-                                        </div>
-                                    </div>
-                                    <div className="md:col-span-2">
-                                        <label className="block text-xs font-medium text-slate-600">מועד ביצוע (תאריך ושעה)</label>
-                                        <input 
-                                            type="datetime-local" 
-                                            name="scheduledDate" 
-                                            value={service.scheduledDate ? (() => {
-                                                const d = new Date(service.scheduledDate);
-                                                const pad = (n: number) => n < 10 ? '0' + n : n;
-                                                return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-                                            })() : ''} 
-                                            onChange={e => handleAdditionalServiceChange(index, e)} 
-                                            className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" 
-                                        />
-                                    </div>
-                                    <div className="md:col-span-2">
-                                        <label className="block text-xs font-medium text-slate-600">כתובת למשלוח/התקנה</label>
-                                        <input type="text" name="address" value={service.address || ''} onChange={e => handleAdditionalServiceChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
-                                    </div>
-                                    <div>
-                                        <label className="block text-xs font-medium text-slate-600">איש קשר בשטח</label>
-                                        <input type="text" name="siteContactName" value={service.siteContactName || ''} onChange={e => handleAdditionalServiceChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
-                                    </div>
-                                    <div>
-                                        <label className="block text-xs font-medium text-slate-600">פרטי התקשרות</label>
-                                        <input type="text" name="siteContactDetails" value={service.siteContactDetails || ''} onChange={e => handleAdditionalServiceChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
-                                    </div>
-                                    <div className="md:col-span-4">
-                                        <label className="block text-xs font-medium text-slate-600">הערות לשירות</label>
-                                        <textarea name="notes" value={service.notes || ''} onChange={e => handleAdditionalServiceChange(index, e)} rows={2} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
-                                    </div>
-                                </div>
-                            </div>
-                        ))}
+                    <div className="mt-4 flex flex-wrap gap-2">
+                        <button type="button" onClick={addLineItem} className="py-2 px-4 text-sm font-medium text-primary border border-primary/30 rounded-lg hover:bg-primary/5 hover:border-primary/50 transition-colors">+ הוסף פריט</button>
+                        <button type="button" onClick={() => addLineItemService('DELIVERY')} className="py-2 px-4 text-sm font-medium text-blue-700 border border-blue-300 rounded-lg hover:bg-blue-50 transition-colors inline-flex items-center gap-1"><TruckIcon className="h-4 w-4" /> הוסף משלוח</button>
+                        <button type="button" onClick={() => addLineItemService('INSTALLATION')} className="py-2 px-4 text-sm font-medium text-emerald-700 border border-emerald-300 rounded-lg hover:bg-emerald-50 transition-colors inline-flex items-center gap-1"><InstallationIcon className="h-4 w-4" /> הוסף התקנה</button>
                     </div>
-                    <button type="button" onClick={addAdditionalService} className="mt-2 text-sm text-primary hover:text-indigo-800">+ הוסף שירות</button>
                 </div>
                 <div className={`p-4 rounded-md border-2 transition-colors ${derivedPaymentStatus === PaymentStatus.PAID ? 'bg-green-50 border-green-200' : 'bg-slate-50 border-slate-200'}`}>
                     <div className="flex justify-between items-center mb-4 border-b pb-2 border-slate-200/50">
@@ -1760,7 +2964,10 @@ const OrderForm: React.FC<{
                                 step="0.1"
                                 value={formData.vatRate}
                                 onChange={handleMasterChange}
-                                className="w-16 text-xs p-1 border rounded bg-white font-bold text-primary focus:ring-primary"
+                                readOnly={!isAdmin}
+                                disabled={!isAdmin}
+                                title={!isAdmin ? 'תיקון מע"מ – למנהל מערכת בלבד' : undefined}
+                                className={`w-16 text-xs p-1 border rounded font-bold text-primary focus:ring-primary ${!isAdmin ? 'bg-slate-100 cursor-not-allowed opacity-75' : 'bg-white'}`}
                             />
                         </div>
                     </div>
@@ -1814,19 +3021,86 @@ const OrderForm: React.FC<{
                         </div>
                     </div>
                     <div className="p-4">
-                        <div className="mb-6">
-                            <div className="flex justify-between text-sm mb-1">
-                                <span className="font-medium text-green-700">שולם: ₪{totalPaid.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
-                                <span className="font-medium text-red-600">יתרה לתשלום: ₪{balanceDue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                        {invoiceSummary && (
+                            <div className="mb-3 p-3 bg-white border border-slate-200 rounded-lg">
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-2">
+                                    <div className="flex flex-col gap-1">
+                                        <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wide">סטטוס חשבונית</span>
+                                        {!invoiceSummary.hasInvoices ? (
+                                            <span className="inline-flex items-center gap-1.5 w-fit px-2 py-1 rounded bg-red-100 text-red-800 font-semibold text-xs border border-red-200">
+                                                <span className="w-1.5 h-1.5 rounded-full bg-red-500" /> לא הוצאה
+                                            </span>
+                                        ) : invoiceSummary.netInvoiced >= totalDueWithVat - 1 ? (
+                                            <span className="inline-flex items-center gap-1.5 w-fit px-2 py-1 rounded bg-green-100 text-green-800 font-semibold text-xs border border-green-200">
+                                                <span className="w-1.5 h-1.5 rounded-full bg-green-500" /> הוצאה מלאה
+                                            </span>
+                                        ) : (
+                                            <div className="flex flex-col gap-0.5">
+                                                <span className="inline-flex items-center gap-1.5 w-fit px-2 py-1 rounded bg-amber-100 text-amber-900 font-semibold text-xs border border-amber-300">
+                                                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500" /> חלקי
+                                                </span>
+                                                <span className="text-[10px] text-slate-600">₪{invoiceSummary.netInvoiced.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} חויב / ₪{totalDueWithVat.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} הזמנה</span>
+                                            </div>
+                                        )}
+                                    </div>
+                                    <div className="flex flex-col gap-1">
+                                        <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wide">סטטוס קבלה</span>
+                                        {totalPaid <= 0 ? (
+                                            <span className="inline-flex items-center gap-1.5 w-fit px-2 py-1 rounded bg-red-100 text-red-800 font-semibold text-xs border border-red-200">
+                                                <span className="w-1.5 h-1.5 rounded-full bg-red-500" /> לא הוצאה
+                                            </span>
+                                        ) : totalPaid >= (invoiceSummary.netInvoiced || totalDueWithVat) - 1 ? (
+                                            <span className="inline-flex items-center gap-1.5 w-fit px-2 py-1 rounded bg-green-100 text-green-800 font-semibold text-xs border border-green-200">
+                                                <span className="w-1.5 h-1.5 rounded-full bg-green-500" /> הוצאה מלאה
+                                            </span>
+                                        ) : (
+                                            <div className="flex flex-col gap-0.5">
+                                                <span className="inline-flex items-center gap-1.5 w-fit px-2 py-1 rounded bg-amber-100 text-amber-900 font-semibold text-xs border border-amber-300">
+                                                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500" /> חלקי
+                                                </span>
+                                                <span className="text-[10px] text-slate-600">קבלות ₪{totalPaid.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                                {invoiceSummary.hasInvoices && invoiceSummary.netInvoiced > totalDueWithVat + 0.01 && invoiceSummary.netInvoiced <= totalDueWithVat + 1 && (
+                                    <p className="text-[10px] text-slate-500 mt-2 mb-1 italic">
+                                        סכום החשבונית (₪{invoiceSummary.netInvoiced.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}) מעוגל לעומת סה״כ ההזמנה (₪{totalDueWithVat.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })})
+                                    </p>
+                                )}
+                                {!isActiveDeal ? (
+                                    <div className="flex flex-wrap gap-2 pt-2 border-t border-slate-200 text-xs">
+                                        <span className="inline-flex items-center px-2 py-1 rounded bg-slate-100 text-slate-600 font-medium border border-slate-200">
+                                            עֶסקה לא פעילה – אין להנפיק חשבונית/קבלה
+                                        </span>
+                                    </div>
+                                ) : (invoiceSummary.netInvoiced < totalDueWithVat - 0.01 || totalPaid < invoiceSummary.netInvoiced - 0.01) && (
+                                    <div className="flex flex-wrap gap-2 pt-2 border-t border-slate-200 text-xs">
+                                        {invoiceSummary.netInvoiced < totalDueWithVat - 0.01 && (
+                                            <span className="inline-flex items-center px-2 py-1 rounded bg-amber-50 text-amber-800 font-semibold border border-amber-200">
+                                                יתרה להנפקה: ₪{(totalDueWithVat - invoiceSummary.netInvoiced).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                            </span>
+                                        )}
+                                        {totalPaid < invoiceSummary.netInvoiced - 0.01 && (
+                                            <span className="inline-flex items-center px-2 py-1 rounded bg-red-50 text-red-800 font-semibold border border-red-200">
+                                                יתרה לתשלום: ₪{(invoiceSummary.netInvoiced - totalPaid).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                            </span>
+                                        )}
+                                    </div>
+                                )}
                             </div>
-                            <div className="w-full bg-red-100 rounded-full h-3 overflow-hidden relative">
+                        )}
+                        <div className="mb-4">
+                            <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-xs mb-1.5">
+                                <span className="text-slate-600">שולם ₪{totalPaid.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} · יתרה ₪{displayBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} · סה״כ ₪{displayTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                                {(formData.payments || []).length === 0 && <span className="text-slate-400">טרם התקבלו תשלומים</span>}
+                            </div>
+                            <div className="w-full bg-red-100 rounded-full h-2 overflow-hidden relative">
                                 <div 
                                     className="bg-green-500 h-full transition-all duration-500" 
-                                    style={{ width: `${Math.min(100, (totalPaid / (totalDueWithVat || 1)) * 100)}%` }}
+                                    style={{ width: `${Math.min(100, (totalPaid / (displayTotal || 1)) * 100)}%` }}
                                 ></div>
-                                <div className="absolute top-0 right-0 h-full w-px bg-white opacity-50"></div>
                             </div>
-                            <div className="text-xs text-slate-400 mt-1 text-center">סה"כ לתשלום (כולל מע"מ): ₪{totalDueWithVat.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
                         </div>
                         {(formData.payments || []).length > 0 ? (
                             <div className="mb-4 overflow-x-auto">
@@ -1875,132 +3149,205 @@ const OrderForm: React.FC<{
                                                     </span>
                                                 </td>
                                                 <td className="px-3 py-2">
-                                                    {hasDocs ? (
-                                                        <button 
-                                                            type="button" 
-                                                            onClick={() => {
-                                                                const docs = payment.attachments && payment.attachments.length > 0 
-                                                                    ? payment.attachments 
-                                                                    : (payment.attachment ? [payment.attachment] : []);
-                                                                setViewingPaymentDocuments(docs);
-                                                            }}
-                                                            className="text-primary hover:text-indigo-800 flex items-center gap-1 text-xs font-medium"
-                                                        >
-                                                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
-                                                                <path fillRule="evenodd" d="M1 4a1 1 0 011-1h16a1 1 0 011 1v8a1 1 0 01-1 1H2a1 1 0 01-1-1V4zm12 4a3 3 0 11-6 0 3 3 0 016 0zM4 9a1 1 0 100-2 1 1 0 000 2zm13-1a1 1 0 11-2 0 1 1 0 012 0zM1.75 14.5a.75.75 0 000 1.5c4.417 0 8.693.603 12.749 1.73 1.111.309 2.251-.512 2.251-1.696v-.784a.75.75 0 00-1.5 0v.784a2.718 2.718 0 01-.529.134c-4.303 1.256-8.99 1.582-13.676.832H1.75z" clipRule="evenodd" />
-                                                            </svg>
-                                                            צפה ({docsCount})
-                                                        </button>
-                                                    ) : '-'}
+                                                    <div className="flex items-center gap-2 justify-end flex-wrap">
+                                                        {hasDocs && (
+                                                            <button 
+                                                                type="button" 
+                                                                onClick={() => {
+                                                                    const docs = payment.attachments && payment.attachments.length > 0 
+                                                                        ? payment.attachments 
+                                                                        : (payment.attachment ? [payment.attachment] : []);
+                                                                    setViewingPaymentDocuments(docs);
+                                                                }}
+                                                                className="text-primary hover:text-indigo-800 flex items-center gap-1 text-xs font-medium"
+                                                            >
+                                                                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+                                                                    <path fillRule="evenodd" d="M1 4a1 1 0 011-1h16a1 1 0 011 1v8a1 1 0 01-1 1H2a1 1 0 01-1-1V4zm12 4a3 3 0 11-6 0 3 3 0 016 0zM4 9a1 1 0 100-2 1 1 0 000 2zm13-1a1 1 0 11-2 0 1 1 0 012 0zM1.75 14.5a.75.75 0 000 1.5c4.417 0 8.693.603 12.749 1.73 1.111.309 2.251-.512 2.251-1.696v-.784a.75.75 0 00-1.5 0v.784a2.718 2.718 0 01-.529.134c-4.303 1.256-8.99 1.582-13.676.832H1.75z" clipRule="evenodd" />
+                                                                </svg>
+                                                                צפה ({docsCount})
+                                                            </button>
+                                                        )}
+                                                        {payment.method === PaymentMethod.CHECK && checkHasAttachments[payment.id] === true && (
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => {
+                                                                    mongoService.getCheckAttachments(payment.id).then(atts => {
+                                                                        if (atts.length > 0) setViewingPaymentDocuments(atts);
+                                                                    });
+                                                                }}
+                                                                className="p-1.5 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-colors"
+                                                                title="צפייה מהירה בתמונות/PDF של הצ'ק"
+                                                            >
+                                                                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                                                    <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                                                                    <path strokeLinecap="round" strokeLinejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                                                                </svg>
+                                                            </button>
+                                                        )}
+                                                        {!hasDocs && payment.method !== PaymentMethod.CHECK && '-'}
+                                                    </div>
                                                 </td>
                                                 <td className="px-3 py-2 text-left">
-                                                    <button 
-                                                        type="button" 
-                                                        onClick={(e) => { e.stopPropagation(); setPaymentIdToDelete(payment.id); }} 
-                                                        className="text-red-400 hover:text-red-600 p-1"
-                                                    >
-                                                        <DeleteIcon className="w-4 h-4"/>
-                                                    </button>
+                                                    {payment.notes?.includes('סונכרן מחשבונית ירוקה') ? (
+                                                        <span className="text-slate-400 text-xs" title="תשלום מסונכרן ממסמך – להסרה בטל שיוך המסמך במסמכים חשבונאיים">מסמך</span>
+                                                    ) : (payment.isImportPlaceholder || payment.notes === 'תקבול אוטומטי מייבוא') ? (
+                                                        <button 
+                                                            type="button" 
+                                                            onClick={(e) => { e.stopPropagation(); setPaymentIdToDelete(payment.id); }} 
+                                                            className="text-amber-600 hover:text-amber-800 p-1 font-medium text-xs"
+                                                            title="מחק תקבול אוטומטי מייבוא – לאחר המחיקה תוכל לשייך מסמך חשבונאי"
+                                                        >
+                                                            מחק תקבול אוטומטי
+                                                        </button>
+                                                    ) : (
+                                                        <button 
+                                                            type="button" 
+                                                            onClick={(e) => { e.stopPropagation(); setPaymentIdToDelete(payment.id); }} 
+                                                            className="text-red-400 hover:text-red-600 p-1"
+                                                            title="מחק תשלום"
+                                                        >
+                                                            <DeleteIcon className="w-4 h-4"/>
+                                                        </button>
+                                                    )}
                                                 </td>
                                             </tr>
                                         )})}
                                     </tbody>
                                 </table>
                             </div>
-                        ) : (
-                            <p className="text-center text-slate-400 text-sm mb-4 bg-slate-50 p-2 rounded">טרם התקבלו תשלומים.</p>
-                        )}
-                        {!isAddingPayment ? (
-                            <button 
-                                type="button" 
-                                onClick={() => { setIsAddingPayment(true); setNewPaymentData(prev => ({ ...prev, amount: balanceDue })); }}
-                                className="w-full py-2 border-2 border-dashed border-slate-300 rounded-lg text-slate-500 hover:border-emerald-500 hover:text-emerald-600 hover:bg-emerald-50 transition-colors text-sm font-medium flex items-center justify-center gap-2"
-                            >
-                                <PlusIcon className="w-4 h-4"/>
-                                הוסף תשלום חדש
+                        ) : null}
+                        <div className="mt-3 p-2.5 bg-blue-50/80 border border-blue-200/80 rounded-lg text-xs text-blue-800">
+                            <button type="button" onClick={() => setCollectionInfoExpanded(!collectionInfoExpanded)} className="flex items-center gap-2 w-full text-right hover:text-blue-900">
+                                <span>💡 מלא פרטי תקבול ביצירת &quot;חשבונית מס/קבלה&quot; או &quot;קבלה מתוך חשבונית&quot; — תשלומים מסונכרנים מחשבונית ירוקה</span>
+                                <span className="shrink-0 text-blue-600">{collectionInfoExpanded ? '▲' : '▼'}</span>
                             </button>
-                        ) : (
-                            <div className="bg-slate-50 p-4 rounded-lg border border-slate-200 animate-fadeIn">
-                                <h5 className="text-sm font-bold text-slate-700 mb-3">פרטי תשלום חדש</h5>
-                                <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-3">
-                                    <div>
-                                        <label className="block text-xs font-medium text-slate-600 mb-1">סכום</label>
-                                        <input type="number" value={newPaymentData.amount} onChange={e => setNewPaymentData({...newPaymentData, amount: parseFloat(e.target.value)})} className="w-full text-sm border-slate-300 rounded focus:ring-emerald-500 focus:border-emerald-500" />
-                                    </div>
-                                    <div>
-                                        <label className="block text-xs font-medium text-slate-600 mb-1">תאריך קבלה</label>
-                                        <input type="date" value={newPaymentData.date ? new Date(newPaymentData.date).toISOString().split('T')[0] : ''} onChange={e => setNewPaymentData({...newPaymentData, date: new Date(e.target.value)})} className="w-full text-sm border-slate-300 rounded focus:ring-emerald-500 focus:border-emerald-500" />
-                                    </div>
-                                    <div>
-                                        <label className="block text-xs font-medium text-slate-600 mb-1">אמצעי תשלום</label>
-                                        <select value={newPaymentData.method} onChange={e => setNewPaymentData({...newPaymentData, method: e.target.value as PaymentMethod})} className="w-full text-sm border-slate-300 rounded focus:ring-emerald-500 focus:border-emerald-500 bg-white">
-                                            {Object.values(PaymentMethod).map(m => <option key={m} value={m}>{m}</option>)}
-                                        </select>
-                                    </div>
-                                    <div>
-                                        <label className="block text-xs font-medium text-slate-600 mb-1">
-                                            {newPaymentData.method === PaymentMethod.CHECK ? 'מספר צ\'ק' : 'אסמכתא (4 ספרות)'}
-                                            {newPaymentData.method === PaymentMethod.CHECK && <span className="text-red-500">*</span>}
-                                        </label>
-                                        <input type="text" value={newPaymentData.reference} onChange={e => setNewPaymentData({...newPaymentData, reference: e.target.value})} className={`w-full text-sm border-slate-300 rounded focus:ring-emerald-500 focus:border-emerald-500 ${newPaymentData.method === PaymentMethod.CHECK && !newPaymentData.reference ? 'border-red-300' : ''}`} placeholder={newPaymentData.method === PaymentMethod.CHECK ? 'חובה להזין' : ''} />
-                                    </div>
+                            {collectionInfoExpanded && (
+                                <div className="mt-2 pt-2 border-t border-blue-200/60 space-y-1 text-blue-700">
+                                    <p>תשלומים שנוספים בחשבונית ירוקה (כולל מקבלות וחשבוניות מס+קבלה) מסונכרנים לכאן עם פרטים מלאים — אמצעי תשלום, אסמכתא (מס׳ צ׳ק / 4 ספרות). צ׳קים מופיעים בניהול צ׳קים נכנסים ובדוחות כספיים.</p>
                                 </div>
-                                {newPaymentData.method === PaymentMethod.CHECK && (
-                                    <div className="mb-3 p-2 bg-yellow-50 border border-yellow-200 rounded">
-                                        <label className="block text-xs font-bold text-yellow-800 mb-1">תאריך פירעון הצ'ק (חובה)</label>
-                                        <input type="date" value={newPaymentData.repaymentDate ? new Date(newPaymentData.repaymentDate).toISOString().split('T')[0] : ''} onChange={e => setNewPaymentData({...newPaymentData, repaymentDate: new Date(e.target.value)})} className="w-full md:w-1/2 text-sm border-yellow-300 rounded focus:ring-yellow-500 focus:border-yellow-500" required />
-                                    </div>
-                                )}
-                                <div className="mb-4">
-                                    <label className="block text-xs font-medium text-slate-600 mb-1">
-                                        {newPaymentData.method === PaymentMethod.CHECK ? 'צילום הצ\'ק (תמונה/PDF)' : 'אסמכתא (תמונה/PDF)'}
-                                    </label>
-                                    <div className="flex items-center gap-2">
-                                        <label className="cursor-pointer bg-white border border-slate-300 hover:bg-slate-50 px-3 py-1.5 rounded text-xs font-medium flex items-center gap-1 text-slate-600">
-                                            <PlusIcon className="w-3 h-3"/>
-                                            בחר קבצים
-                                            <input type="file" multiple className="hidden" onChange={handlePaymentFileChange} accept="image/*,.pdf" />
-                                        </label>
-                                        <span className="text-[10px] text-slate-400">ניתן להעלות מספר קבצים</span>
-                                    </div>
-                                    {newPaymentAttachments.length > 0 && (
-                                        <div className="flex gap-2 mt-2 overflow-x-auto pb-2">
-                                            {newPaymentAttachments.map(file => (
-                                                <div key={file.id} className="relative group w-16 h-16 shrink-0 border rounded bg-white overflow-hidden">
-                                                    {file.type.startsWith('image/') ? (
-                                                        <img src={file.dataUrl} alt="Preview" className="w-full h-full object-cover" />
-                                                    ) : (
-                                                        <div className="w-full h-full flex items-center justify-center bg-slate-100 text-[9px] text-slate-500 font-bold p-1 text-center break-all">
-                                                            {file.fileName}
-                                                        </div>
-                                                    )}
-                                                    <button 
-                                                        type="button" 
-                                                        onClick={(e) => { e.stopPropagation(); removePaymentAttachment(file.id); }}
-                                                        className="absolute top-0 right-0 bg-red-500 text-white rounded-bl p-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
-                                                    >
-                                                        <DeleteIcon className="w-3 h-3"/>
-                                                    </button>
-                                                </div>
-                                            ))}
-                                        </div>
-                                    )}
-                                </div>
-                                <div className="flex justify-end gap-2 border-t border-slate-200 pt-3">
-                                    <button type="button" onClick={() => { setIsAddingPayment(false); setNewPaymentAttachments([]); }} className="px-3 py-1.5 text-xs font-medium text-slate-600 bg-white border border-slate-300 rounded hover:bg-slate-50">ביטול</button>
-                                    <button type="button" onClick={handleAddPayment} className="px-3 py-1.5 text-xs font-medium text-white bg-emerald-600 rounded hover:bg-emerald-700 shadow-sm">שמור תשלום</button>
-                                </div>
-                            </div>
-                        )}
+                            )}
+                        </div>
                     </div>
                 </div>
             </div>
+
+            {/* GreenInvoice Documents Section */}
+            {isEditMode && order && (
+                <div className="space-y-6">
+                    <h3 className="text-xl font-semibold text-slate-800 border-b pb-2">מסמכים חשבונאיים</h3>
+                    <div className="bg-slate-50 p-4 rounded-lg border border-slate-200">
+                        <DocumentViewer
+                            order={order}
+                            customerGreenInvoiceClientId={customers.find(c => c.id === order.customerId)?.greenInvoiceClientId}
+                            canCancelDocument={isAdmin}
+                            onDownload={handleDownloadDocument}
+                            onOpenInGreenInvoice={handleOpenInGreenInvoice}
+                            onOpenCreateModal={(mode, fromDocumentType, sourceDocumentId) => {
+                                setCreateDocumentModalMode(mode);
+                                setCreateDocumentModalFromType(fromDocumentType);
+                                setCreateDocumentModalSourceId(sourceDocumentId);
+                                setIsCreateDocumentModalOpen(true);
+                            }}
+                            onCancelDocument={async (documentId, type) => {
+                                if (type === 'invoice') {
+                                    // חשבונית מס: יצירת חשבונית זיכוי דרך API
+                                    try {
+                                        await handleCreateDocument('credit_invoice', 'api', undefined, { sourceDocumentId: documentId });
+                                        addActivity('נוצרה חשבונית זיכוי');
+                                        alert('המסמך נוצר בהצלחה בחשבונית ירוקה!');
+                                    } catch (error: any) {
+                                        alert(`שגיאה ביצירת חשבונית זיכוי: ${error.message || error}`);
+                                    }
+                                } else if (type === 'invoice_receipt') {
+                                    // חשבונית מס+קבלה: דורש חשבונית זיכוי + קבלה שלילית — נפתח בחשבונית ירוקה (זרימה מלאה)
+                                    handleOpenInGreenInvoice(documentId, type);
+                                    addActivity('נפתח מסמך בחשבונית ירוקה לביטול (חשבונית זיכוי + קבלה שלילית)');
+                                } else if (type === 'receipt') {
+                                    // קבלה: ביטול = הפקת קבלה שלילית — נפתח בחשבונית ירוקה
+                                    handleOpenInGreenInvoice(documentId, type);
+                                    addActivity('נפתח מסמך בחשבונית ירוקה לביטול קבלה (הפקת קבלה שלילית)');
+                                }
+                            }}
+                            onLinkDocument={async (documentId) => {
+                                if (!order?.id) return;
+                                const token = localStorage.getItem('authToken');
+                                const res = await fetch(`/api/green-invoice/orders/${order.id}/link-document`, {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                                    body: JSON.stringify({ documentId })
+                                });
+                                let data: { error?: string; errors?: string[] } = {};
+                                try {
+                                    data = await res.json();
+                                } catch {
+                                    if (!res.ok) throw new Error(`שגיאה בשיוך מסמך (${res.status})`);
+                                }
+                                if (!res.ok) {
+                                    const msg = data.error || (Array.isArray(data.errors) && data.errors[0]) || 'שגיאה בשיוך מסמך';
+                                    throw new Error(msg);
+                                }
+                                const paymentsAdded = data.paymentsAdded ?? 0;
+                                const newPayments = data.orderUpdates?.payments;
+                                const linkLogEvent: TimelineEvent = {
+                                    id: `log_link_${Date.now()}`,
+                                    timestamp: new Date(),
+                                    user: loggedInUserName,
+                                    type: 'LOG',
+                                    content: `שויך מסמך חשבונית ירוקה להזמנה (${paymentsAdded} תשלומים)`
+                                };
+                                setFormData(prev => ({
+                                    ...prev,
+                                    ...(newPayments && { payments: newPayments }),
+                                    timeline: [linkLogEvent, ...prev.timeline]
+                                }));
+                                addActivity(`שויך מסמך חשבונית ירוקה להזמנה (${paymentsAdded} תשלומים)`, { entityType: 'order', entityId: order.id, action: 'update', metadata: { orderNumber: order.orderNumber, paymentsAdded } });
+                                if (newPayments && newPayments.length > 0) {
+                                    const updatedOrder = { ...formData, payments: newPayments, timeline: [linkLogEvent, ...(formData.timeline || [])] };
+                                    await onSave(updatedOrder, true);
+                                }
+                            }}
+                        />
+                    </div>
+                </div>
+            )}
 
              <div className="space-y-6">
                 <h3 className="text-xl font-semibold text-slate-800 border-b pb-2">קבצים וגלריה</h3>
                 <OrderFileManager 
                     attachments={formData.attachments} 
-                    onUpdate={(newAttachments) => setFormData(prev => ({ ...prev, attachments: newAttachments }))} 
+                    onUpdate={(newAttachments) => {
+                        setFormData(prev => {
+                            const prevAtts = prev.attachments || [];
+                            const prevIds = new Set(prevAtts.map(a => a.id));
+                            const newIds = new Set(newAttachments.map(a => a.id));
+                            const added = newAttachments.filter(a => !prevIds.has(a.id));
+                            const removed = prevAtts.filter(a => !newIds.has(a.id));
+                            const newLogEvents: TimelineEvent[] = [];
+                            added.forEach(att => {
+                                newLogEvents.push({
+                                    id: `log_att_${Date.now()}_${att.id}`,
+                                    timestamp: new Date(),
+                                    user: loggedInUserName,
+                                    type: 'LOG',
+                                    content: `הועלה קובץ: ${att.fileName}`
+                                });
+                            });
+                            removed.forEach(att => {
+                                newLogEvents.push({
+                                    id: `log_att_${Date.now()}_${att.id}`,
+                                    timestamp: new Date(),
+                                    user: loggedInUserName,
+                                    type: 'LOG',
+                                    content: `הוסר קובץ: ${att.fileName}`
+                                });
+                            });
+                            return {
+                                ...prev,
+                                attachments: newAttachments,
+                                timeline: [...newLogEvents, ...(prev.timeline || [])]
+                            };
+                        });
+                    }} 
                 />
             </div>
 
@@ -2046,19 +3393,19 @@ const OrderForm: React.FC<{
                         <button type="button" onClick={() => setNewTimelineEntry(prev => ({ ...prev, type: 'NOTE' }))} className={`px-4 py-2 text-sm font-medium ${newTimelineEntry.type === 'NOTE' ? 'border-b-2 border-primary text-primary' : 'text-slate-500'}`}>הוסף הערה</button>
                          <button type="button" onClick={() => setNewTimelineEntry(prev => ({ ...prev, type: 'TASK' }))} className={`px-4 py-2 text-sm font-medium ${newTimelineEntry.type === 'TASK' ? 'border-b-2 border-primary text-primary' : 'text-slate-500'}`}>הוסף משימה</button>
                     </div>
-                    <textarea value={newTimelineEntry.content} onChange={e => setNewTimelineEntry(prev => ({ ...prev, content: e.target.value }))} rows={3} placeholder={newTimelineEntry.type === 'NOTE' ? 'רשום עדכון...' : 'תיאור המשימה...'} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+                    <AutoResizeTextarea value={newTimelineEntry.content} onChange={e => setNewTimelineEntry(prev => ({ ...prev, content: e.target.value }))} placeholder={newTimelineEntry.type === 'NOTE' ? 'רשום עדכון...' : 'תיאור המשימה...'} minHeight={56} maxHeight={280} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" />
                     {newTimelineEntry.type === 'TASK' && (
                         <div className="grid grid-cols-2 gap-4 mt-3">
                             <div>
                                 <label className="block text-xs font-medium text-slate-600">שייך ל</label>
-                                <select value={newTimelineEntry.assigneeId} onChange={e => setNewTimelineEntry(prev => ({...prev, assigneeId: e.target.value}))} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm">
+                                <select value={newTimelineEntry.assigneeId} onChange={e => setNewTimelineEntry(prev => ({...prev, assigneeId: e.target.value}))} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm">
                                     <option value="">בחר עובד (ריק = אני)</option>
                                     {employees.map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
                                 </select>
                             </div>
                             <div>
                                 <label className="block text-xs font-medium text-slate-600">תאריך יעד</label>
-                                <input type="date" value={newTimelineEntry.dueDate} onChange={e => setNewTimelineEntry(prev => ({...prev, dueDate: e.target.value}))} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+                                <input type="date" value={newTimelineEntry.dueDate} onChange={e => setNewTimelineEntry(prev => ({...prev, dueDate: e.target.value}))} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-sm" />
                             </div>
                         </div>
                     )}
@@ -2073,7 +3420,11 @@ const OrderForm: React.FC<{
                          <button type="button" onClick={() => setTimelineFilter('SYSTEM')} className={`px-3 py-1 text-xs rounded-full border transition-colors ${timelineFilter === 'SYSTEM' ? 'bg-gray-600 text-white border-gray-600' : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50'}`}>יומן מערכת</button>
                     </div>
                     <div className="space-y-4 max-h-96 overflow-y-auto pr-2 custom-scrollbar">
-                        {filteredTimeline.sort((a,b) => b.timestamp.getTime() - a.timestamp.getTime()).map(event => {
+                        {filteredTimeline
+                            .map(event => ({ ...event, _ts: event.timestamp instanceof Date ? event.timestamp : new Date(event.timestamp) }))
+                            .sort((a, b) => b._ts.getTime() - a._ts.getTime())
+                            .map(event => {
+                            const eventTime = event.timestamp instanceof Date ? event.timestamp : new Date(event.timestamp);
                             const getTimelineIcon = () => {
                                 switch (event.type) {
                                     case 'NOTE': return <NoteIcon className="h-5 w-5 text-slate-500" />;
@@ -2092,7 +3443,7 @@ const OrderForm: React.FC<{
                                     <div className="flex-1">
                                         <div className="text-sm">
                                             <span className="font-semibold text-slate-800">{event.user}</span>
-                                            <span className="text-xs text-slate-500 ms-2">{event.timestamp.toLocaleString('he-IL')}</span>
+                                            <span className="text-xs text-slate-500 ms-2">{eventTime.toLocaleString('he-IL')}</span>
                                         </div>
                                         <div className={`mt-1 text-sm text-slate-700 ${event.type === 'TASK' && event.isCompleted ? 'opacity-80' : ''}`}>
                                             {event.type === 'TASK' ? (
@@ -2178,40 +3529,287 @@ const OrderForm: React.FC<{
                 )}
                 <div className="flex space-x-2 space-x-reverse">
                     <button type="button" onClick={onCancel} className="px-4 py-2 bg-slate-200 text-slate-800 rounded-md hover:bg-slate-300">ביטול</button>
-                    <button type="submit" className="px-4 py-2 bg-primary text-white rounded-md hover:bg-indigo-700">שמור הזמנה</button>
+                    {!readOnly && <button type="submit" className="px-4 py-2 bg-primary text-white rounded-md hover:bg-indigo-700">שמור הזמנה</button>}
                 </div>
             </div>
         </form>
+        {isProductSelectorOpen && productSelectorFor && (
+            <ProductSelectorModal
+                isOpen={isProductSelectorOpen}
+                onClose={() => {
+                    productSelectionCounterRef.current = 0; // Reset counter
+                    setIsProductSelectorOpen(false);
+                    setProductSelectorFor(null);
+                }}
+                onSelect={handleProductSelect}
+                suppliers={suppliers}
+                orderId={order?.id}
+                orderNumber={order?.orderNumber}
+                orderStatus={order?.orderStatus}
+            />
+        )}
+        {serviceDetailsModalForIndex !== null && formData.lineItems[serviceDetailsModalForIndex] && (() => {
+            const lineItem = formData.lineItems[serviceDetailsModalForIndex];
+            const details = lineItem.serviceDetails ?? {};
+            return (
+                <ServiceDetailsModal
+                    scheduledDate={details.scheduledDate}
+                    address={details.address ?? ''}
+                    siteContactName={details.siteContactName ?? ''}
+                    siteContactDetails={details.siteContactDetails ?? ''}
+                    notes={details.notes ?? ''}
+                    onClose={() => setServiceDetailsModalForIndex(null)}
+                    onSave={(payload) => updateLineItemServiceDetails(serviceDetailsModalForIndex, payload)}
+                />
+            );
+        })()}
+        {sendItemModalOpen && sendItemForIndex !== null && formData.lineItems[sendItemForIndex] && (
+            <SendItemToSuppliersModal
+                isOpen={sendItemModalOpen}
+                onClose={() => {
+                    setSendItemModalOpen(false);
+                    setSendItemForIndex(null);
+                }}
+                lineItem={formData.lineItems[sendItemForIndex]}
+                suppliers={suppliers}
+                onSend={async (supplierIds, methods) => {
+                    try {
+                        const orderForRequest = {
+                            ...(order || {}),
+                            id: order?.id || 'temp',
+                            orderNumber: order?.orderNumber || formData.description || 'טיוטה',
+                            ...formData,
+                            lineItems: formData.lineItems
+                        } as Order;
+
+                        const lineItem = formData.lineItems[sendItemForIndex!];
+                        const requests = [{
+                            lineItemId: lineItem.id,
+                            supplierIds,
+                            methods
+                        }];
+
+                        const result = await sendQuoteRequests(orderForRequest, requests);
+                        
+                        // Handle WhatsApp URLs - open in new tabs
+                        const whatsappUrls: string[] = [];
+                        result.results?.[0]?.results?.forEach((supplierResult: any) => {
+                            if (supplierResult.success && supplierResult.method === 'WHATSAPP' && supplierResult.contact) {
+                                whatsappUrls.push(supplierResult.contact);
+                            }
+                        });
+
+                        // Open WhatsApp URLs
+                        whatsappUrls.forEach(url => {
+                            window.open(url, '_blank');
+                        });
+
+                        const successCount = result.results?.[0]?.results?.filter((r: any) => r.success).length || 0;
+
+                        if (successCount === supplierIds.length) {
+                            alert(`שליחה הושלמה בהצלחה ל-${successCount} ספקים`);
+                        } else {
+                            alert(`שליחה הושלמה חלקית: ${successCount} מתוך ${supplierIds.length} ספקים`);
+                        }
+                    } catch (error: any) {
+                        console.error('Error sending quote requests:', error);
+                        alert(`שגיאה בשליחת בקשות: ${error.message || 'שגיאה לא ידועה'}`);
+                    }
+                }}
+            />
+        )}
+        {sendOrderModalOpen && (
+            <SendOrderToSuppliersModal
+                isOpen={sendOrderModalOpen}
+                onClose={() => setSendOrderModalOpen(false)}
+                order={{
+                    ...(order || {}),
+                    id: order?.id || 'temp',
+                    orderNumber: order?.orderNumber || formData.description || 'טיוטה',
+                    ...formData,
+                    lineItems: formData.lineItems
+                } as Order}
+                suppliers={suppliers}
+                onSend={async (requests) => {
+                    try {
+                        const orderForRequest = {
+                            ...(order || {}),
+                            id: order?.id || 'temp',
+                            orderNumber: order?.orderNumber || formData.description || 'טיוטה',
+                            ...formData,
+                            lineItems: formData.lineItems
+                        } as Order;
+
+                        const result = await sendQuoteRequests(orderForRequest, requests);
+                        
+                        // Handle WhatsApp URLs - open in new tabs
+                        const whatsappUrls: string[] = [];
+                        result.results?.forEach((lineItemResult: any) => {
+                            lineItemResult.results?.forEach((supplierResult: any) => {
+                                if (supplierResult.success && supplierResult.method === 'WHATSAPP' && supplierResult.contact) {
+                                    whatsappUrls.push(supplierResult.contact);
+                                }
+                            });
+                        });
+
+                        // Open WhatsApp URLs
+                        whatsappUrls.forEach(url => {
+                            window.open(url, '_blank');
+                        });
+
+                        const successCount = result.results?.reduce((sum: number, lineItemResult: any) => 
+                            sum + (lineItemResult.results?.filter((r: any) => r.success).length || 0), 0) || 0;
+                        const totalCount = requests.reduce((sum, req) => sum + req.supplierIds.length, 0);
+
+                        if (successCount === totalCount) {
+                            alert(`שליחה הושלמה בהצלחה ל-${successCount} ספקים`);
+                        } else {
+                            alert(`שליחה הושלמה חלקית: ${successCount} מתוך ${totalCount} ספקים`);
+                        }
+                    } catch (error: any) {
+                        console.error('Error sending quote requests:', error);
+                        alert(`שגיאה בשליחת בקשות: ${error.message || 'שגיאה לא ידועה'}`);
+                    }
+                }}
+            />
+        )}
+    </>
     );
 };
 
-const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, setCustomers, suppliers, setSuppliers, employees, addActivity, initialOpenOrderId, onOrderOpened, statusConfigs, getNextOrderNumber, vatRate }) => {
+const ORDERS_VIEW_STORAGE_KEY = 'eli_orders_view';
+
+function getOrdersViewFromStorage(): Partial<{
+    searchTerm: string;
+    customerFilter: string[];
+    customerIsImportPlaceholderOnly: boolean;
+    supplierFilter: string[];
+    employeeFilter: string[];
+    orderStatusFilter: string[];
+    paymentStatusFilter: string[];
+    monthFilter: string;
+    yearFilter: string;
+    startDateFilter: string;
+    endDateFilter: string;
+    dateFilterType: 'ORDER_DATE' | 'DEAL_DATE';
+    sortBy: 'date' | 'dueDate' | 'updatedAt';
+}> {
+    try {
+        const s = sessionStorage.getItem(ORDERS_VIEW_STORAGE_KEY);
+        if (s) return JSON.parse(s);
+    } catch (_) {}
+    return {};
+}
+
+const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, setOrdersLocal, customers, setCustomers, suppliers, setSuppliers, employees, addActivity, initialOpenOrderId, onOrderOpened, openNewOrderRequest, onClearedOpenNewOrderRequest, openNewOrderWithCustomerId, openNewOrderWithPhone, onClearedNewOrderPrefill, statusConfigs, getNextOrderNumber, vatRate, onNavigateToPage, setSelectedCustomerId }) => {
+    const { user } = useAuth();
+    const { trackViewStart, trackViewEnd } = useViewTracker();
+    const isAdmin = user?.roleType === 'ADMIN';
+    /** שם המשתמש המחובר — לכתיבה ביומן (שינוי סטטוס מהטבלה וכו') */
+    const loggedInUserName = (user && employees.find(e => e.id === user.id)?.name) || user?.name || 'מערכת';
     const [isModalOpen, setIsModalOpen] = useState(false);
+    const [isImportModalOpen, setIsImportModalOpen] = useState(false);
     const [editingOrder, setEditingOrder] = useState<Order | null>(null);
-    const [searchTerm, setSearchTerm] = useState('');
-    const [customerFilter, setCustomerFilter] = useState<string[]>([]);
-    const [supplierFilter, setSupplierFilter] = useState<string[]>([]);
-    const [employeeFilter, setEmployeeFilter] = useState<string[]>([]); // New Employee Filter
-    const [orderStatusFilter, setOrderStatusFilter] = useState<string[]>([]);
-    const [paymentStatusFilter, setPaymentStatusFilter] = useState<PaymentStatus[]>([]);
-    const [monthFilter, setMonthFilter] = useState<string>('all');
-    const [yearFilter, setYearFilter] = useState<string>('all');
-    const [startDateFilter, setStartDateFilter] = useState<string>(''); // NEW: Date Range Start
-    const [endDateFilter, setEndDateFilter] = useState<string>('');     // NEW: Date Range End
-    const [dateFilterType, setDateFilterType] = useState<'ORDER_DATE' | 'DEAL_DATE'>('ORDER_DATE'); // New Date Type Filter
-    const [isCollectionMode, setIsCollectionMode] = useState(false);
-    const [showCompletedOrders, setShowCompletedOrders] = useState(false); 
+    const [newOrderPrefillCustomerId, setNewOrderPrefillCustomerId] = useState<string | undefined>(undefined);
+    const [newOrderPrefillPhone, setNewOrderPrefillPhone] = useState<string | undefined>(undefined);
+    const [orderFormHeaderContent, setOrderFormHeaderContent] = useState<React.ReactNode>(null);
+    const [orderLockedByOther, setOrderLockedByOther] = useState<{ userName: string } | null>(null);
+    const savedView = useRef(getOrdersViewFromStorage()).current;
+    const [searchTerm, setSearchTerm] = useState(() => savedView.searchTerm ?? '');
+    const [debouncedSearchTerm, setDebouncedSearchTerm] = useState(() => savedView.searchTerm ?? '');
+    const abortControllerRef = useRef<AbortController | null>(null);
+    /** Order IDs with in-flight status change; refetch result must not overwrite these. */
+    const pendingStatusUpdateIdsRef = useRef<Set<string>>(new Set());
+    const [customerFilter, setCustomerFilter] = useState<string[]>(() => Array.isArray(savedView.customerFilter) ? savedView.customerFilter : []);
+    const [customerIsImportPlaceholderOnly, setCustomerIsImportPlaceholderOnly] = useState(() => savedView.customerIsImportPlaceholderOnly ?? false);
+    const [supplierFilter, setSupplierFilter] = useState<string[]>(() => Array.isArray(savedView.supplierFilter) ? savedView.supplierFilter : []);
+    const [employeeFilter, setEmployeeFilter] = useState<string[]>(() => Array.isArray(savedView.employeeFilter) ? savedView.employeeFilter : []);
+    const [orderStatusFilter, setOrderStatusFilter] = useState<string[]>(() => Array.isArray(savedView.orderStatusFilter) ? savedView.orderStatusFilter : []);
+    const [paymentStatusFilter, setPaymentStatusFilter] = useState<PaymentStatus[]>(() => Array.isArray(savedView.paymentStatusFilter) ? savedView.paymentStatusFilter : []);
+    const [monthFilter, setMonthFilter] = useState<string>(() => savedView.monthFilter ?? 'all');
+    const [yearFilter, setYearFilter] = useState<string>(() => savedView.yearFilter ?? 'all');
+    const [startDateFilter, setStartDateFilter] = useState<string>(() => savedView.startDateFilter ?? '');
+    const [endDateFilter, setEndDateFilter] = useState<string>(() => savedView.endDateFilter ?? '');
+    const [dateFilterType, setDateFilterType] = useState<'ORDER_DATE' | 'DEAL_DATE'>(() => savedView.dateFilterType ?? 'ORDER_DATE');
+    const [sortBy, setSortBy] = useState<'date' | 'dueDate' | 'updatedAt'>(() => savedView.sortBy ?? 'updatedAt');
+    
+    // Pagination state
+    const [currentPage, setCurrentPage] = useState(1);
+    const [pageSize, setPageSize] = useState(50);
+    const [totalCount, setTotalCount] = useState(0);
+    const [loading, setLoading] = useState(false);
+    const [paginatedOrders, setPaginatedOrders] = useState<Order[]>([]);
+    const [summaryTotals, setSummaryTotals] = useState({ totalAmount: 0, totalProfit: 0, totalBalance: 0, totalCost: 0, totalAmountInclVat: 0, totalBalanceInclVat: 0 });
+    const [exportingExcel, setExportingExcel] = useState(false);
+    /** When set, show confirm modal for status change; on confirm run update (like Save order). */
+    const [pendingStatusChange, setPendingStatusChange] = useState<{ orderId: string; order: Order; newStatus: string } | null>(null);
+    const [statusChangeSaving, setStatusChangeSaving] = useState(false);
+    /** Mobile: filters panel (drawer) open. */
+    const [filtersPanelOpen, setFiltersPanelOpen] = useState(false);
 
     const customerOptions = useMemo(() => customers.map(c => ({ value: c.id, label: c.name })), [customers]);
     const supplierOptions = useMemo(() => suppliers.map(s => ({ value: s.id, label: s.name })), [suppliers]);
     const employeeOptions = useMemo(() => employees.map(e => ({ value: e.id, label: e.name })), [employees]);
-    const orderStatusOptions = useMemo(() => (statusConfigs || []).map(s => ({ value: s.label, label: s.label })), [statusConfigs]);
+    const orderStatusOptions = useMemo(() => (statusConfigs || []).map(s => ({ value: s.id, label: s.label })), [statusConfigs]);
+    const defaultOrderStatusIds = useMemo(() => {
+        if (!statusConfigs?.length) return [];
+        return statusConfigs
+            .filter(c => (c.isActiveDeal && !c.isCompleted) || c.isLead || c.isQuote)
+            .map(c => c.id);
+    }, [statusConfigs]);
+    const defaultOrderStatusIdsForDueDate = useMemo(() => {
+        if (!statusConfigs?.length) return [];
+        return statusConfigs.filter(c => c.isActiveDeal).map(c => c.id);
+    }, [statusConfigs]);
+    // Migrate saved filter from labels to ids (once statusConfigs available)
+    const orderStatusFilterMigratedRef = useRef(false);
+    useEffect(() => {
+        if (!statusConfigs?.length || orderStatusFilterMigratedRef.current) return;
+        orderStatusFilterMigratedRef.current = true;
+        setOrderStatusFilter(prev => {
+            const ids = new Set(statusConfigs.map(c => c.id));
+            const hasLegacyLabels = prev.some(f => !ids.has(f));
+            if (!hasLegacyLabels) return prev;
+            const migrated = prev.flatMap(f => {
+                const c = statusConfigs.find(x => x.id === f || x.label === f);
+                return c ? [c.id] : [];
+            });
+            return [...new Set(migrated)];
+        });
+    }, [statusConfigs]);
+    // When no saved orderStatusFilter or saved is [], pre-select defaults so dropdown shows checkmarks; use dueDate default when sortBy is מועד תשלום
+    useEffect(() => {
+        if (!statusConfigs?.length) return;
+        const saved = savedView.orderStatusFilter;
+        if (saved !== undefined && saved.length > 0) return; // User saved a non-empty selection – respect it
+        const defaultIds = sortBy === 'dueDate' ? defaultOrderStatusIdsForDueDate : defaultOrderStatusIds;
+        if (defaultIds.length === 0) return;
+        setOrderStatusFilter(defaultIds);
+    }, [statusConfigs, defaultOrderStatusIds, defaultOrderStatusIdsForDueDate, sortBy]);
+    // When user switches sort to/from מועד תשלום, sync status filter to the matching default so חובות are not missed
+    const prevSortByRef = useRef(sortBy);
+    useEffect(() => {
+        if (prevSortByRef.current === sortBy) return;
+        const prev = prevSortByRef.current;
+        prevSortByRef.current = sortBy;
+        const setEqual = (a: string[], b: string[]) => a.length === b.length && a.every(id => b.includes(id));
+        if (sortBy === 'dueDate' && setEqual(orderStatusFilter, defaultOrderStatusIds)) {
+            setOrderStatusFilter(defaultOrderStatusIdsForDueDate);
+        } else if (sortBy !== 'dueDate' && setEqual(orderStatusFilter, defaultOrderStatusIdsForDueDate)) {
+            setOrderStatusFilter(defaultOrderStatusIds);
+        }
+    }, [sortBy, orderStatusFilter, defaultOrderStatusIds, defaultOrderStatusIdsForDueDate]);
+    const isStatusFilterDefault = useMemo(() => {
+        const defaultIds = sortBy === 'dueDate' ? defaultOrderStatusIdsForDueDate : defaultOrderStatusIds;
+        return orderStatusFilter.length === defaultIds.length && orderStatusFilter.every(id => defaultIds.includes(id));
+    }, [sortBy, orderStatusFilter, defaultOrderStatusIds, defaultOrderStatusIdsForDueDate]);
     const paymentStatusOptions = useMemo(() => PAYMENT_STATUSES_ORDERED.map(s => ({ value: s, label: s })), []);
 
+    // Generate available years (current year and last 5 years)
     const availableYears = useMemo(() => {
-        const years = new Set(orders.map(o => new Date(o.date).getFullYear()));
-        return Array.from(years).sort((a: number, b: number = 0) => b - a);
-    }, [orders]);
+        const currentYear = new Date().getFullYear();
+        return Array.from({ length: 6 }, (_, i) => currentYear - i);
+    }, []);
     
     const availableMonths = [
         { value: 1, name: 'ינואר' }, { value: 2, name: 'פברואר' }, { value: 3, name: 'מרץ' },
@@ -2220,77 +3818,297 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
         { value: 10, name: 'אוקטובר' }, { value: 11, name: 'נובמבר' }, { value: 12, name: 'דצמבר' },
     ];
 
-    const handleAddOrder = () => {
+    const closeOrderModal = React.useCallback(() => {
+        const orderId = editingOrder?.id;
+        if (orderId) trackViewEnd(`order_${orderId}`);
+        setOrderFormHeaderContent(null);
+        setOrderLockedByOther(null);
         setEditingOrder(null);
+        setNewOrderPrefillCustomerId(undefined);
+        setNewOrderPrefillPhone(undefined);
+        setIsModalOpen(false);
+        if (orderId && user?.id) {
+            mongoService.releaseOrderLock(orderId).catch(() => {});
+        }
+    }, [editingOrder?.id, user?.id, trackViewEnd]);
+
+    const handleEditOrder = async (order: Order) => {
+        setOrderLockedByOther(null);
+        setEditingOrder(order);
+        trackViewStart(`order_${order.id}`, 'order', order.id, order.orderNumber);
         setIsModalOpen(true);
+        if (order.id && user?.id) {
+            try {
+                const result = await mongoService.acquireOrderLock(order.id, user.name || undefined);
+                if (!result.success && result.lockedBy) {
+                    setOrderLockedByOther({ userName: result.lockedBy.userName });
+                }
+            } catch {
+                setOrderLockedByOther({ userName: 'משתמש אחר' });
+            }
+        }
+        // Always fetch latest from server – single source of truth (fixes mismatch between Dashboard/Orders)
+        try {
+            const freshOrder = await mongoService.getOrderById(order.id);
+            setEditingOrder(freshOrder);
+            setOrdersLocal(prev => prev.map(o => o.id === freshOrder.id ? freshOrder : o));
+            setPaginatedOrders(prev => prev.map(o => o.id === freshOrder.id ? freshOrder : o));
+        } catch (err) {
+            console.error('Failed to fetch fresh order:', err);
+        }
     };
 
-    const handleEditOrder = (order: Order) => {
-        setEditingOrder(order);
-        setIsModalOpen(true);
-    };
+    // Debounce search: update debouncedSearchTerm 350ms after user stops typing
+    useEffect(() => {
+        const t = setTimeout(() => setDebouncedSearchTerm(searchTerm), 350);
+        return () => clearTimeout(t);
+    }, [searchTerm]);
+
+    // Persist filters/view to sessionStorage so they survive navigation between pages
+    useEffect(() => {
+        try {
+            sessionStorage.setItem(ORDERS_VIEW_STORAGE_KEY, JSON.stringify({
+                searchTerm,
+                customerFilter,
+                customerIsImportPlaceholderOnly,
+                supplierFilter,
+                employeeFilter,
+                orderStatusFilter,
+                paymentStatusFilter,
+                monthFilter,
+                yearFilter,
+                startDateFilter,
+                endDateFilter,
+                dateFilterType,
+                sortBy,
+            }));
+        } catch (_) {}
+    }, [searchTerm, customerFilter, customerIsImportPlaceholderOnly, supplierFilter, employeeFilter, orderStatusFilter, paymentStatusFilter, monthFilter, yearFilter, startDateFilter, endDateFilter, dateFilterType, sortBy]);
 
     const resetFilters = () => {
         setSearchTerm('');
+        setDebouncedSearchTerm('');
         setCustomerFilter([]);
         setSupplierFilter([]);
         setEmployeeFilter([]);
-        setOrderStatusFilter([]);
+        setOrderStatusFilter(sortBy === 'dueDate' ? defaultOrderStatusIdsForDueDate : defaultOrderStatusIds);
         setPaymentStatusFilter([]);
         setMonthFilter('all');
         setYearFilter('all');
         setStartDateFilter('');
         setEndDateFilter('');
         setDateFilterType('ORDER_DATE');
-        setIsCollectionMode(false);
-        setShowCompletedOrders(false);
+        setSortBy('updatedAt');
+        setCustomerIsImportPlaceholderOnly(false);
+        setCurrentPage(1); // Reset to first page
     };
 
-    const handleStatusChange = (orderId: string, newStatus: string) => {
-        setOrders(prevOrders => {
+    const handleStatusChange = async (orderId: string, newStatusIdOrLabel: string, orderSnapshot?: Order) => {
+        const originalOrder = orderSnapshot ?? paginatedOrders.find(o => o.id === orderId) ?? orders.find(o => o.id === orderId);
+        const config = statusConfigs.find(c => c.id === newStatusIdOrLabel || c.label === newStatusIdOrLabel);
+        const newStatus = config?.label ?? newStatusIdOrLabel;
+        if (!originalOrder || (originalOrder.orderStatus === newStatus && originalOrder.orderStatusId === config?.id)) return;
+        pendingStatusUpdateIdsRef.current.add(orderId);
+        const isNowActiveDeal = config ? config.isActiveDeal : false;
+        let newDealStartDate = originalOrder.dealStartDate;
+        if (isNowActiveDeal && !newDealStartDate) {
+            newDealStartDate = new Date();
+        }
+        const logEvent: TimelineEvent = {
+            id: `log_${Date.now()}`,
+            timestamp: new Date(),
+            content: `שינוי סטטוס`,
+            user: loggedInUserName,
+            type: 'LOG',
+            changes: [
+                { field: 'orderStatus', label: 'סטטוס', oldValue: originalOrder.orderStatus, newValue: newStatus, action: 'UPDATED' }
+            ]
+        };
+        const newStatusHistoryEntry = { status: newStatus, statusId: config?.id, startDate: new Date() };
+        const updatedOrder: Order = {
+            ...originalOrder,
+            orderStatus: newStatus,
+            orderStatusId: config?.id,
+            employeeId: user?.id ?? originalOrder.employeeId,
+            dealStartDate: newDealStartDate,
+            timeline: [logEvent, ...originalOrder.timeline],
+            statusHistory: [...(originalOrder.statusHistory || []), newStatusHistoryEntry],
+        };
+        
+        // Pattern: Server is source of truth. Optimistic update for instant feedback; on success replace with server response; on failure revert.
+        setOrdersLocal(prevOrders => {
             const orderIndex = prevOrders.findIndex(o => o.id === orderId);
             if (orderIndex === -1) return prevOrders;
-            const originalOrder = prevOrders[orderIndex];
-            if (originalOrder.orderStatus === newStatus) return prevOrders;
-            const user = employees.find(emp => emp.id === originalOrder.employeeId)?.name || 'מערכת';
-            const config = statusConfigs.find(c => c.label === newStatus);
-            const isNowActiveDeal = config ? config.isActiveDeal : false;
-            let newDealStartDate = originalOrder.dealStartDate;
-            if (isNowActiveDeal && !newDealStartDate) {
-                newDealStartDate = new Date();
-            }
-            const logEvent: TimelineEvent = {
-                id: `log_${Date.now()}`,
-                timestamp: new Date(),
-                content: `שינוי סטטוס`,
-                user: user,
-                type: 'LOG',
-                changes: [
-                    { field: 'orderStatus', label: 'סטטוס', oldValue: originalOrder.orderStatus, newValue: newStatus, action: 'UPDATED' }
-                ]
-            };
-            const newStatusHistoryEntry = { status: newStatus, startDate: new Date() };
-            const updatedOrder: Order = {
-                ...originalOrder,
-                orderStatus: newStatus,
-                dealStartDate: newDealStartDate, 
-                timeline: [logEvent, ...originalOrder.timeline],
-                statusHistory: [...(originalOrder.statusHistory || []), newStatusHistoryEntry],
-            };
             const newOrders = [...prevOrders];
             newOrders[orderIndex] = updatedOrder;
-            addActivity(`סטטוס הזמנה ${originalOrder.orderNumber} שונה ל: ${newStatus}`);
             return newOrders;
         });
+        addActivity(`סטטוס הזמנה ${originalOrder.orderNumber} שונה ל: ${newStatus}`, { entityType: 'order', entityId: orderId, action: 'status_change', metadata: { orderNumber: originalOrder.orderNumber, oldStatus: originalOrder.orderStatus, newStatus } });
+        setPaginatedOrders(prev => prev.map(o => o.id === orderId ? updatedOrder : o));
+        
+        const updatePromise = mongoService.updateOrder(updatedOrder)
+            .then((savedOrder) => {
+                setOrdersLocal(prev => prev.map(o => o.id === orderId ? savedOrder : o));
+                setPaginatedOrders(prev => prev.map(o => o.id === orderId ? savedOrder : o));
+                return savedOrder;
+            })
+            .catch((error) => {
+                console.error('Error updating order status:', error);
+                alert('שגיאה בעדכון סטטוס הזמנה');
+                setOrdersLocal(prev => prev.map(o => o.id === orderId ? originalOrder : o));
+                setPaginatedOrders(prev => prev.map(o => o.id === orderId ? originalOrder : o));
+                throw error;
+            })
+            .finally(() => {
+                pendingStatusUpdateIdsRef.current.delete(orderId);
+            });
+        return updatePromise;
     };
 
     const handleDraftCreate = (draftOrder: Order) => {
         setEditingOrder(draftOrder);
+        trackViewStart(`order_${draftOrder.id}`, 'order', draftOrder.id, draftOrder.orderNumber);
     };
+
+    // Helper function to fetch paginated orders (silent = true: don't show loading spinner, for background refresh)
+    const refetchOrders = async (silent: boolean = false) => {
+        if (abortControllerRef.current) abortControllerRef.current.abort();
+        abortControllerRef.current = new AbortController();
+        const signal = abortControllerRef.current.signal;
+        if (!silent) setLoading(true);
+        try {
+            const filters = {
+                customerFilter,
+                supplierFilter,
+                employeeFilter,
+                orderStatusFilter,
+                paymentStatusFilter,
+                monthFilter,
+                yearFilter,
+                startDateFilter,
+                endDateFilter,
+                dateFilterType,
+                searchTerm: debouncedSearchTerm,
+                sortBy,
+                showCompletedOrders: true,
+                customerIsImportPlaceholderOnly
+            };
+            const result = await mongoService.getOrdersPaginated(filters, currentPage, pageSize, { signal });
+            if (signal.aborted) return;
+            const pending = pendingStatusUpdateIdsRef.current;
+            setPaginatedOrders(prev => {
+                if (pending.size === 0) return result.orders;
+                return result.orders.map(o => {
+                    if (pending.has(o.id)) {
+                        const cur = prev.find(x => x.id === o.id);
+                        return cur ?? o;
+                    }
+                    return o;
+                });
+            });
+            setTotalCount(result.totalCount);
+            setSummaryTotals(result.summaryTotals || { totalAmount: 0, totalProfit: 0, totalBalance: 0, totalCost: 0, totalAmountInclVat: 0, totalBalanceInclVat: 0 });
+        } catch (error: any) {
+            if (error?.name === 'AbortError') return;
+            console.error('Error fetching paginated orders:', error);
+        } finally {
+            if (!signal.aborted && !silent) setLoading(false);
+        }
+    };
+
+    // Reset to page 1 when filters change (use debounced search so page doesn't jump on every keystroke)
+    useEffect(() => {
+        setCurrentPage(1);
+    }, [customerFilter, supplierFilter, employeeFilter, orderStatusFilter, paymentStatusFilter, monthFilter, yearFilter, startDateFilter, endDateFilter, dateFilterType, debouncedSearchTerm, sortBy, customerIsImportPlaceholderOnly]);
+
+    // Fetch paginated orders when filters or pagination change; if orders already in props, show first page immediately (sorted by sortBy for instant paint) then refetch in background
+    useEffect(() => {
+        if (orders.length > 0 && paginatedOrders.length === 0) {
+            const dateKey = dateFilterType === 'DEAL_DATE' ? 'dealStartDate' : 'date';
+            const list = orders;
+            const byKey = new Map<string, Order>();
+            for (const order of list) {
+                const raw = (order.orderNumber != null && order.orderNumber !== '') ? String(order.orderNumber).trim() : '';
+                const key = raw !== '' ? raw.toUpperCase() : (order.id || '');
+                if (!key) continue;
+                const existing = byKey.get(key);
+                if (!existing) {
+                    byKey.set(key, order);
+                } else {
+                    const dNew = order[dateKey] ? new Date(order[dateKey] as string).getTime() : 0;
+                    const dOld = existing[dateKey] ? new Date(existing[dateKey] as string).getTime() : 0;
+                    if (dNew >= dOld) byKey.set(key, order);
+                }
+            }
+            let deduped = Array.from(byKey.values());
+            if (sortBy === 'dueDate') {
+                deduped = deduped.filter(order => {
+                    const config = getStatusConfigForOrder(order, statusConfigs);
+                    if (!config?.isActiveDeal && !config?.isCompleted) return false;
+                    const { totalAmount, totalPaid } = calculateOrderTotals(order);
+                    const currentVat = order.vatRate ?? (vatRate ?? 0);
+                    const dueWithVat = totalAmount * (1 + currentVat / 100);
+                    return (dueWithVat - totalPaid) > 0.01;
+                });
+                deduped.sort((a, b) => {
+                    const dateA = calculateDueDate(a.dealStartDate || a.date, a.paymentTerms);
+                    const dateB = calculateDueDate(b.dealStartDate || b.date, b.paymentTerms);
+                    return dateA.getTime() - dateB.getTime();
+                });
+            } else if (sortBy === 'updatedAt') {
+                deduped.sort((a, b) => {
+                    const uA = a.updatedAt ? new Date(a.updatedAt).getTime() : (a.createdAt ? new Date(a.createdAt).getTime() : 0);
+                    const uB = b.updatedAt ? new Date(b.updatedAt).getTime() : (b.createdAt ? new Date(b.createdAt).getTime() : 0);
+                    return uB - uA;
+                });
+            } else {
+                deduped.sort((a, b) => {
+                    const dA = a[dateKey] ? new Date(a[dateKey] as string).getTime() : 0;
+                    const dB = b[dateKey] ? new Date(b[dateKey] as string).getTime() : 0;
+                    return dB - dA;
+                });
+            }
+            const start = (currentPage - 1) * pageSize;
+            const slice = deduped.slice(start, start + pageSize);
+            setPaginatedOrders(slice);
+            setTotalCount(deduped.length);
+            const totals = slice.reduce(
+                (acc, order) => {
+                    const t = calculateOrderTotals(order);
+                    acc.totalAmount += t.totalAmount;
+                    acc.totalCost += t.totalCost;
+                    acc.totalProfit += t.profit;
+                    const config = getStatusConfigForOrder(order, statusConfigs);
+                    const isActiveDeal = config ? (config.isActiveDeal || config.isCompleted) : false;
+                    if (isActiveDeal) {
+                        const dueWithVat = t.totalAmount * (1 + (vatRate || 0) / 100);
+                        acc.totalBalance += Math.max(0, t.totalAmount - t.totalPaid);
+                        acc.totalBalanceInclVat += Math.max(0, dueWithVat - t.totalPaid);
+                    }
+                    return acc;
+                },
+                { totalAmount: 0, totalCost: 0, totalProfit: 0, totalBalance: 0, totalBalanceInclVat: 0 }
+            );
+            setSummaryTotals(prev => ({
+                ...prev,
+                totalAmount: totals.totalAmount,
+                totalCost: totals.totalCost,
+                totalProfit: totals.totalProfit,
+                totalAmountInclVat: totals.totalAmount * (1 + (vatRate || 0) / 100),
+                totalBalance: totals.totalBalance,
+                totalBalanceInclVat: totals.totalBalanceInclVat,
+            }));
+            setLoading(false);
+            refetchOrders(true);
+        } else {
+            refetchOrders();
+        }
+    // Intentionally omit `orders` from deps: refetch only when filters/pagination change. Status change updates paginatedOrders optimistically; including orders would trigger refetch and overwrite the update before the API responds.
+    }, [currentPage, pageSize, customerFilter, supplierFilter, employeeFilter, orderStatusFilter, paymentStatusFilter, monthFilter, yearFilter, startDateFilter, endDateFilter, dateFilterType, debouncedSearchTerm, sortBy, customerIsImportPlaceholderOnly, statusConfigs, vatRate]);
 
     useEffect(() => {
         if (initialOpenOrderId) {
-            const orderToOpen = orders.find(o => o.id === initialOpenOrderId);
+            const orderToOpen = paginatedOrders.find(o => o.id === initialOpenOrderId) || orders.find(o => o.id === initialOpenOrderId);
             if (orderToOpen) {
                 handleEditOrder(orderToOpen);
             }
@@ -2298,24 +4116,109 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
                 onOrderOpened();
             }
         }
-    }, [initialOpenOrderId, orders, onOrderOpened]);
+    }, [initialOpenOrderId, paginatedOrders, orders, onOrderOpened]);
 
-    const handleSaveOrder = (order: Order, keepOpen: boolean = false) => {
-        setOrders(prevOrders => {
-            const exists = prevOrders.some(o => o.id === order.id);
-            if (exists) {
-                addActivity(`הזמנה עודכנה: ${order.description}`);
-                return prevOrders.map(o => o.id === order.id ? order : o);
-            } else {
-                addActivity(`הזמנה חדשה נוספה: ${order.description}`);
-                return [order, ...prevOrders];
-            }
-        });
-        if (keepOpen) {
-            setEditingOrder(order);
-        } else {
-            setIsModalOpen(false);
+    // Poll order list when Orders page is visible (every 90s) for data sync
+    const refetchOrdersRef = useRef(refetchOrders);
+    refetchOrdersRef.current = refetchOrders;
+    useEffect(() => {
+        const interval = setInterval(() => {
+            if (document.visibilityState === 'visible') refetchOrdersRef.current(true);
+        }, 90 * 1000);
+        return () => clearInterval(interval);
+    }, []);
+
+    useEffect(() => {
+        if (openNewOrderRequest && onClearedOpenNewOrderRequest) {
+            setOrderLockedByOther(null);
             setEditingOrder(null);
+            setNewOrderPrefillCustomerId(openNewOrderWithCustomerId ?? undefined);
+            setNewOrderPrefillPhone(openNewOrderWithPhone ?? undefined);
+            setIsModalOpen(true);
+            onClearedOpenNewOrderRequest();
+            onClearedNewOrderPrefill?.();
+        }
+    }, [openNewOrderRequest, onClearedOpenNewOrderRequest, onClearedNewOrderPrefill, openNewOrderWithCustomerId, openNewOrderWithPhone]);
+
+    const handleSaveOrder = async (order: Order, keepOpen: boolean = false) => {
+        try {
+            const exists = orders.some(o => o.id === order.id);
+            const originalOrder = exists ? orders.find(o => o.id === order.id) : null;
+            const originalTimelineIds = new Set(originalOrder?.timeline?.map((e: TimelineEvent) => e.id) ?? []);
+            let savedOrder: Order;
+
+            if (exists) {
+                // Update existing order on server
+                savedOrder = await mongoService.updateOrder(order);
+                addActivity(`הזמנה עודכנה: ${order.description}`, { entityType: 'order', entityId: order.id, action: 'update', metadata: { orderNumber: order.orderNumber } });
+            } else {
+                // Create new order on server
+                savedOrder = await mongoService.createOrder(order);
+                addActivity(`הזמנה חדשה נוספה: ${order.description}`, { entityType: 'order', entityId: savedOrder.id, action: 'create', metadata: { orderNumber: savedOrder.orderNumber } });
+            }
+
+            // Push every new timeline event (יומן מערכת) to global תיעוד לוגים so nothing is missing
+            const timeline = savedOrder.timeline || order.timeline || [];
+            for (const event of timeline) {
+                if (originalTimelineIds.has(event.id)) continue;
+                const ts = event.timestamp instanceof Date ? event.timestamp : new Date(event.timestamp);
+                let desc = `[הזמנה ${savedOrder.orderNumber}] `;
+                if (event.type === 'LOG') {
+                    desc += event.content;
+                    if (event.changes && event.changes.length > 0) {
+                        const parts = event.changes.map((c: FieldChange) =>
+                            c.action === 'ADDED' ? `${c.label}: ${String(c.newValue ?? '')}` :
+                            c.action === 'REMOVED' ? `${c.label}: ${String(c.oldValue ?? '')}` :
+                            `${c.label}: ${String(c.oldValue)} → ${String(c.newValue)}`);
+                        desc += ' — ' + parts.join('; ');
+                    }
+                } else if (event.type === 'NOTE') {
+                    desc += `הערה: ${event.content}`;
+                } else if (event.type === 'TASK') {
+                    desc += `משימה: ${event.content}`;
+                    if (event.assigneeId) {
+                        const assigneeName = employees.find(e => e.id === event.assigneeId)?.name;
+                        if (assigneeName) desc += ` (שוייך ל: ${assigneeName})`;
+                    }
+                    if (event.dueDate) desc += ` — יעד: ${new Date(event.dueDate).toLocaleDateString('he-IL')}`;
+                } else {
+                    desc += event.content;
+                }
+                addActivity(desc, { entityType: 'order', entityId: savedOrder.id, action: 'update', metadata: { orderNumber: savedOrder.orderNumber, timelineEventType: event.type, timelineEventId: event.id, timestamp: ts.toISOString() } });
+            }
+
+            // Update global orders state so CustomersPage "היסטוריית הזמנות" and other consumers see the change (e.g. customerId)
+            setOrdersLocal(prevOrders => {
+                const exists = prevOrders.some(o => o.id === savedOrder.id);
+                if (exists) {
+                    return prevOrders.map(o => o.id === savedOrder.id ? savedOrder : o);
+                } else {
+                    return [savedOrder, ...prevOrders];
+                }
+            });
+            // Update current page list so table reflects save without waiting for refetch
+            setPaginatedOrders(prev => {
+                if (prev.some(o => o.id === savedOrder.id))
+                    return prev.map(o => o.id === savedOrder.id ? savedOrder : o);
+                if (!exists && currentPage === 1) return [savedOrder, ...prev].slice(0, pageSize);
+                return prev;
+            });
+            if (!exists) setTotalCount(c => c + 1);
+            // When "הזמנות עם לקוח מייבוא" is on, refetch so order that no longer matches disappears live
+            if (customerIsImportPlaceholderOnly) {
+                refetchOrders(true);
+            }
+
+        if (keepOpen) {
+                if (order.id) trackViewEnd(`order_${order.id}`);
+                trackViewStart(`order_${savedOrder.id}`, 'order', savedOrder.id, savedOrder.orderNumber);
+                setEditingOrder(savedOrder);
+        } else {
+            closeOrderModal();
+            }
+        } catch (error) {
+            console.error('Error saving order:', error);
+            alert('שגיאה בשמירת הזמנה');
         }
     };
 
@@ -2325,15 +4228,30 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
     };
 
     const getStatusBadge = (status: string) => {
-        const config = statusConfigs.find(c => c.label === status);
+        const config = getStatusConfigByIdOrLabel(status, statusConfigs);
         return config ? config.color : 'bg-slate-100 text-slate-800';
     };
 
     const calculateStatusDuration = (order: Order): string | null => {
-        if (!order.statusHistory || order.statusHistory.length === 0) return null;
-        const targetStatus = order.orderStatus;
-        let totalMilliseconds = 0;
+        const targetStatus = getOrderStatusLabel(order, statusConfigs);
         const now = new Date();
+        // Fallback for orders without statusHistory (e.g. imported): use createdAt or date as start
+        if (!order.statusHistory || order.statusHistory.length === 0) {
+            const startDate = order.createdAt ?? order.date;
+            if (!targetStatus || !startDate) return null;
+            const startTime = new Date(startDate).getTime();
+            const totalMilliseconds = Math.max(0, now.getTime() - startTime);
+            const seconds = Math.floor(totalMilliseconds / 1000);
+            const minutes = Math.floor((seconds % 3600) / 60);
+            const hours = Math.floor((seconds % 86400) / 3600);
+            const days = Math.floor(seconds / 86400);
+            const parts = [];
+            if (days > 0) parts.push(`${days} ימים`);
+            if (hours > 0) parts.push(`${hours} שעות`);
+            parts.push(`${minutes} דקות`);
+            return parts.join(', ');
+        }
+        let totalMilliseconds = 0;
         const history = [...order.statusHistory].sort((a, b) => 
             new Date(a.startDate).getTime() - new Date(b.startDate).getTime()
         );
@@ -2361,126 +4279,232 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
         return parts.join(', ');
     };
 
+    /** מספר הכניסה לסטטוס הנוכחי (1 = פעם ראשונה, 2 = חזרה שנייה, וכו') */
+    const getStatusVisitIndex = (order: Order): number => {
+        if (!order.statusHistory || order.statusHistory.length === 0) return order.orderStatus ? 1 : 0;
+        const label = getOrderStatusLabel(order, statusConfigs);
+        return order.statusHistory.filter(e => e.status === label || e.status === order.orderStatus || e.statusId === order.orderStatusId).length;
+    };
+
+    const getStatusVisitLabel = (visitIndex: number): string | null => {
+        if (visitIndex <= 0) return null;
+        if (visitIndex === 1) return 'כניסה ראשונה';
+        if (visitIndex === 2) return 'כניסה שנייה';
+        return `כניסה ${visitIndex}`;
+    };
+
+    // Deduplicate by orderNumber on client so the same order never appears twice (e.g. ORD-1005). Keep latest by date per normalized orderNumber.
     const filteredOrders = useMemo(() => {
-        let result = orders;
-        if (isCollectionMode) {
-             result = result.filter(order => {
-                 const config = statusConfigs.find(c => c.label === order.orderStatus);
-                 const isActive = config ? config.isActiveDeal : false;
-                 return order.paymentStatus !== PaymentStatus.PAID && isActive;
-             });
-        } else {
-             result = result.filter(order => {
-                if (paymentStatusFilter.length === 0) return true;
-                return paymentStatusFilter.includes(order.paymentStatus);
-            });
-        }
-        result = result
-            .filter(order => {
-                const config = statusConfigs.find(c => c.label === order.orderStatus);
-                if (orderStatusFilter.length > 0) {
-                    return orderStatusFilter.includes(order.orderStatus);
-                } 
-                if (isCollectionMode) {
-                    return true;
-                }
-                if (!showCompletedOrders && config?.isCompleted) {
-                    return false;
-                }
-                return true;
-            })
-            .filter(order => {
-                if (customerFilter.length === 0) return true;
-                return customerFilter.includes(order.customerId || '');
-            })
-            .filter(order => {
-                if (employeeFilter.length === 0) return true;
-                return employeeFilter.includes(order.employeeId || '');
-            })
-            .filter(order => {
-                if (supplierFilter.length === 0) return true;
-                const supplierIdsInOrder = new Set<string>();
-                if (order.supplierId) supplierIdsInOrder.add(order.supplierId);
-                order.lineItems.forEach(li => li.supplierId && supplierIdsInOrder.add(li.supplierId));
-                order.additionalServices.forEach(s => s.supplierId && supplierIdsInOrder.add(s.supplierId));
-                return supplierFilter.some(sId => supplierIdsInOrder.has(sId));
-            })
-            .filter(order => {
-                const relevantDate = dateFilterType === 'ORDER_DATE' 
-                    ? new Date(order.date) 
-                    : (order.dealStartDate ? new Date(order.dealStartDate) : null);
-                
-                if (!relevantDate) return dateFilterType === 'ORDER_DATE';
-                
-                const dateStr = relevantDate.toISOString().split('T')[0];
-
-                // NEW: Date Range Filter Priority
-                if (startDateFilter || endDateFilter) {
-                    if (startDateFilter && dateStr < startDateFilter) return false;
-                    if (endDateFilter && dateStr > endDateFilter) return false;
-                    return true;
-                }
-
-                if (monthFilter !== 'all' && (relevantDate.getMonth() + 1) !== parseInt(monthFilter)) return false;
-                if (yearFilter !== 'all' && relevantDate.getFullYear() !== parseInt(yearFilter)) return false;
-                return true;
-            })
-            .filter(order => {
-                if (!searchTerm) return true;
-                const lowercasedTerm = searchTerm.toLowerCase();
-                const customerName = getCustomerName(order.customerId).toLowerCase();
-                const isServiceSearch = (lowercasedTerm.includes('שירות') || lowercasedTerm.includes('תיקון') || lowercasedTerm.includes('service')) && order.type === OrderType.SERVICE_CALL;
-                const parentOrderMatch = order.parentOrderId 
-                    ? orders.find(o => o.id === order.parentOrderId)?.orderNumber.toLowerCase().includes(lowercasedTerm)
-                    : false;
-                return (
-                    order.orderNumber.toLowerCase().includes(lowercasedTerm) ||
-                    order.description.toLowerCase().includes(lowercasedTerm) ||
-                    customerName.includes(lowercasedTerm) ||
-                    isServiceSearch ||
-                    parentOrderMatch
-                );
-            });
-        if (isCollectionMode) {
-            result.sort((a, b) => {
-                 const dateA = calculateDueDate(a.dealStartDate || a.date, a.paymentTerms);
-                 const dateB = calculateDueDate(b.dealStartDate || b.date, b.paymentTerms);
-                 return dateA.getTime() - dateB.getTime();
-            });
-        } else {
-             const dateKey = dateFilterType === 'ORDER_DATE' ? 'date' : 'dealStartDate';
-             result.sort((a,b) => {
-                const dA = a[dateKey] ? new Date(a[dateKey]!).getTime() : 0;
-                const dB = b[dateKey] ? new Date(b[dateKey]!).getTime() : 0;
-                return dB - dA;
-             });
-        }
-        return result;
-    }, [orders, orderStatusFilter, paymentStatusFilter, customerFilter, employeeFilter, supplierFilter, monthFilter, yearFilter, startDateFilter, endDateFilter, searchTerm, isCollectionMode, showCompletedOrders, statusConfigs, dateFilterType]);
-
-    const summaryTotals = useMemo(() => {
-        return filteredOrders.reduce((acc, order) => {
-            const { totalAmount, profit, totalCost } = calculateOrderTotals(order);
-            const currentOrderVat = order.vatRate ?? vatRate;
-            acc.totalAmount += totalAmount;
-            acc.totalProfit += profit;
-            acc.totalCost += totalCost; 
-            acc.totalAmountInclVat += totalAmount * (1 + currentOrderVat / 100);
-            
-            const statusConfig = statusConfigs.find(c => c.label === order.orderStatus);
-            const isActiveDeal = statusConfig ? statusConfig.isActiveDeal : true; 
-            if (isActiveDeal) {
-                const balance = order.paymentStatus === PaymentStatus.PAID ? 0 : totalAmount;
-                acc.totalBalance += balance;
-                acc.totalBalanceInclVat += balance * (1 + currentOrderVat / 100);
+        const byKey = new Map<string, Order>();
+        const dateKey = dateFilterType === 'DEAL_DATE' ? 'dealStartDate' : 'date';
+        for (const order of paginatedOrders) {
+            const raw = (order.orderNumber != null && order.orderNumber !== '') ? String(order.orderNumber).trim() : '';
+            const key = raw !== '' ? raw.toUpperCase() : (order.id || '');
+            if (!key) continue;
+            const existing = byKey.get(key);
+            if (!existing) {
+                byKey.set(key, order);
+            } else {
+                const dNew = order[dateKey] ? new Date(order[dateKey] as string).getTime() : 0;
+                const dOld = existing[dateKey] ? new Date(existing[dateKey] as string).getTime() : 0;
+                if (dNew >= dOld) byKey.set(key, order);
             }
-            return acc;
-        }, { totalAmount: 0, totalProfit: 0, totalBalance: 0, totalCost: 0, totalAmountInclVat: 0, totalBalanceInclVat: 0 });
-    }, [filteredOrders, statusConfigs, vatRate]);
+        }
+        return Array.from(byKey.values());
+    }, [paginatedOrders, dateFilterType]);
+
+    const exportOrdersToCSV = (filename: string, rows: (string | number)[][]) => {
+        const processRow = (row: (string | number)[]) => {
+            return row.map(val => {
+                if (val === null || val === undefined) return '';
+                let result = String(val);
+                result = result.replace(/"/g, '""');
+                if (result.search(/("|,|\n)/g) >= 0) result = `"${result}"`;
+                return result;
+            }).join(',');
+        };
+        const csvContent = '\uFEFF' + rows.map(processRow).join('\n');
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = filename;
+        link.style.visibility = 'hidden';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(link.href);
+    };
+
+    const buildOrderRow = (order: Order): (string | number)[] => {
+        const { totalAmount, profit, totalCost, totalPaid } = calculateOrderTotals(order);
+        const statusConfig = getStatusConfigForOrder(order, statusConfigs);
+        const isActiveDeal = statusConfig ? (statusConfig.isActiveDeal || statusConfig.isCompleted) : false;
+        const currentOrderVat = order.vatRate ?? vatRate;
+        const totalDueWithVat = totalAmount * (1 + currentOrderVat / 100);
+        const balanceDue = isActiveDeal ? Math.max(0, totalDueWithVat - totalPaid) : 0;
+        const calculationBaseDate = order.dealStartDate || order.date;
+        const dueDate = calculateDueDate(calculationBaseDate, order.paymentTerms);
+        const displayDate = dateFilterType === 'ORDER_DATE' ? order.date : order.dealStartDate;
+        const relatedSupplierIds = new Set<string>();
+        if (order.supplierId) relatedSupplierIds.add(order.supplierId);
+        order.lineItems.forEach(li => li.supplierId && relatedSupplierIds.add(li.supplierId));
+        order.additionalServices.forEach(as => as.supplierId && relatedSupplierIds.add(as.supplierId));
+        const relatedSupplierNames = Array.from(relatedSupplierIds)
+            .map(id => suppliers.find(s => s.id === id)?.name)
+            .filter(Boolean) as string[];
+        return [
+            displayDate ? new Date(displayDate).toLocaleDateString('he-IL') : '—',
+            getOrderStatusLabel(order, statusConfigs),
+            order.orderNumber || '—',
+            (order.description || '').replace(/\n/g, ' '),
+            getCustomerName(order.customerId),
+            relatedSupplierNames.join('; ') || '—',
+            totalAmount.toFixed(2),
+            totalCost.toFixed(2),
+            profit.toFixed(2),
+            dueDate.toLocaleDateString('he-IL'),
+            balanceDue.toFixed(2)
+        ];
+    };
+
+    const handleExportExcel = async () => {
+        setExportingExcel(true);
+        try {
+            const filters = {
+                customerFilter,
+                supplierFilter,
+                employeeFilter,
+                orderStatusFilter,
+                paymentStatusFilter,
+                monthFilter,
+                yearFilter,
+                startDateFilter,
+                endDateFilter,
+                dateFilterType,
+                searchTerm: debouncedSearchTerm,
+                sortBy,
+                showCompletedOrders: true,
+                customerIsImportPlaceholderOnly
+            };
+            const EXPORT_LIMIT = 15000;
+            const result = await mongoService.getOrdersPaginated(filters, 1, EXPORT_LIMIT);
+            const ordersToExport = result.orders;
+            const header = [
+                dateFilterType === 'ORDER_DATE' ? 'תאריך הזמנה' : 'תאריך אישור',
+                'סטטוס',
+                'מספר הזמנה',
+                'תיאור',
+                'לקוח',
+                'ספקים',
+                'מחיר הזמנה',
+                'עלות הזמנה',
+                'רווח',
+                'מועד תשלום',
+                'יתרה לתשלום'
+            ];
+            const dataRows = ordersToExport.map(order => buildOrderRow(order));
+            const exportedSum = ordersToExport.reduce(
+                (acc, order) => {
+                    const { totalAmount, profit, totalCost, totalPaid } = calculateOrderTotals(order);
+                    const statusConfig = getStatusConfigForOrder(order, statusConfigs);
+                    const isActiveDeal = statusConfig ? (statusConfig.isActiveDeal || statusConfig.isCompleted) : false;
+                    const currentOrderVat = order.vatRate ?? vatRate;
+                    const totalDueWithVat = totalAmount * (1 + currentOrderVat / 100);
+                    const balanceDue = isActiveDeal ? Math.max(0, totalDueWithVat - totalPaid) : 0;
+                    acc.totalAmount += totalAmount;
+                    acc.totalCost += totalCost;
+                    acc.totalProfit += profit;
+                    acc.totalBalance += balanceDue;
+                    return acc;
+                },
+                { totalAmount: 0, totalCost: 0, totalProfit: 0, totalBalance: 0 }
+            );
+            const summaryRow = [
+                'סה"כ',
+                '',
+                '',
+                '',
+                '',
+                '',
+                exportedSum.totalAmount.toFixed(2),
+                exportedSum.totalCost.toFixed(2),
+                exportedSum.totalProfit.toFixed(2),
+                '',
+                exportedSum.totalBalance.toFixed(2)
+            ];
+            const dateStr = new Date().toISOString().slice(0, 10);
+            exportOrdersToCSV(`orders_export_${dateStr}.csv`, [header, ...dataRows, summaryRow]);
+        } catch (err) {
+            console.error('Export Excel failed:', err);
+        } finally {
+            setExportingExcel(false);
+        }
+    };
     
     return (
         <div>
-            <div className="flex justify-between items-start mb-6 gap-4">
+            {/* Mobile: filters toggle + sort row */}
+            <div className="md:hidden flex flex-wrap items-center gap-2 mb-4">
+                <button
+                    type="button"
+                    onClick={() => setFiltersPanelOpen(true)}
+                    className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white border border-slate-200 shadow-sm text-slate-700 font-medium min-h-[44px]"
+                >
+                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" /></svg>
+                    מסננים
+                </button>
+                <div className="flex items-center gap-2">
+                    <label className="text-xs font-bold text-slate-500 whitespace-nowrap">מיון:</label>
+                    <select
+                        value={sortBy}
+                        onChange={e => setSortBy(e.target.value as 'date' | 'dueDate' | 'updatedAt')}
+                        className="text-sm font-medium px-3 py-2 rounded-md border border-slate-300 bg-white min-h-[44px]"
+                    >
+                        <option value="date">תאריך</option>
+                        <option value="dueDate">מועד תשלום</option>
+                        <option value="updatedAt">עודכנו לאחרונה</option>
+                    </select>
+                </div>
+                <button type="button" onClick={resetFilters} className="text-xs font-black text-slate-400 hover:text-red-500 px-3 py-2 rounded border border-slate-100 min-h-[44px]" title="מנקה מסננים ומחזיר ברירת מחדל – סטטוסים יישארו מסומנים (לידים, הצעות מחיר, עסקאות פעילות ללא שהסתיימו).">נקה</button>
+            </div>
+            {/* Filters panel: desktop inline, mobile in drawer */}
+            {filtersPanelOpen && (
+                <>
+                    <div className="fixed inset-0 bg-black/50 z-40 md:hidden" onClick={() => setFiltersPanelOpen(false)} aria-hidden />
+                    <div className="fixed inset-x-0 bottom-0 top-12 z-50 md:hidden bg-white rounded-t-2xl shadow-xl overflow-y-auto" dir="rtl">
+                        <div className="sticky top-0 bg-white border-b border-slate-200 px-4 py-3 flex justify-between items-center">
+                            <span className="font-bold text-slate-800">מסננים</span>
+                            <button type="button" onClick={() => setFiltersPanelOpen(false)} className="p-2 rounded-lg text-slate-500 hover:bg-slate-100 min-h-[44px] min-w-[44px] flex items-center justify-center">סגור</button>
+                        </div>
+                        <div className="p-4 pb-8">
+                            <div className="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label className="block text-[10px] font-black text-slate-400 uppercase mb-1">סוג תאריך</label>
+                                    <select value={dateFilterType} onChange={e => setDateFilterType(e.target.value as any)} className={`w-full text-xs p-2 border rounded-md font-bold min-h-[44px] ${dateFilterType === 'DEAL_DATE' ? 'bg-indigo-50 border-primary' : 'border-slate-300'}`}>
+                                        <option value="ORDER_DATE">תאריך הזמנה</option>
+                                        <option value="DEAL_DATE">תאריך אישור</option>
+                                    </select>
+                                </div>
+                                <div><label className="block text-[10px] font-black text-slate-400 uppercase mb-1">מתאריך</label><input type="date" value={startDateFilter} onChange={e => setStartDateFilter(e.target.value)} className="w-full text-xs p-2 border border-slate-300 rounded-md min-h-[44px]" /></div>
+                                <div><label className="block text-[10px] font-black text-slate-400 uppercase mb-1">עד תאריך</label><input type="date" value={endDateFilter} onChange={e => setEndDateFilter(e.target.value)} className="w-full text-xs p-2 border border-slate-300 rounded-md min-h-[44px]" /></div>
+                                <div><label className="block text-[10px] font-black text-slate-400 uppercase mb-1">חודש</label><select disabled={!!startDateFilter || !!endDateFilter} value={monthFilter} onChange={e => setMonthFilter(e.target.value)} className="w-full text-xs p-2 border-slate-300 rounded-md min-h-[44px] disabled:bg-slate-50">{availableMonths.map(m => <option key={m.value} value={m.value}>{m.name}</option>)}</select></div>
+                                <div><label className="block text-[10px] font-black text-slate-400 uppercase mb-1">שנה</label><select disabled={!!startDateFilter || !!endDateFilter} value={yearFilter} onChange={e => setYearFilter(e.target.value)} className="w-full text-xs p-2 border-slate-300 rounded-md min-h-[44px] disabled:bg-slate-50">{availableYears.map(y => <option key={y} value={y}>{y}</option>)}</select></div>
+                                <div className="col-span-2"><MultiSelectFilter label="לקוח" options={customerOptions} selectedValues={customerFilter} onChange={(v) => { setCustomerFilter(v); if (v.length === 0) setCustomerIsImportPlaceholderOnly(false); }} /></div>
+                                <div className="col-span-2"><MultiSelectFilter label="עובד" options={employeeOptions} selectedValues={employeeFilter} onChange={setEmployeeFilter} /></div>
+                                <div className="col-span-2"><MultiSelectFilter label="ספק" options={supplierOptions} selectedValues={supplierFilter} onChange={setSupplierFilter} /></div>
+                                <div className="col-span-2">
+                                    <MultiSelectFilter label="סטטוס" options={orderStatusOptions} selectedValues={orderStatusFilter} onChange={setOrderStatusFilter} emptyLabel="לידים, הצעות מחיר ועסקאות פעילות" />
+                                    {isStatusFilterDefault && <p className="text-[10px] text-slate-400 mt-0.5">ברירת מחדל: לידים, הצעות מחיר ועסקאות פעילות (ללא עסקאות שהסתיימו). איפוס מסננים מחזיר לסימון הזה.</p>}
+                                </div>
+                                <div className="col-span-2"><label className="block text-[10px] font-black text-slate-400 uppercase mb-1">חיפוש</label><input type="text" placeholder="חיפוש..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)} className="w-full text-xs p-2 border-slate-300 rounded-md min-h-[44px]" /></div>
+                                <div className="col-span-2"><label className="flex items-center gap-2 text-xs font-medium text-slate-600 cursor-pointer"><input type="checkbox" checked={customerIsImportPlaceholderOnly} onChange={e => setCustomerIsImportPlaceholderOnly(e.target.checked)} className="rounded border-slate-300 text-primary" /> הזמנות עם לקוח מייבוא</label></div>
+                            </div>
+                            <button type="button" onClick={() => setFiltersPanelOpen(false)} className="mt-6 w-full py-3 rounded-xl bg-primary text-white font-bold min-h-[48px]">החל מסננים</button>
+                        </div>
+                    </div>
+                </>
+            )}
+            <div className="hidden md:block flex justify-between items-start mb-6 gap-4">
                  <div className="flex-grow bg-white p-3 rounded-lg shadow-sm border border-slate-200 text-start">
                     <div className="flex flex-col gap-4">
                         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-11 gap-3">
@@ -2528,7 +4552,7 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
                                 </select>
                             </div>
                             <div>
-                                <MultiSelectFilter label="לקוח" options={customerOptions} selectedValues={customerFilter} onChange={setCustomerFilter} />
+                                <MultiSelectFilter label="לקוח" options={customerOptions} selectedValues={customerFilter} onChange={(v) => { setCustomerFilter(v); if (v.length === 0) setCustomerIsImportPlaceholderOnly(false); }} />
                             </div>
                             <div>
                                 <MultiSelectFilter label="עובד" options={employeeOptions} selectedValues={employeeFilter} onChange={setEmployeeFilter} />
@@ -2537,7 +4561,8 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
                                 <MultiSelectFilter label="ספק" options={supplierOptions} selectedValues={supplierFilter} onChange={setSupplierFilter} />
                             </div>
                             <div>
-                                <MultiSelectFilter label="סטטוס" options={orderStatusOptions} selectedValues={orderStatusFilter} onChange={setOrderStatusFilter} />
+                                <MultiSelectFilter label="סטטוס" options={orderStatusOptions} selectedValues={orderStatusFilter} onChange={setOrderStatusFilter} emptyLabel="לידים, הצעות מחיר ועסקאות פעילות" />
+                                {isStatusFilterDefault && <p className="text-[10px] text-slate-400 mt-0.5">ברירת מחדל: לידים, הצעות מחיר ועסקאות פעילות (ללא עסקאות שהסתיימו). איפוס מסננים מחזיר לסימון הזה.</p>}
                             </div>
                             <div className="lg:col-span-2">
                                 <label className="block text-[10px] font-black text-slate-400 uppercase mb-1">חיפוש חופשי</label>
@@ -2546,87 +4571,141 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
                                     {searchTerm && <button onClick={() => setSearchTerm('')} className="absolute inset-y-0 left-2 text-slate-400">×</button>}
                                 </div>
                             </div>
+                            <div className="flex items-center gap-2 pt-6">
+                                <label className="flex items-center gap-2 text-xs font-medium text-slate-600 cursor-pointer">
+                                    <input
+                                        type="checkbox"
+                                        checked={customerIsImportPlaceholderOnly}
+                                        onChange={e => setCustomerIsImportPlaceholderOnly(e.target.checked)}
+                                        className="rounded border-slate-300 text-primary focus:ring-primary"
+                                    />
+                                    הזמנות עם לקוח מייבוא (לא תואם לחשבונית ירוקה)
+                                </label>
+                            </div>
                         </div>
                         <div className="flex items-center justify-between pt-2 border-t border-slate-100 flex-wrap gap-4">
                              <div className="flex items-center gap-3">
-                                <button onClick={() => setIsCollectionMode(!isCollectionMode)} className={`flex items-center px-4 py-2 rounded-md text-sm font-bold transition-colors shadow-sm ${isCollectionMode ? 'bg-red-600 text-white ring-2 ring-red-300' : 'bg-white text-slate-600 border border-slate-300 hover:bg-red-50 hover:text-red-600'}`}>
-                                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 me-2">
-                                        <path fillRule="evenodd" d="M1 4a1 1 0 011-1h16a1 1 0 011 1v8a1 1 0 01-1 1H2a1 1 0 01-1-1V4zm12 4a3 3 0 11-6 0 3 3 0 016 0zM4 9a1 1 0 100-2 1 1 0 000 2zm13-1a1 1 0 11-2 0 1 1 0 012 0zM1.75 14.5a.75.75 0 000 1.5c4.417 0 8.693.603 12.749 1.73 1.111.309 2.251-.512 2.251-1.696v-.784a.75.75 0 00-1.5 0v.784a2.718 2.718 0 01-.529.134c-4.303 1.256-8.99 1.582-13.676.832H1.75z" clipRule="evenodd" />
-                                    </svg>
-                                    {isCollectionMode ? 'יציאה ממצב גבייה' : 'מצב גבייה (חובות)'}
-                                </button>
-                                <button 
-                                    onClick={() => setShowCompletedOrders(!showCompletedOrders)} 
-                                    className={`flex items-center px-4 py-2 rounded-md text-sm font-medium transition-colors shadow-sm border ${showCompletedOrders ? 'bg-indigo-50 text-indigo-700 border-indigo-200' : 'bg-white text-slate-500 border-slate-300 hover:bg-slate-50'}`}
-                                >
-                                    <span className={`w-4 h-4 me-2 rounded flex items-center justify-center border ${showCompletedOrders ? 'bg-indigo-600 border-indigo-600' : 'bg-white border-slate-400'}`}>
-                                        {showCompletedOrders && <svg className="w-3 h-3 text-white" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" /></svg>}
-                                    </span>
-                                    הצג עסקאות שהסתיימו
-                                </button>
+                                <div className="flex items-center gap-2">
+                                    <label className="text-xs font-bold text-slate-500 uppercase whitespace-nowrap">מיון לפי</label>
+                                    <select
+                                        value={sortBy}
+                                        onChange={e => setSortBy(e.target.value as 'date' | 'dueDate' | 'updatedAt')}
+                                        className={`text-sm font-medium px-3 py-2 rounded-md border focus:ring-2 focus:ring-primary/20 focus:outline-none transition-colors ${sortBy === 'dueDate' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-white border-slate-300 text-slate-700'}`}
+                                    >
+                                        <option value="date">תאריך (הזמנה/אישור)</option>
+                                        <option value="dueDate">מועד תשלום (חובות)</option>
+                                        <option value="updatedAt">עודכנו לאחרונה</option>
+                                    </select>
+                                </div>
+                                {isAdmin && (
+                                    <>
+                                        <button
+                                            type="button"
+                                            onClick={handleExportExcel}
+                                            disabled={exportingExcel}
+                                            className="flex items-center px-4 py-2 rounded-md text-sm font-medium border border-slate-300 bg-white text-slate-600 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                            title="הורד כל ההזמנות לפי הסינון הנוכחי לקובץ Excel (CSV)"
+                                        >
+                                            <DownloadIcon className="w-5 h-5 me-2" />
+                                            {exportingExcel ? 'מוריד...' : 'הורד Excel (כל התוצאות)'}
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => setIsImportModalOpen(true)}
+                                            className="flex items-center px-4 py-2 rounded-md text-sm font-medium border border-slate-300 bg-white text-slate-600 hover:bg-slate-50"
+                                        >
+                                            <DownloadIcon className="w-5 h-5 me-2" />
+                                            ייבוא מטבלת שליטה (CSV)
+                                        </button>
+                                    </>
+                                )}
                              </div>
                              
                              <button 
                                 onClick={resetFilters} 
                                 className="text-xs font-black text-slate-400 hover:text-red-500 transition-colors uppercase flex items-center gap-1 bg-slate-50 px-3 py-2 rounded border border-slate-100"
+                                title="מנקה מסננים ומחזיר ברירת מחדל – סטטוסים יישארו מסומנים (לידים, הצעות מחיר, עסקאות פעילות ללא שהסתיימו)."
                              >
                                 <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
                                 נקה את כל המסננים
                              </button>
                         </div>
-                        
-                        {/* Status Hint Message */}
-                        {dateFilterType === 'DEAL_DATE' && !showCompletedOrders && (
-                            <div className="flex items-center gap-2 text-indigo-600 text-xs bg-indigo-50/50 p-2 rounded-md border border-indigo-100 transition-all">
-                                <span className="text-sm">💡</span>
-                                <p className="font-medium">
-                                    מציג עסקאות פעילות בלבד. כדי לראות גם עסקאות מהעבר (ארכיון), לחץ על 
-                                    <span className="font-bold underline mx-1 cursor-pointer hover:text-indigo-800" onClick={() => setShowCompletedOrders(true)}>
-                                        'הצג עסקאות שהסתיימו'
-                                    </span>.
-                                </p>
-                            </div>
-                        )}
                     </div>
                 </div>
-                <button onClick={handleAddOrder} className="flex-shrink-0 flex items-center px-4 py-2 bg-primary text-white rounded-lg hover:bg-indigo-700 transition-colors h-fit mt-5">
-                    <PlusIcon className="h-5 w-5 me-2" />
-                    הוסף הזמנה
-                </button>
             </div>
-            <div className="bg-white shadow-md rounded-lg overflow-x-auto">
+            {/* Mobile: order cards */}
+            <div className="md:hidden space-y-3 pb-4">
+                {filteredOrders.map((order) => {
+                    const { totalAmount, totalPaid } = calculateOrderTotals(order);
+                    const statusConfig = getStatusConfigForOrder(order, statusConfigs);
+                    const isActiveDeal = statusConfig ? (statusConfig.isActiveDeal || statusConfig.isCompleted) : false;
+                    const currentOrderVat = order.vatRate ?? vatRate;
+                    const totalDueWithVat = totalAmount * (1 + currentOrderVat / 100);
+                    const balanceDue = isActiveDeal ? Math.max(0, totalDueWithVat - totalPaid) : 0;
+                    const displayDate = dateFilterType === 'ORDER_DATE' ? order.date : order.dealStartDate;
+                    return (
+                        <button
+                            key={order.id}
+                            type="button"
+                            onClick={() => handleEditOrder(order)}
+                            className="w-full text-right bg-white rounded-xl border border-slate-200 shadow-sm p-4 hover:bg-slate-50 active:bg-slate-100 transition-colors min-h-[44px]"
+                        >
+                            <div className="flex justify-between items-start gap-2">
+                                <span className="font-bold text-primary">{order.orderNumber}</span>
+                                <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${getStatusBadge(getOrderStatusLabel(order, statusConfigs))}`}>{getOrderStatusLabel(order, statusConfigs)}</span>
+                            </div>
+                            <p className="text-sm text-slate-600 mt-1 truncate">{getCustomerName(order.customerId)}</p>
+                            <div className="flex flex-wrap items-center gap-2 mt-2 text-xs text-slate-500">
+                                <span>{displayDate ? new Date(displayDate).toLocaleDateString('he-IL') : '—'}</span>
+                                {balanceDue > 0 && <span className="font-semibold text-amber-700">יתרה: ₪{balanceDue.toLocaleString()}</span>}
+                            </div>
+                        </button>
+                    );
+                })}
+            </div>
+            <div className="hidden md:block bg-white shadow-md rounded-lg overflow-x-auto">
                 <table className="min-w-full divide-y divide-slate-200 text-start">
-                    <thead className="bg-slate-50">
+                    <thead className="bg-slate-50 sticky top-0 z-10 shadow-sm">
                         <tr>
-                            <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider"># הזמנה</th>
-                            <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">תיאור</th>
-                            <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">לקוח</th>
-                            <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">ספקים</th>
-                             <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">סכום</th>
-                             <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">יתרה לתשלום</th>
-                             <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">רווח</th>
                             <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">
                                 {dateFilterType === 'ORDER_DATE' ? 'תאריך הזמנה' : 'תאריך אישור'}
                             </th>
-                            <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider bg-yellow-50/50">מועד תשלום</th>
                             <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">סטטוס</th>
+                            <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">הזמנה</th>
+                            <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">תיאור</th>
+                            <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">לקוח</th>
+                            <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">ספקים</th>
+                            <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">מחיר הזמנה</th>
+                            <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">עלות הזמנה</th>
+                            <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">רווח</th>
+                            <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider bg-yellow-50/50">מועד תשלום</th>
+                            <th className="px-4 py-3 text-start text-xs font-medium text-slate-500 uppercase tracking-wider">יתרה לתשלום</th>
                         </tr>
                     </thead>
                     <tbody className="bg-white divide-y divide-slate-200">
                         {filteredOrders.map(order => {
                             const { totalAmount, profit, totalCost, totalPaid } = calculateOrderTotals(order);
                             const durationText = calculateStatusDuration(order);
+                            const statusVisitIndex = getStatusVisitIndex(order);
+                            const statusVisitLabel = getStatusVisitLabel(statusVisitIndex);
                             const itemMarkup = totalCost > 0 ? (profit / totalCost) * 100 : (totalAmount > 0 ? 100 : 0);
                             const profitColorClass = getProfitMarginColor(itemMarkup);
                             const customer = customers.find(c => c.id === order.customerId);
                             const primaryContact = customer?.contacts.find(c => c.isBillingContact) || customer?.contacts[0];
-                            const statusConfig = statusConfigs.find(c => c.label === order.orderStatus);
-                            const isActiveDeal = statusConfig ? statusConfig.isActiveDeal : true;
+                            const statusConfig = getStatusConfigForOrder(order, statusConfigs);
+                            const isActiveDeal = statusConfig ? (statusConfig.isActiveDeal || statusConfig.isCompleted) : false;
                             
                             const currentOrderVat = order.vatRate ?? vatRate;
                             const totalDueWithVat = totalAmount * (1 + currentOrderVat / 100);
                             
                             const balanceDue = isActiveDeal ? Math.max(0, totalDueWithVat - totalPaid) : 0;
+                            // Same derived payment status as in order form (so list and form stay in sync)
+                            const listDerivedPaymentStatus =
+                                totalPaid <= 0
+                                    ? PaymentStatus.UNPAID
+                                    : totalPaid >= totalDueWithVat - 1
+                                        ? PaymentStatus.PAID
+                                        : PaymentStatus.PARTIALLY_PAID;
                             const calculationBaseDate = order.dealStartDate || order.date;
                             const dueDate = calculateDueDate(calculationBaseDate, order.paymentTerms);
                             const today = new Date();
@@ -2671,17 +4750,39 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
 
                             return (
                                 <tr key={order.id} className={`hover:bg-slate-50 ${order.type === OrderType.SERVICE_CALL ? 'bg-red-50/50' : ''}`}>
+                                    <td className={`px-4 py-4 whitespace-nowrap text-sm ${dateFilterType === 'DEAL_DATE' ? 'font-bold text-indigo-700 bg-indigo-50/20' : 'text-slate-500'}`}>
+                                        {displayDate ? new Date(displayDate).toLocaleDateString('he-IL') : '—'}
+                                    </td>
+                                    <td className="px-4 py-4 whitespace-nowrap text-sm" onClick={e => e.stopPropagation()}>
+                                        <div className="relative">
+                                            <select value={order.orderStatusId ?? getStatusConfigForOrder(order, statusConfigs)?.id ?? ''} onChange={(e) => { const v = e.target.value; const currentId = order.orderStatusId ?? getStatusConfigForOrder(order, statusConfigs)?.id; if (v && v !== currentId) setPendingStatusChange({ orderId: order.id, order, newStatus: v }); }} className={`appearance-none w-full cursor-pointer px-2 py-1 text-xs leading-5 font-semibold rounded-full focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary text-center ${getStatusBadge(getOrderStatusLabel(order, statusConfigs))}`} aria-label={`שנה סטטוס עבור הזמנה ${order.orderNumber}`}>
+                                                {statusConfigs.sort((a,b) => a.orderIndex - b.orderIndex).map(config => (
+                                                    <option key={config.id} value={config.id}>{config.label}</option>
+                                                ))}
+                                            </select>
+                                            <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center px-1 text-inherit">
+                                                <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd"></path></svg>
+                                            </div>
+                                            {(durationText || statusVisitLabel) && (
+                                                <p className="text-xs text-slate-500 mt-1 text-center">
+                                                    {durationText && <span>({durationText})</span>}
+                                                    {durationText && statusVisitLabel && ' · '}
+                                                    {statusVisitLabel && <span title={`ההזמנה נמצאת בפעם ה-${statusVisitIndex} בסטטוס זה`}>{statusVisitLabel}</span>}
+                                                </p>
+                                            )}
+                                        </div>
+                                    </td>
                                     <td className="px-4 py-4 whitespace-nowrap text-sm font-medium">
                                         <button onClick={() => handleEditOrder(order)} className="text-primary hover:underline font-semibold">{order.orderNumber}</button>
                                         {order.type === OrderType.SERVICE_CALL && <span className="block text-[10px] text-red-600 font-bold">תיקון</span>}
                                     </td>
-                                    <td className="px-4 py-4 whitespace-nowrap text-sm font-medium text-slate-900">
-                                        {order.description}
+                                    <td className="px-4 py-4 text-sm font-medium text-slate-900 max-w-[260px]" title={order.description || ''}>
+                                        <div className="line-clamp-2 break-words">{order.description}</div>
                                         {order.parentOrderId && <div className="text-xs text-slate-400">מקושר להזמנת אב</div>}
                                     </td>
-                                    <td className="px-4 py-4 whitespace-nowrap text-sm text-slate-500">
-                                        <div className="flex items-center gap-2">
-                                            <span>{getCustomerName(order.customerId)}</span>
+                                    <td className="px-4 py-4 text-sm text-slate-500 min-w-[140px] max-w-[220px]" title={getCustomerName(order.customerId)}>
+                                        <div className="flex items-center gap-2 min-w-0">
+                                            <span className="break-words line-clamp-2">{getCustomerName(order.customerId)}</span>
                                             {whatsappUrl && <a href={whatsappUrl} target="crm_whatsapp" title={`שלח וואטסאפ ל-${primaryContact?.phone}`} className="text-green-500 hover:text-green-700"><WhatsAppIcon className="h-5 w-5"/></a>}
                                             {gmailUrl && <a href={gmailUrl} target="crm_email" title={`שלח אימייל ל-${primaryContact?.email}`} className="text-slate-500 hover:text-primary"><EmailIcon className="h-5 w-5"/></a>}
                                             {telUrl && <a href={telUrl} title={`התקשר ל-${primaryContact?.phone}`} className="text-slate-500 hover:text-primary"><PhoneIcon className="h-5 w-5"/></a>}
@@ -2707,24 +4808,21 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
                                         </div>
                                         {!isActiveDeal && <span className="text-[10px] text-slate-400 block">(צפוי)</span>}
                                     </td>
-                                    <td className="px-4 py-4 whitespace-nowrap text-sm font-bold text-red-600">
-                                        {isActiveDeal ? (
-                                            balanceDue > 1 ? (
-                                                <>
-                                                    <div className="text-red-600">{balanceDue.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
-                                                    <div className="text-[10px] text-red-400 font-normal">כולל מע"מ</div>
-                                                </>
-                                            ) : <span className="text-green-600 text-xs">שולם במלואו</span>
+                                    <td className="px-4 py-4 whitespace-nowrap text-sm font-semibold text-slate-700">
+                                        {totalCost > 0 ? (
+                                            <>
+                                                <div>{totalCost.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                                                <div className="text-[10px] text-slate-500 font-normal">
+                                                    ({totalAmount > 0 ? ((totalCost / totalAmount) * 100).toFixed(1) : '0'}% ממחיר המכירה)
+                                                </div>
+                                            </>
                                         ) : (
-                                            <span className="text-slate-400 text-xs font-normal">לא לתשלום</span>
+                                            <span className="text-slate-400 font-normal">—</span>
                                         )}
                                     </td>
-                                     <td className={`px-4 py-4 whitespace-nowrap text-sm font-semibold text-center ${profitColorClass}`}>
+                                    <td className={`px-4 py-4 whitespace-nowrap text-sm font-semibold text-center ${profitColorClass}`}>
                                         <div>{profit.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
                                         <div className="text-xs font-normal opacity-80">({itemMarkup.toFixed(1)}%)</div>
-                                    </td>
-                                    <td className={`px-4 py-4 whitespace-nowrap text-sm ${dateFilterType === 'DEAL_DATE' ? 'font-bold text-indigo-700 bg-indigo-50/20' : 'text-slate-500'}`}>
-                                        {displayDate ? new Date(displayDate).toLocaleDateString('he-IL') : '—'}
                                     </td>
                                     <td className="px-4 py-4 whitespace-nowrap text-sm bg-yellow-50/30">
                                         <div className="flex flex-col">
@@ -2739,18 +4837,22 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
                                             {!isOverdue && balanceDue > 1 && isActiveDeal && <span className="text-[10px] text-slate-400 mt-1">({order.paymentTerms})</span>}
                                         </div>
                                     </td>
-                                    <td className="px-4 py-4 whitespace-nowrap text-sm">
-                                        <div className="relative">
-                                            <select value={order.orderStatus} onChange={(e) => handleStatusChange(order.id, e.target.value)} className={`appearance-none w-full cursor-pointer px-2 py-1 text-xs leading-5 font-semibold rounded-full focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary text-center ${getStatusBadge(order.orderStatus)}`} aria-label={`שנה סטטוס עבור הזמנה ${order.orderNumber}`}>
-                                                {statusConfigs.sort((a,b) => a.orderIndex - b.orderIndex).map(config => (
-                                                    <option key={config.id} value={config.label}>{config.label}</option>
-                                                ))}
-                                            </select>
-                                            <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center px-1 text-inherit">
-                                                <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd"></path></svg>
-                                            </div>
-                                            {durationText && <p className="text-xs text-slate-500 mt-1 text-center">({durationText})</p>}
-                                        </div>
+                                    <td className="px-4 py-4 whitespace-nowrap text-sm font-bold text-red-600">
+                                        {isActiveDeal ? (
+                                            listDerivedPaymentStatus === PaymentStatus.PAID ? (
+                                                <span className="text-green-600 text-xs">שולם במלואו</span>
+                                            ) : (
+                                                <>
+                                                    <div className="text-red-600">{balanceDue.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                                                    <div className="text-[10px] text-red-400 font-normal">כולל מע"מ</div>
+                                                    {listDerivedPaymentStatus === PaymentStatus.PARTIALLY_PAID && (
+                                                        <div className="text-[10px] text-orange-600 font-semibold mt-0.5">תשלום חלקי</div>
+                                                    )}
+                                                </>
+                                            )
+                                        ) : (
+                                            <span className="text-slate-400 text-xs font-normal">לא לתשלום</span>
+                                        )}
                                     </td>
                                 </tr>
                             )
@@ -2758,18 +4860,24 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
                     </tbody>
                     <tfoot className="bg-slate-100 font-semibold border-t-2 border-slate-300 sticky bottom-0 z-10">
                         <tr>
-                            <td className="px-4 py-3 text-end align-top" colSpan={4}>סה"כ</td>
+                            <td className="px-4 py-3 text-end align-top" colSpan={6}>סה"כ</td>
                             <td className="px-4 py-3 text-start text-green-700 align-top">
                                 <div>{summaryTotals.totalAmount.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
                                 <div className="text-[10px] text-slate-500 font-normal">
                                     ({summaryTotals.totalAmountInclVat.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 2, maximumFractionDigits: 2 })} כולל מע"מ משוקלל)
                                 </div>
                             </td>
-                            <td className="px-4 py-3 text-start text-red-700 font-bold align-top">
-                                <div>{summaryTotals.totalBalance.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
-                                <div className="text-[10px] text-red-500 font-normal">
-                                    ({summaryTotals.totalBalanceInclVat.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 2, maximumFractionDigits: 2 })} כולל מע"מ משוקלל)
-                                </div>
+                            <td className="px-4 py-3 text-start text-slate-700 font-semibold align-top">
+                                {summaryTotals.totalCost > 0 ? (
+                                    <>
+                                        <div>{summaryTotals.totalCost.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                                        <div className="text-[10px] text-slate-500 font-normal">
+                                            ({summaryTotals.totalAmount > 0 ? ((summaryTotals.totalCost / summaryTotals.totalAmount) * 100).toFixed(1) : '0'}% ממחיר המכירה)
+                                        </div>
+                                    </>
+                                ) : (
+                                    '—'
+                                )}
                             </td>
                             <td className="px-4 py-3 text-start text-slate-800 align-top">
                                 <div>{summaryTotals.totalProfit.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
@@ -2777,20 +4885,93 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
                                     ({summaryTotals.totalCost > 0 ? ((summaryTotals.totalProfit / summaryTotals.totalCost) * 100).toFixed(1) : (summaryTotals.totalAmount > 0 ? '100' : '0')}% רווח מהעלות)
                                 </div>
                             </td>
-                            <td colSpan={3}></td>
+                            <td colSpan={1}></td>
+                            <td className="px-4 py-3 text-start text-red-700 font-bold align-top">
+                                <div>{summaryTotals.totalBalance.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                                <div className="text-[10px] text-red-500 font-normal">
+                                    ({summaryTotals.totalBalanceInclVat.toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 2, maximumFractionDigits: 2 })} כולל מע"מ משוקלל)
+                                </div>
+                            </td>
                         </tr>
                     </tfoot>
                 </table>
+                
+                {/* Pagination Controls */}
+                {totalCount > 0 && (
+                    <div className="mt-4 flex items-center justify-between bg-white px-4 py-3 border-t border-slate-200">
+                        <div className="flex items-center gap-4">
+                            <div className="text-sm text-slate-600">
+                                מציג {((currentPage - 1) * pageSize) + 1} - {Math.min(currentPage * pageSize, totalCount)} מתוך {totalCount} הזמנות
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <label className="text-sm text-slate-600">שורות לעמוד:</label>
+                                <select 
+                                    value={pageSize} 
+                                    onChange={(e) => {
+                                        setPageSize(parseInt(e.target.value));
+                                        setCurrentPage(1);
+                                    }}
+                                    className="text-sm border border-slate-300 rounded px-2 py-1 focus:ring-primary focus:border-primary"
+                                >
+                                    <option value={25}>25</option>
+                                    <option value={50}>50</option>
+                                    <option value={100}>100</option>
+                                    <option value={200}>200</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <button
+                                onClick={() => setCurrentPage(1)}
+                                disabled={currentPage === 1 || loading}
+                                className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                ראשון
+                            </button>
+                            <button
+                                onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
+                                disabled={currentPage === 1 || loading}
+                                className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                קודם
+                            </button>
+                            <span className="px-3 py-1 text-sm text-slate-600">
+                                עמוד {currentPage} מתוך {Math.ceil(totalCount / pageSize)}
+                            </span>
+                            <button
+                                onClick={() => setCurrentPage(prev => Math.min(Math.ceil(totalCount / pageSize), prev + 1))}
+                                disabled={currentPage >= Math.ceil(totalCount / pageSize) || loading}
+                                className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                הבא
+                            </button>
+                            <button
+                                onClick={() => setCurrentPage(Math.ceil(totalCount / pageSize))}
+                                disabled={currentPage >= Math.ceil(totalCount / pageSize) || loading}
+                                className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                אחרון
+                            </button>
+                        </div>
+                    </div>
+                )}
+                
+                {loading && (
+                    <div className="mt-4 text-center text-slate-500 text-sm">טוען...</div>
+                )}
             </div>
             {isModalOpen && (
                 <Modal 
                     title={editingOrder ? `עריכת הזמנה ${editingOrder.orderNumber}` : `הוספת הזמנה חדשה (${getNextOrderNumber()})`}
-                    onClose={() => setIsModalOpen(false)}
-                    size="5xl"
+                    onClose={closeOrderModal}
+                    size="8xl"
+                    headerEnd={orderFormHeaderContent}
                 >
                     <OrderForm 
                         key={editingOrder ? editingOrder.id : 'new'} 
                         order={editingOrder}
+                        initialCustomerId={!editingOrder ? newOrderPrefillCustomerId : undefined}
+                        initialNewCustomerPhone={!editingOrder ? newOrderPrefillPhone : undefined}
                         customers={customers}
                         setCustomers={setCustomers}
                         suppliers={suppliers}
@@ -2798,18 +4979,69 @@ const OrdersPage: React.FC<OrdersPageProps> = ({ orders, setOrders, customers, s
                         employees={employees}
                         onSave={handleSaveOrder} 
                         onDraftCreate={handleDraftCreate}
-                        onCancel={() => setIsModalOpen(false)} 
+                        onCancel={closeOrderModal} 
                         addActivity={addActivity}
-                        allOrders={orders}
-                        onSwitchOrder={(id) => {
-                            const target = orders.find(o => o.id === id);
+                        onSwitchOrder={async (id) => {
+                            try {
+                                const target = await mongoService.getOrderById(id);
                             if (target) handleEditOrder(target);
+                            } catch (error) {
+                                console.error('Error fetching order for switch:', error);
+                            }
                         }}
                         statusConfigs={statusConfigs}
                         getNextOrderNumber={getNextOrderNumber}
                         vatRate={vatRate}
+                        setHeaderContent={setOrderFormHeaderContent}
+                        readOnly={!!orderLockedByOther}
+                        lockedByUserName={orderLockedByOther?.userName}
+                        onNavigateToPage={onNavigateToPage}
+                        setSelectedCustomerId={setSelectedCustomerId}
                     />
                 </Modal>
+            )}
+            {pendingStatusChange && (
+                <Modal title="שינוי סטטוס הזמנה" onClose={() => !statusChangeSaving && setPendingStatusChange(null)} size="lg">
+                    <p className="text-slate-700 mb-4">
+                        האם לשנות את סטטוס ההזמנה <strong>{pendingStatusChange.order.orderNumber}</strong> ל־<strong>{getStatusConfigByIdOrLabel(pendingStatusChange.newStatus, statusConfigs)?.label ?? pendingStatusChange.newStatus}</strong>?
+                    </p>
+                    <div className="flex gap-3 justify-end">
+                        <button
+                            type="button"
+                            onClick={() => setPendingStatusChange(null)}
+                            disabled={statusChangeSaving}
+                            className="px-4 py-2 rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                        >
+                            ביטול
+                        </button>
+                        <button
+                            type="button"
+                            onClick={async () => {
+                                setStatusChangeSaving(true);
+                                try {
+                                    await handleStatusChange(pendingStatusChange.orderId, pendingStatusChange.newStatus, pendingStatusChange.order);
+                                    setPendingStatusChange(null);
+                                } catch (err: any) {
+                                    console.error('Status change failed:', err);
+                                    const msg = err?.message || 'שגיאה בשמירת שינוי הסטטוס. נסה שוב.';
+                                    alert(msg);
+                                } finally {
+                                    setStatusChangeSaving(false);
+                                }
+                            }}
+                            disabled={statusChangeSaving}
+                            className="px-4 py-2 rounded-lg bg-primary text-white hover:bg-primary/90 disabled:opacity-50"
+                        >
+                            {statusChangeSaving ? 'שומר...' : 'אישור'}
+                        </button>
+                    </div>
+                </Modal>
+            )}
+            {isImportModalOpen && (
+                <OrdersImportModal
+                    onClose={() => setIsImportModalOpen(false)}
+                    onSuccess={() => refetchOrders()}
+                />
             )}
         </div>
     );

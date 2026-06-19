@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
-import { Order, FixedExpense, VariableExpense, Loan, Employee, AttendanceRecord, OrderStatusConfiguration, Debt, Receivable, TransactionStatus } from '../types';
+import { Order, FixedExpense, VariableExpense, Loan, Employee, AttendanceRecord, OrderStatusConfiguration, Debt, Receivable, TransactionStatus, PayrollOverrideMap } from '../types';
 import { calculateOrderTotals, getEmployeeSalaryAtDate } from '../utils/calculations';
+import { getStatusConfigForOrder } from '../utils/statusHelpers';
 import Modal from './Modal';
 
 interface PnLReportProps {
@@ -14,6 +15,9 @@ interface PnLReportProps {
     vatRate: number;
     debts: Debt[];
     receivables: Receivable[];
+    payrollOverrides?: PayrollOverrideMap;
+    /** When provided, order numbers in income/cogs drill-down become clickable and open the order */
+    onNavigateToOrder?: (orderId: string) => void;
 }
 
 interface DrillDownItem {
@@ -22,6 +26,12 @@ interface DrillDownItem {
     date?: Date;
     description?: string;
     subtext?: string;
+    /** True when this payroll item uses a manual override from Attendance page */
+    manualOverride?: boolean;
+    /** Order id for income/cogs items - makes the order number clickable in drill-down */
+    orderId?: string;
+    /** Order number (e.g. ORD-1007) for display when opening the order */
+    orderNumber?: string;
 }
 
 interface MonthlyPnL {
@@ -62,7 +72,7 @@ interface MonthlyPnL {
 }
 
 const PnLReport: React.FC<PnLReportProps> = ({ 
-    orders, fixedExpenses, variableExpenses, loans, employees, attendanceRecords, statusConfigs, vatRate, debts, receivables
+    orders, fixedExpenses, variableExpenses, loans, employees, attendanceRecords, statusConfigs, vatRate, debts, receivables, payrollOverrides = {}, onNavigateToOrder
 }) => {
     const [drillDown, setDrillDown] = useState<{ title: string; items: DrillDownItem[] } | null>(null);
 
@@ -87,16 +97,34 @@ const PnLReport: React.FC<PnLReportProps> = ({
         return years;
     }, []);
 
-    // Updated Balance Overview with Incl/Excl VAT
+    // One document per orderNumber: keep the one with latest dealStartDate/date (aligned with Orders page and getPayableItems)
+    const canonicalOrders = useMemo(() => {
+        const ordersByNumber = new Map<string, Order>();
+        orders.forEach(order => {
+            const key = order.orderNumber;
+            const existing = ordersByNumber.get(key);
+            const orderDate = new Date(order.dealStartDate || order.date).getTime();
+            if (!existing) {
+                ordersByNumber.set(key, order);
+                return;
+            }
+            const existingDate = new Date(existing.dealStartDate || existing.date).getTime();
+            if (orderDate > existingDate) ordersByNumber.set(key, order);
+        });
+        return Array.from(ordersByNumber.values());
+    }, [orders]);
+
+    // Updated Balance Overview with Incl/Excl VAT (uses canonical orders to avoid double-counting)
     const balanceOverview = useMemo(() => {
         let customerDebtIncl = 0;
         let customerDebtExcl = 0;
         let supplierDebtIncl = 0;
         let supplierDebtExcl = 0;
 
-        orders.forEach(order => {
-            const config = statusConfigs.find(c => c.label === order.orderStatus);
-            if (!config?.isActiveDeal || config.isLost) return;
+        // Match status by id or label; exclude unknown status / אבוד / non-active
+        canonicalOrders.forEach(order => {
+            const config = getStatusConfigForOrder(order, statusConfigs);
+            if (!config || config.isLost || !config.isActiveDeal) return;
 
             const { totalAmount, totalPaid } = calculateOrderTotals(order);
             const orderVat = order.vatRate ?? vatRate;
@@ -134,20 +162,50 @@ const PnLReport: React.FC<PnLReportProps> = ({
                     supplierDebtExcl += (remainingInclSup / vatMult);
                 }
             });
+            (order.lineItems || []).filter(li => li.serviceType === 'DELIVERY' || li.serviceType === 'INSTALLATION').forEach(li => {
+                const costGross = (li.cost ?? 0) * (li.quantity ?? 1) * vatMult;
+                const paidToSupplier = (li.supplierPayments || []).reduce((s, p) => 
+                    (p.status && invalidStatuses.includes(p.status)) ? s : s + p.amount, 0);
+                const remainingInclSup = Math.max(0, costGross - paidToSupplier);
+                if (remainingInclSup > 0.1) {
+                    supplierDebtIncl += remainingInclSup;
+                    supplierDebtExcl += (remainingInclSup / vatMult);
+                }
+            });
         });
 
         return { customerDebtIncl, customerDebtExcl, supplierDebtIncl, supplierDebtExcl };
-    }, [orders, statusConfigs, vatRate]);
+    }, [canonicalOrders, statusConfigs, vatRate]);
 
     const monthlyData = useMemo(() => {
         const pnlMap: Record<string, MonthlyPnL> = {};
         
         const getMonthKey = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
         const getLabel = (date: Date) => date.toLocaleString('he-IL', { month: 'long', year: 'numeric' });
+        /** Parse schedule dueDate from API (Date, ISO string, or DD.MM.YYYY / DD/MM/YYYY) to local Date for correct month. */
+        const parseScheduleDueDate = (dueDate: Date | string): Date | null => {
+            if (dueDate instanceof Date) {
+                const d = new Date(dueDate.getTime());
+                return isNaN(d.getTime()) ? null : d;
+            }
+            if (typeof dueDate !== 'string') return null;
+            const iso = new Date(dueDate);
+            if (!isNaN(iso.getTime())) return iso;
+            const parts = dueDate.split(/[./]/).map(p => parseInt(p.trim(), 10)).filter(n => !isNaN(n));
+            if (parts.length >= 3) {
+                const day = Math.min(Math.max(1, parts[0]), 31);
+                const month = Math.min(Math.max(0, parts[1] - 1), 11);
+                const year = parts[2] < 100 ? 2000 + parts[2] : parts[2];
+                const local = new Date(year, month, day);
+                return isNaN(local.getTime()) ? null : local;
+            }
+            return null;
+        };
 
         // Initialize range of months based on filters
         const startDate = new Date(startYear, startMonth - 1, 1);
-        const endDate = new Date(endYear, endMonth - 1, 1);
+        // endDate should be the last day of the selected month for proper filtering
+        const endDate = new Date(endYear, endMonth, 0); // Day 0 = last day of previous month
         
         const tempDate = new Date(startDate);
         while (tempDate <= endDate) {
@@ -175,12 +233,14 @@ const PnLReport: React.FC<PnLReportProps> = ({
             tempDate.setMonth(tempDate.getMonth() + 1);
         }
 
-        // 1. Process Orders (Income & COGS & VAT)
-        orders.forEach(order => {
-            const config = statusConfigs.find(c => c.label === order.orderStatus);
-            if (!config?.isActiveDeal) return;
+        // 1. Process Orders (Income & COGS & VAT) — uses canonicalOrders (one per orderNumber, latest date)
+        canonicalOrders.forEach((order) => {
+            const config = getStatusConfigForOrder(order, statusConfigs);
+            const skipStatus = !config || config.isLost || !config.isActiveDeal;
+            if (skipStatus) return;
 
-            const date = order.dealStartDate || order.date;
+            const rawDate = order.dealStartDate || order.date;
+            const date = rawDate instanceof Date ? rawDate : new Date(rawDate);
             const key = getMonthKey(date);
             if (!pnlMap[key]) return;
 
@@ -189,20 +249,25 @@ const PnLReport: React.FC<PnLReportProps> = ({
 
             const vatOutAmount = totals.totalAmount * (currentVat / 100);
             const vatInAmount = totals.totalCost * (currentVat / 100);
-            const displayDate = order.dealStartDate || order.date;
+            const displayDateRaw = order.dealStartDate || order.date;
+            const displayDate = displayDateRaw instanceof Date ? displayDateRaw : new Date(displayDateRaw);
 
             pnlMap[key].income += totals.totalAmount;
             pnlMap[key].incomeItems.push({ 
                 name: `${order.orderNumber} - ${order.description}`, 
                 amount: totals.totalAmount, 
-                date: displayDate 
+                date: displayDate,
+                orderId: order.id,
+                orderNumber: order.orderNumber
             });
             
             pnlMap[key].cogs += totals.totalCost;
             pnlMap[key].cogsItems.push({ 
                 name: `עלויות ייצור: ${order.orderNumber}`, 
                 amount: totals.totalCost, 
-                date: displayDate 
+                date: displayDate,
+                orderId: order.id,
+                orderNumber: order.orderNumber
             });
             
             // VAT is now calculated on cash flow basis (when payments are made), not on order date
@@ -210,18 +275,18 @@ const PnLReport: React.FC<PnLReportProps> = ({
         });
         
         // 1a. Process Customer Payments (VAT Output - Cash Flow Basis)
-        orders.forEach(order => {
-            const config = statusConfigs.find(c => c.label === order.orderStatus);
-            if (!config?.isActiveDeal) return;
+        // מקור: תשלומי לקוח (order.payments) – אותם נתונים כמו בעמוד הזמנות
+        canonicalOrders.forEach((order) => {
+            const config = getStatusConfigForOrder(order, statusConfigs);
+            if (!config || config.isLost || !config.isActiveDeal) return;
             
             const currentVat = order.vatRate ?? vatRate;
             const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
-            
-            // Process customer payments
-            order.payments?.forEach(payment => {
+
+            order.payments?.forEach((payment) => {
                 if (payment.status && invalidStatuses.includes(payment.status)) return;
                 
-                const date = new Date(payment.date);
+                const date = payment.date instanceof Date ? payment.date : new Date(payment.date);
                 const key = getMonthKey(date);
                 if (!pnlMap[key]) return;
                 
@@ -235,16 +300,18 @@ const PnLReport: React.FC<PnLReportProps> = ({
                         name: `מע"מ עסקאות (תשלום מלקוח): ${order.orderNumber}`,
                         amount: vatAmount,
                         date: payment.date,
-                        subtext: `חולץ מתשלום ₪${payment.amount.toLocaleString()}`
+                        subtext: `חולץ מתשלום ₪${payment.amount.toLocaleString()}`,
+                        orderId: order.id,
+                        orderNumber: order.orderNumber
                     });
                 }
             });
         });
         
         // 1b. Process Supplier Payments (VAT Input - Cash Flow Basis)
-        orders.forEach(order => {
-            const config = statusConfigs.find(c => c.label === order.orderStatus);
-            if (!config?.isActiveDeal) return;
+        canonicalOrders.forEach(order => {
+            const config = getStatusConfigForOrder(order, statusConfigs);
+            if (!config || config.isLost || !config.isActiveDeal) return;
             
             const currentVat = order.vatRate ?? vatRate;
             const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
@@ -254,7 +321,7 @@ const PnLReport: React.FC<PnLReportProps> = ({
                 li.supplierPayments?.forEach(payment => {
                     if (payment.status && invalidStatuses.includes(payment.status)) return;
                     
-                    const date = new Date(payment.date);
+                    const date = payment.date instanceof Date ? payment.date : new Date(payment.date);
                     const key = getMonthKey(date);
                     if (!pnlMap[key]) return;
                     
@@ -269,7 +336,9 @@ const PnLReport: React.FC<PnLReportProps> = ({
                         name: `תשלום לספק: ${order.orderNumber}`,
                         amount: netAmount,
                         date: payment.date,
-                        subtext: `פריט: ${li.description}`
+                        subtext: `פריט: ${li.description}`,
+                        orderId: order.id,
+                        orderNumber: order.orderNumber
                     });
                     
                     if (vatAmount > 0.01) {
@@ -278,7 +347,9 @@ const PnLReport: React.FC<PnLReportProps> = ({
                             name: `מע"מ תשומות (תשלום לספק): ${order.orderNumber}`,
                             amount: vatAmount,
                             date: payment.date,
-                            subtext: `חולץ מתשלום ₪${payment.amount.toLocaleString()}`
+                            subtext: `חולץ מתשלום ₪${payment.amount.toLocaleString()}`,
+                            orderId: order.id,
+                            orderNumber: order.orderNumber
                         });
                     }
                 });
@@ -289,7 +360,7 @@ const PnLReport: React.FC<PnLReportProps> = ({
                 as.supplierPayments?.forEach(payment => {
                     if (payment.status && invalidStatuses.includes(payment.status)) return;
                     
-                    const date = new Date(payment.date);
+                    const date = payment.date instanceof Date ? payment.date : new Date(payment.date);
                     const key = getMonthKey(date);
                     if (!pnlMap[key]) return;
                     
@@ -304,7 +375,9 @@ const PnLReport: React.FC<PnLReportProps> = ({
                         name: `תשלום לספק: ${order.orderNumber}`,
                         amount: netAmount,
                         date: payment.date,
-                        subtext: `שירות: ${as.description}`
+                        subtext: `שירות: ${as.description}`,
+                        orderId: order.id,
+                        orderNumber: order.orderNumber
                     });
                     
                     if (vatAmount > 0.01) {
@@ -313,7 +386,39 @@ const PnLReport: React.FC<PnLReportProps> = ({
                             name: `מע"מ תשומות (תשלום לספק): ${order.orderNumber}`,
                             amount: vatAmount,
                             date: payment.date,
-                            subtext: `חולץ מתשלום ₪${payment.amount.toLocaleString()}`
+                            subtext: `חולץ מתשלום ₪${payment.amount.toLocaleString()}`,
+                            orderId: order.id,
+                            orderNumber: order.orderNumber
+                        });
+                    }
+                });
+            });
+            (order.lineItems || []).filter(li => li.serviceType === 'DELIVERY' || li.serviceType === 'INSTALLATION').forEach(li => {
+                li.supplierPayments?.forEach(payment => {
+                    if (payment.status && invalidStatuses.includes(payment.status)) return;
+                    const date = payment.date instanceof Date ? payment.date : new Date(payment.date);
+                    const key = getMonthKey(date);
+                    if (!pnlMap[key]) return;
+                    const netAmount = payment.amount / (1 + currentVat / 100);
+                    const vatAmount = payment.amount - netAmount;
+                    pnlMap[key].debtPayments += netAmount;
+                    pnlMap[key].debtPaymentItems.push({
+                        name: `תשלום לספק: ${order.orderNumber}`,
+                        amount: netAmount,
+                        date: payment.date,
+                        subtext: `שירות: ${li.description}`,
+                        orderId: order.id,
+                        orderNumber: order.orderNumber
+                    });
+                    if (vatAmount > 0.01) {
+                        pnlMap[key].vatInput += vatAmount;
+                        pnlMap[key].vatInputItems.push({
+                            name: `מע"מ תשומות (תשלום לספק): ${order.orderNumber}`,
+                            amount: vatAmount,
+                            date: payment.date,
+                            subtext: `חולץ מתשלום ₪${payment.amount.toLocaleString()}`,
+                            orderId: order.id,
+                            orderNumber: order.orderNumber
                         });
                     }
                 });
@@ -323,8 +428,8 @@ const PnLReport: React.FC<PnLReportProps> = ({
         // 2. Process Fixed Expenses
         fixedExpenses.forEach(fe => {
             if (!fe.isActive) return;
-            const feStart = new Date(fe.startDate);
-            const feEnd = fe.endDate ? new Date(fe.endDate) : new Date(2099, 11, 31);
+            const feStart = fe.startDate instanceof Date ? fe.startDate : new Date(fe.startDate);
+            const feEnd = fe.endDate ? (fe.endDate instanceof Date ? fe.endDate : new Date(fe.endDate)) : new Date(2099, 11, 31);
 
             Object.keys(pnlMap).forEach(key => {
                 const [y, m] = key.split('-').map(Number);
@@ -339,7 +444,6 @@ const PnLReport: React.FC<PnLReportProps> = ({
 
                     pnlMap[key].fixedExpenses += net;
                     pnlMap[key].fixedItems.push({ name: fe.name, amount: net, subtext: fe.category });
-                    
                     if (vat > 0) {
                         pnlMap[key].vatInput += vat;
                         pnlMap[key].vatInputItems.push({ name: `מע"מ תשומות (קבועות): ${fe.name}`, amount: vat, subtext: fe.category });
@@ -348,33 +452,55 @@ const PnLReport: React.FC<PnLReportProps> = ({
             });
         });
 
-        // 3. Process Variable Expenses
+        // 3. Process Variable Expenses (cash basis for installments: spread by repaymentDate)
         variableExpenses.forEach(ve => {
-            const date = new Date(ve.date);
-            const key = getMonthKey(date);
-            if (!pnlMap[key]) return;
-
-            const amount = ve.amount;
-            const net = ve.isVatExempt ? amount : (ve.includesVat ? amount / (1 + vatRate / 100) : amount);
-            const vat = ve.isVatExempt ? 0 : net * (vatRate / 100);
-
-            pnlMap[key].variableExpenses += net;
-            pnlMap[key].variableItems.push({ name: ve.name, amount: net, date: ve.date, subtext: ve.category });
-            
-            if (vat > 0) {
-                pnlMap[key].vatInput += vat;
-                pnlMap[key].vatInputItems.push({ name: `מע"מ תשומות (משתנות): ${ve.name}`, amount: vat, date: ve.date, subtext: ve.category });
+            const hasInstallments = ve.checks && ve.checks.length > 0;
+            if (hasInstallments) {
+                const totalChecks = ve.checks!.length;
+                ve.checks!.forEach((check, idx) => {
+                    if (!check.repaymentDate) return;
+                    const rd = new Date(check.repaymentDate);
+                    const key = getMonthKey(rd);
+                    if (!pnlMap[key]) return;
+                    const amount = check.amount;
+                    const net = ve.isVatExempt ? amount : (ve.includesVat ? amount / (1 + vatRate / 100) : amount);
+                    const vat = ve.isVatExempt ? 0 : (ve.includesVat ? amount - net : net * (vatRate / 100));
+                    const instLabel = `תשלום ${idx + 1}/${totalChecks}`;
+                    const subtextBase = ve.category ? `${ve.category} (פריסה)` : 'פריסה';
+                    pnlMap[key].variableExpenses += net;
+                    pnlMap[key].variableItems.push({ name: ve.name, amount: net, date: rd, subtext: `${instLabel} • ${subtextBase}` });
+                    if (vat > 0) {
+                        pnlMap[key].vatInput += vat;
+                        pnlMap[key].vatInputItems.push({ name: `מע"מ תשומות (משתנות): ${ve.name}`, amount: vat, date: rd, subtext: `${instLabel} • ${subtextBase}` });
+                    }
+                });
+            } else {
+                const date = ve.date instanceof Date ? ve.date : new Date(ve.date);
+                const key = getMonthKey(date);
+                if (!pnlMap[key]) return;
+                const amount = ve.amount;
+                const net = ve.isVatExempt ? amount : (ve.includesVat ? amount / (1 + vatRate / 100) : amount);
+                const vat = ve.isVatExempt ? 0 : net * (vatRate / 100);
+                pnlMap[key].variableExpenses += net;
+                pnlMap[key].variableItems.push({ name: ve.name, amount: net, date: ve.date, subtext: ve.category });
+                if (vat > 0) {
+                    pnlMap[key].vatInput += vat;
+                    pnlMap[key].vatInputItems.push({ name: `מע"מ תשומות (משתנות): ${ve.name}`, amount: vat, date: ve.date, subtext: ve.category });
+                }
             }
         });
 
-        // 4. Process Payroll
+        // 4. Process Payroll (respects manual payroll overrides from Attendance page)
         Object.keys(pnlMap).forEach(monthKey => {
             const [year, month] = monthKey.split('-').map(Number);
             employees.forEach(emp => {
-                if (emp.status === 'INACTIVE' && emp.startDate > new Date(year, month, 0)) return;
+                const empStartDate = emp.startDate instanceof Date ? emp.startDate : new Date(emp.startDate);
+                // Check if employee was inactive before the current month
+                // new Date(year, month, 1) is the first day of the current month
+                if (emp.status === 'INACTIVE' && empStartDate > new Date(year, month - 1, 1)) return;
 
                 const empRecords = attendanceRecords.filter(r => {
-                    const d = new Date(r.date);
+                    const d = r.date instanceof Date ? r.date : new Date(r.date);
                     return r.employeeId === emp.id && d.getMonth() + 1 === month && d.getFullYear() === year;
                 });
 
@@ -384,17 +510,48 @@ const PnLReport: React.FC<PnLReportProps> = ({
                 } else {
                     empRecords.forEach(r => {
                         if (r.status === 'PRESENT' || r.status === 'WFH') {
-                            const hourlyRate = getEmployeeSalaryAtDate(emp, new Date(r.date)).amount;
+                            const rDate = r.date instanceof Date ? r.date : new Date(r.date);
+                            const hourlyRate = getEmployeeSalaryAtDate(emp, rDate).amount;
                             monthlyGross += (r.totalHours * hourlyRate);
                         }
                     });
                 }
-                
-                const employerCost = monthlyGross * (emp.employerCostPercentage / 100);
-                const totalPayroll = monthlyGross + employerCost;
+
+                // Social/employer part: in PnL we use employerCostPercentage as % on top of gross
+                let employerCostPart = monthlyGross * ((emp.employerCostPercentage || 0) / 100);
+                let totalPayroll = monthlyGross + employerCostPart;
+                let manualOverride = false;
+
+                const override = (payrollOverrides ?? {})[`${emp.id}_${year}_${month}`];
+                if (override) {
+                    if (override.finalEmployerCost !== undefined) {
+                        // "עלות מעביד סופית" = total cost to employer (gross + social)
+                        totalPayroll = override.finalEmployerCost;
+                        if (override.finalGross !== undefined) {
+                            employerCostPart = override.finalEmployerCost - override.finalGross;
+                            monthlyGross = override.finalGross;
+                        }
+                        manualOverride = true;
+                    } else if (override.finalGross !== undefined) {
+                        monthlyGross = override.finalGross;
+                        employerCostPart = monthlyGross * ((emp.employerCostPercentage || 0) / 100);
+                        totalPayroll = monthlyGross + employerCostPart;
+                        manualOverride = true;
+                    }
+                }
+
                 if (totalPayroll > 0) {
                     pnlMap[monthKey].payroll += totalPayroll;
-                    pnlMap[monthKey].payrollItems.push({ name: emp.name, amount: totalPayroll, subtext: `שכר: ${monthlyGross.toLocaleString()}, סוציאליות: ${employerCost.toLocaleString()}` });
+                    const subtextBase = manualOverride && override?.finalEmployerCost !== undefined && override?.finalGross === undefined
+                        ? `עלות מעביד מתוקנת: ${totalPayroll.toLocaleString()}`
+                        : `שכר: ${monthlyGross.toLocaleString()}, סוציאליות: ${employerCostPart.toLocaleString()}${manualOverride ? ' • מתוקן ידנית' : ''}`;
+                    const subtext = override?.note ? [override.note, subtextBase].filter(Boolean).join(' • ') : subtextBase;
+                    pnlMap[monthKey].payrollItems.push({
+                        name: emp.name,
+                        amount: totalPayroll,
+                        subtext,
+                        manualOverride: manualOverride || undefined
+                    });
                 }
             });
         });
@@ -403,94 +560,94 @@ const PnLReport: React.FC<PnLReportProps> = ({
         loans.forEach(loan => {
             let loanProcessed = false;
             
-            // Handle loans with schedule
+            // Handle loans with schedule — show ALL scheduled payments in their due month (matches Loans page)
             if (loan.schedule && loan.schedule.length > 0) {
-                const today = new Date();
-                today.setHours(0, 0, 0, 0);
-                
                 loan.schedule.forEach(entry => {
-                    const date = new Date(entry.dueDate);
-                    const dateClean = new Date(date);
-                    dateClean.setHours(0, 0, 0, 0);
-                    const key = getMonthKey(date);
+                    const parsed = parseScheduleDueDate(entry.dueDate as Date | string);
+                    if (!parsed) return;
+                    const dateClean = new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate());
+                    const key = getMonthKey(dateClean);
                     
-                    // Show payments that are within the selected date range
-                    // Include both paid and unpaid entries if they're in the date range
                     if (!pnlMap[key]) return;
-                    
-                    // Include if: paid OR past due date OR within selected date range
-                    const shouldInclude = entry.isPaid || dateClean <= today || true; // Always include if in date range
-                    if (!shouldInclude) return;
                     
                     loanProcessed = true;
                     
-                    // Calculate financing expenses: interest + fees
                     const interestAmount = entry.interestAmount || 0;
                     const feesAmount = entry.fees || 0;
                     const totalFinancingCost = interestAmount + feesAmount;
                     
                     pnlMap[key].financingExpenses += totalFinancingCost;
-                    
-                    // Add interest item if exists
                     if (interestAmount > 0) {
-                        pnlMap[key].financingItems.push({ name: `ריבית: ${loan.lenderName}`, amount: interestAmount, date: date });
+                        pnlMap[key].financingItems.push({ name: `ריבית: ${loan.lenderName}`, amount: interestAmount, date: dateClean });
                     }
-                    
-                    // Add fees item if exists
                     if (feesAmount > 0) {
-                        pnlMap[key].financingItems.push({ name: `עמלה: ${loan.lenderName}`, amount: feesAmount, date: date });
+                        pnlMap[key].financingItems.push({ name: `עמלה: ${loan.lenderName}`, amount: feesAmount, date: dateClean });
                     }
-                    
                     pnlMap[key].loanPrincipal += entry.principalAmount || 0;
-                    pnlMap[key].loanPrincipalItems.push({ name: `קרן: ${loan.lenderName}`, amount: entry.principalAmount || 0, date: date });
+                    pnlMap[key].loanPrincipalItems.push({ name: `קרן: ${loan.lenderName}`, amount: entry.principalAmount || 0, date: dateClean });
                 });
             }
             
-            // If loan wasn't processed from schedule, try other methods
-            if (!loanProcessed && loan.startDate && loan.monthlyPayment) {
-                const startDate = new Date(loan.startDate);
+            // If loan wasn't processed from schedule, try fallback
+            const hasStartDate = loan.startDate != null && loan.startDate !== undefined;
+            const monthlyPmt = (loan.monthlyPayment != null && loan.monthlyPayment !== undefined) ? loan.monthlyPayment : 0;
+            // Fallback 1: startDate available (include even when monthlyPayment is 0)
+            if (!loanProcessed && hasStartDate) {
+                const startDate = loan.startDate instanceof Date ? loan.startDate : new Date(loan.startDate);
                 const monthlyRate = (loan.interestRate && loan.interestRate > 0) ? (loan.interestRate / 100 / 12) : 0;
                 let remainingPrincipal = loan.principalAmount || 0;
                 
                 // Determine how many payments to calculate
                 let numPayments = 0;
-                if (loan.paymentsMade && loan.paymentsMade > 0) {
-                    // Use paymentsMade if available
+                if (loan.paymentsMade != null && loan.paymentsMade > 0) {
                     numPayments = loan.paymentsMade;
-                } else if (loan.durationMonths && loan.durationMonths > 0) {
-                    // Use durationMonths if available
+                } else if (loan.durationMonths != null && loan.durationMonths > 0) {
                     numPayments = loan.durationMonths;
                 } else {
                     // Calculate from startDate to end of selected period
-                    const endDate = new Date(endYear, endMonth - 1, 1);
-                    const monthsDiff = (endDate.getFullYear() - startDate.getFullYear()) * 12 + (endDate.getMonth() - startDate.getMonth()) + 1;
+                    const periodEnd = new Date(endYear, endMonth - 1, 1);
+                    const monthsDiff = (periodEnd.getFullYear() - startDate.getFullYear()) * 12 + (periodEnd.getMonth() - startDate.getMonth()) + 1;
                     numPayments = Math.max(0, monthsDiff);
                 }
                 
-                // Calculate payments
+                let anyAdded = false;
+                let firstKeyInRange: string | null = null;
                 for (let i = 1; i <= numPayments; i++) {
-                    const dueDate = new Date(startDate);
-                    dueDate.setMonth(startDate.getMonth() + (i - 1));
+                    const dueDate = new Date(startDate.getFullYear(), startDate.getMonth() + (i - 1), 1);
                     const key = getMonthKey(dueDate);
                     if (!pnlMap[key]) continue;
+                    if (firstKeyInRange == null) firstKeyInRange = key;
                     
                     const interestAmount = monthlyRate > 0 ? (remainingPrincipal * monthlyRate) : 0;
-                    const principalAmount = loan.monthlyPayment - interestAmount;
+                    const principalAmount = Math.max(0, monthlyPmt - interestAmount);
                     remainingPrincipal = Math.max(0, remainingPrincipal - principalAmount);
                     
-                    pnlMap[key].financingExpenses += Math.round(interestAmount * 100) / 100;
-                    pnlMap[key].financingItems.push({ 
-                        name: `ריבית: ${loan.lenderName}`, 
-                        amount: Math.round(interestAmount * 100) / 100, 
-                        date: dueDate 
-                    });
-                    
-                    pnlMap[key].loanPrincipal += Math.round(principalAmount * 100) / 100;
-                    pnlMap[key].loanPrincipalItems.push({ 
-                        name: `קרן: ${loan.lenderName}`, 
-                        amount: Math.round(principalAmount * 100) / 100, 
-                        date: dueDate 
-                    });
+                    const interestRounded = Math.round(interestAmount * 100) / 100;
+                    const principalRounded = Math.round(principalAmount * 100) / 100;
+                    if (interestRounded > 0) {
+                        pnlMap[key].financingExpenses += interestRounded;
+                        pnlMap[key].financingItems.push({ 
+                            name: `ריבית: ${loan.lenderName}`, 
+                            amount: interestRounded, 
+                            date: dueDate 
+                        });
+                        anyAdded = true;
+                    }
+                    if (principalRounded > 0) {
+                        pnlMap[key].loanPrincipal += principalRounded;
+                        pnlMap[key].loanPrincipalItems.push({ 
+                            name: `קרן: ${loan.lenderName}`, 
+                            amount: principalRounded, 
+                            date: dueDate 
+                        });
+                        anyAdded = true;
+                    }
+                }
+                // So loan appears in report even when all amounts are 0 (e.g. 0% loan or no payments in period)
+                if (!anyAdded && firstKeyInRange) {
+                    const dueDate = new Date(startDate.getFullYear(), startDate.getMonth(), 1);
+                    pnlMap[firstKeyInRange].financingItems.push({ name: `ריבית: ${loan.lenderName}`, amount: 0, date: dueDate });
+                    pnlMap[firstKeyInRange].loanPrincipalItems.push({ name: `קרן: ${loan.lenderName}`, amount: 0, date: dueDate });
                 }
             }
         });
@@ -501,7 +658,7 @@ const PnLReport: React.FC<PnLReportProps> = ({
                 const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
                 if (p.status && invalidStatuses.includes(p.status)) return;
                 
-                const date = new Date(p.date);
+                const date = p.date instanceof Date ? p.date : new Date(p.date);
                 const key = getMonthKey(date);
                 if (!pnlMap[key]) return;
 
@@ -533,7 +690,7 @@ const PnLReport: React.FC<PnLReportProps> = ({
                 const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
                 if (p.status && invalidStatuses.includes(p.status)) return;
 
-                const date = new Date(p.date);
+                const date = p.date instanceof Date ? p.date : new Date(p.date);
                 const key = getMonthKey(date);
                 if (!pnlMap[key]) return;
 
@@ -565,19 +722,19 @@ const PnLReport: React.FC<PnLReportProps> = ({
             m.operatingProfit = m.grossProfit - (m.payroll + m.fixedExpenses + m.variableExpenses);
             m.netProfit = m.operatingProfit - m.financingExpenses;
             m.vatBalance = m.vatOutput - m.vatInput;
-            // VAT Cash Flow Adjustment:
-            // - vatInput is a credit (money we get back) - positive impact on cash flow
-            // - vatOutput is a debit (money we owe) - negative impact on cash flow
-            // So: vatInput adds to cash flow, vatOutput subtracts from cash flow
+            // VAT is handled separately in the VAT section at the end of the report
+            // VAT should not be included in P&L calculations as it's not part of profit/loss
+            // VAT Cash Flow Adjustment kept for reference but not used in netCashFlow
             m.vatCashFlowAdjustment = m.vatInput - m.vatOutput;
             
-            // Net Cash Flow Logic: Includes VAT balance impact
-            m.netCashFlow = m.netProfit + m.receivableCollections - m.debtPayments - m.loanPrincipal + m.vatCashFlowAdjustment;
+            // Net Cash Flow Logic: Excludes VAT (VAT is shown separately)
+            // VAT is a tax collection/refund mechanism, not part of P&L
+            m.netCashFlow = m.netProfit + m.receivableCollections - m.debtPayments - m.loanPrincipal;
             
             return m;
         });
 
-    }, [orders, fixedExpenses, variableExpenses, loans, employees, attendanceRecords, statusConfigs, vatRate, debts, receivables, startMonth, startYear, endMonth, endYear]);
+    }, [canonicalOrders, fixedExpenses, variableExpenses, loans, employees, attendanceRecords, statusConfigs, vatRate, debts, receivables, startMonth, startYear, endMonth, endYear, payrollOverrides]);
 
     // Period Totals Logic
     const periodTotals = useMemo((): MonthlyPnL => {
@@ -602,7 +759,7 @@ const PnLReport: React.FC<PnLReportProps> = ({
             vatCashFlowAdjustment: 0
         };
 
-        return monthlyData.reduce((acc, m) => {
+        const result = monthlyData.reduce((acc, m) => {
             acc.income += m.income;
             acc.incomeItems.push(...m.incomeItems);
             acc.cogs += m.cogs;
@@ -633,6 +790,8 @@ const PnLReport: React.FC<PnLReportProps> = ({
             acc.vatCashFlowAdjustment += m.vatCashFlowAdjustment;
             return acc;
         }, initial);
+
+        return result;
     }, [monthlyData]);
 
     const formatCurrency = (val: number) => 
@@ -646,15 +805,8 @@ const PnLReport: React.FC<PnLReportProps> = ({
                     <div className="text-[10px] bg-slate-200 text-slate-500 px-1.5 rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">פירוט</div>
                 )}
             </td>
-            {/* Render Total Column First (RTL logic) */}
-            <td 
-                onClick={() => itemsField && (periodTotals[itemsField] as DrillDownItem[]).length > 0 && setDrillDown({ title: `${label} - סה"כ תקופה`, items: periodTotals[itemsField] as DrillDownItem[] })}
-                className={`px-4 py-3 text-center border-l border-slate-200 font-black bg-indigo-50/20 ${itemsField && (periodTotals[itemsField] as DrillDownItem[]).length > 0 ? 'cursor-pointer hover:bg-indigo-100/50' : ''} ${customColor ? customColor : (isNegative ? 'text-rose-600' : 'text-slate-800')}`}
-            >
-                {isNegative && (periodTotals[field] as number) > 0 ? '(' : ''}{formatCurrency(periodTotals[field] as number)}{isNegative && (periodTotals[field] as number) > 0 ? ')' : ''}
-            </td>
-            {/* Render Monthly Columns */}
-            {monthlyData.map(m => {
+            {/* Monthly columns: Dec → Jan (so visually Jan is right, Dec left); then annual summary rightmost */}
+            {[...monthlyData].reverse().map(m => {
                 const val = m[field] as number;
                 const items = itemsField ? m[itemsField] as DrillDownItem[] : [];
                 return (
@@ -667,6 +819,13 @@ const PnLReport: React.FC<PnLReportProps> = ({
                     </td>
                 );
             })}
+            {/* Annual summary column (rightmost) */}
+            <td 
+                onClick={() => itemsField && (periodTotals[itemsField] as DrillDownItem[]).length > 0 && setDrillDown({ title: `${label} - סה"כ תקופה`, items: periodTotals[itemsField] as DrillDownItem[] })}
+                className={`px-4 py-3 text-center border-l border-slate-200 font-black bg-indigo-50/20 ${itemsField && (periodTotals[itemsField] as DrillDownItem[]).length > 0 ? 'cursor-pointer hover:bg-indigo-100/50' : ''} ${customColor ? customColor : (isNegative ? 'text-rose-600' : 'text-slate-800')}`}
+            >
+                {isNegative && (periodTotals[field] as number) > 0 ? '(' : ''}{formatCurrency(periodTotals[field] as number)}{isNegative && (periodTotals[field] as number) > 0 ? ')' : ''}
+            </td>
         </tr>
     );
 
@@ -684,10 +843,38 @@ const PnLReport: React.FC<PnLReportProps> = ({
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-100">
-                                {drillDown.items.sort((a,b) => (b.date?.getTime() || 0) - (a.date?.getTime() || 0)).map((item, idx) => (
+                                {drillDown.items
+                                    .slice()
+                                    .sort((a, b) => {
+                                        const ts = (d: Date | string | undefined) =>
+                                            d instanceof Date ? d.getTime() : (d ? new Date(d).getTime() : 0);
+                                        return ts(b.date) - ts(a.date);
+                                    })
+                                    .map((item, idx) => (
                                     <tr key={idx} className="hover:bg-slate-50">
                                         <td className="px-4 py-3">
-                                            <div className="font-bold text-slate-800">{item.name}</div>
+                                            <div className="font-bold text-slate-800 flex items-center gap-2 flex-wrap">
+                                                {item.orderId && item.orderNumber && onNavigateToOrder ? (
+                                                    <>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => { onNavigateToOrder(item.orderId!); setDrillDown(null); }}
+                                                            className="text-primary hover:underline font-mono focus:outline-none focus:ring-2 focus:ring-primary/30 rounded"
+                                                            title="פתח פרטי הזמנה"
+                                                        >
+                                                            {item.orderNumber}
+                                                        </button>
+                                                        {item.name.replace(item.orderNumber, '').replace(/^[\s\-:]+|[\s\-:]+$/g, '').trim() && (
+                                                            <span> – {item.name.replace(item.orderNumber, '').replace(/^[\s\-:]+|[\s\-:]+$/g, '').trim()}</span>
+                                                        )}
+                                                    </>
+                                                ) : (
+                                                    item.name
+                                                )}
+                                                {item.manualOverride && (
+                                                    <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800" title="תוקן ידנית בדוח ריכוז שכר ונוכחות">מתוקן ידנית</span>
+                                                )}
+                                            </div>
                                             {item.subtext && <div className="text-[10px] text-slate-400">{item.subtext}</div>}
                                         </td>
                                         <td className="px-4 py-3 text-slate-500 text-xs">
@@ -815,12 +1002,12 @@ const PnLReport: React.FC<PnLReportProps> = ({
                         <thead>
                             <tr className="bg-slate-800 text-white">
                                 <th className="px-4 py-4 text-right font-black border-l border-slate-700 min-w-[200px] sticky right-0 z-30 bg-slate-800 shadow-xl">סעיף חשבונאי</th>
-                                <th className="px-4 py-4 text-center font-black min-w-[150px] bg-slate-700 border-l border-slate-600">סה"כ תקופה</th>
-                                {monthlyData.map(m => (
+                                {[...monthlyData].reverse().map(m => (
                                     <th key={m.monthKey} className="px-4 py-4 text-center font-black min-w-[140px] whitespace-nowrap">
                                         {m.label}
                                     </th>
                                 ))}
+                                <th className="px-4 py-4 text-center font-black min-w-[150px] bg-slate-700 border-l border-slate-600">סה"כ תקופה</th>
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100">
@@ -840,8 +1027,8 @@ const PnLReport: React.FC<PnLReportProps> = ({
                             <PnLRow label="הוצאות מימון (ריבית)" field="financingExpenses" itemsField="financingItems" isNegative={true} />
                             <tr className="bg-indigo-600 text-white font-black">
                                 <td className="px-4 py-3 text-right sticky right-0 z-20 bg-indigo-600">רווח נקי (חשבונאי)</td>
+                                {[...monthlyData].reverse().map(m => <td key={m.monthKey} className="px-4 py-3 text-center">{formatCurrency(m.netProfit)}</td>)}
                                 <td className="px-4 py-3 text-center border-l border-indigo-500 bg-indigo-700 font-black">{formatCurrency(periodTotals.netProfit)}</td>
-                                {monthlyData.map(m => <td key={m.monthKey} className="px-4 py-3 text-center">{formatCurrency(m.netProfit)}</td>)}
                             </tr>
 
                             {/* CASH FLOW ADJUSTMENTS SECTION */}
@@ -853,59 +1040,36 @@ const PnLReport: React.FC<PnLReportProps> = ({
                             <PnLRow label="(-) תשלום חובות לספקים" field="debtPayments" itemsField="debtPaymentItems" isNegative={true} />
                             <PnLRow label="(-) פירעון קרן הלוואות" field="loanPrincipal" itemsField="loanPrincipalItems" isNegative={true} />
                             
-                            {/* VAT Cash Flow row - Custom row to show refund as positive */}
-                            <tr className="hover:bg-slate-50 transition-colors">
-                                <td className="px-4 py-3 text-right flex items-center gap-2 sticky right-0 z-20 text-slate-600 bg-white">
-                                    {periodTotals.vatCashFlowAdjustment >= 0 ? "(+) החזר מע''מ" : "(-) תשלום מע''מ"}
-                                </td>
-                                <td 
-                                    className={`px-4 py-3 text-center border-l border-slate-200 font-black bg-indigo-50/20 ${periodTotals.vatCashFlowAdjustment >= 0 ? 'text-green-600' : 'text-red-600'}`}
-                                >
-                                    {formatCurrency(Math.abs(periodTotals.vatCashFlowAdjustment))}
-                                </td>
-                                {monthlyData.map(m => {
-                                    const val = m.vatCashFlowAdjustment;
-                                    return (
-                                        <td 
-                                            key={m.monthKey} 
-                                            className={`px-4 py-3 text-center transition-all font-black ${val >= 0 ? 'text-green-600' : 'text-red-600'}`}
-                                        >
-                                            {formatCurrency(Math.abs(val))}
-                                        </td>
-                                    );
-                                })}
-                            </tr>
-                            
                             <tr className="bg-amber-100 border-t-2 border-amber-300 font-black text-slate-900">
                                 <td className="px-4 py-4 text-right flex items-center gap-2 sticky right-0 z-20 bg-amber-100">
                                     יתרה חופשית למשיכה/צבירה
                                     <div className="w-2 h-2 rounded-full bg-amber-500 animate-pulse"></div>
                                 </td>
-                                <td className={`px-4 py-4 text-center border-l border-amber-200 bg-amber-200 font-black text-lg ${periodTotals.netCashFlow < 0 ? 'text-red-700' : 'text-indigo-800'}`}>
-                                    {formatCurrency(periodTotals.netCashFlow)}
-                                </td>
-                                {monthlyData.map(m => (
+                                {[...monthlyData].reverse().map(m => (
                                     <td key={m.monthKey} className={`px-4 py-4 text-center text-lg ${m.netCashFlow < 0 ? 'text-red-700' : 'text-indigo-800'}`}>
                                         {formatCurrency(m.netCashFlow)}
                                     </td>
                                 ))}
+                                <td className={`px-4 py-4 text-center border-l border-amber-200 bg-amber-200 font-black text-lg ${periodTotals.netCashFlow < 0 ? 'text-red-700' : 'text-indigo-800'}`}>
+                                    {formatCurrency(periodTotals.netCashFlow)}
+                                </td>
                             </tr>
 
                             {/* VAT SECTION */}
                             <tr><td colSpan={monthlyData.length + 2} className="h-8"></td></tr>
                             <tr className="text-slate-400 text-[10px] font-black uppercase tracking-widest bg-slate-50/50"><td className="px-4 py-1 sticky right-0 z-20 bg-slate-50/50" colSpan={monthlyData.length + 2}>סיכום מע"מ תקופתי</td></tr>
-                            <PnLRow label='מע"מ עסקאות (חובה)' field="vatOutput" itemsField="vatOutputItems" isNegative={true} />
-                            <PnLRow label='מע"מ תשומות (זכות)' field="vatInput" itemsField="vatInputItems" customColor="text-emerald-600" />
+                            <PnLRow label='מע"מ מתשלומים שהתקבלו מלקוחות על עסקאות' field="vatOutput" itemsField="vatOutputItems" isNegative={true} />
+                            <PnLRow label={"מע\"מ על קניות/הוצאות (תשלומים לספקים, הוצאות קבועות/משתנות, חובות וכו')"} field="vatInput" itemsField="vatInputItems" customColor="text-emerald-600" />
                             <tr className="bg-slate-50">
                                 <td className="px-4 py-3 font-bold text-slate-700 sticky right-0 z-20 bg-slate-50">לתשלום / החזר מע"מ</td>
-                                <td className={`px-4 py-3 text-center border-l border-slate-200 font-black bg-slate-200/50 ${periodTotals.vatBalance > 0 ? 'text-red-600' : 'text-emerald-600'}`}>
-                                    {periodTotals.vatBalance > 0 ? `לתשלום: ${formatCurrency(periodTotals.vatBalance)}` : `החזר: ${formatCurrency(Math.abs(periodTotals.vatBalance))}`}
-                                </td>
-                                {monthlyData.map(m => (
+                                {[...monthlyData].reverse().map(m => (
                                     <td key={m.monthKey} className={`px-4 py-3 text-center font-black ${m.vatBalance > 0 ? 'text-red-600' : 'text-emerald-600'}`}>
                                         {m.vatBalance > 0 ? `לתשלום: ${formatCurrency(m.vatBalance)}` : `החזר: ${formatCurrency(Math.abs(m.vatBalance))}`}
                                     </td>
                                 ))}
+                                <td className={`px-4 py-3 text-center border-l border-slate-200 font-black bg-slate-200/50 ${periodTotals.vatBalance > 0 ? 'text-red-600' : 'text-emerald-600'}`}>
+                                    {periodTotals.vatBalance > 0 ? `לתשלום: ${formatCurrency(periodTotals.vatBalance)}` : `החזר: ${formatCurrency(Math.abs(periodTotals.vatBalance))}`}
+                                </td>
                             </tr>
                         </tbody>
                     </table>

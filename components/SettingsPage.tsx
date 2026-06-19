@@ -1,22 +1,31 @@
 
-import React, { useState } from 'react';
-import { OrderStatusConfiguration, Employee, AttendanceRecord } from '../types';
+import React, { useState, useRef, useEffect } from 'react';
+import { OrderStatusConfiguration, Employee, AttendanceRecord, Order } from '../types';
 import { PlusIcon, EditIcon, DeleteIcon, LockIcon, SettingsIcon } from './icons';
 import Modal from './Modal';
 import EmployeesPage from './EmployeesPage';
+import VatSettingsSection from './VatSettingsSection';
+import TipTapEditor from './TipTapEditor';
+import LogsAndAuditTab from './LogsAndAuditTab';
+import UsageAndViewsTab from './UsageAndViewsTab';
+import * as mongoService from '../services/mongoService';
 
 interface SettingsPageProps {
     statusConfigs: OrderStatusConfiguration[];
     setStatusConfigs: React.Dispatch<React.SetStateAction<OrderStatusConfiguration[]>>;
-    addActivity: (description: string) => void;
+    addActivity: (description: string, options?: import('../types').AddActivityOptions) => void;
     employees: Employee[];
     setEmployees: React.Dispatch<React.SetStateAction<Employee[]>>;
     vatRate: number;
-    setVatRate: React.Dispatch<React.SetStateAction<number>>;
+    setVatRate: (rate: number, reason?: string) => Promise<void>;
     systemMessage: string;
-    setSystemMessage: React.Dispatch<React.SetStateAction<string>>;
+    setSystemMessage: (message: string) => Promise<void>;
     attendanceRecords: AttendanceRecord[];
     setAttendanceRecords: React.Dispatch<React.SetStateAction<AttendanceRecord[]>>;
+    orders: Order[];
+    vatRateHistory?: any[];
+    onNavigateToOrder?: (orderId: string) => void;
+    onRefetchData?: () => Promise<void>;
 }
 
 const StatusForm: React.FC<{
@@ -234,11 +243,25 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
     systemMessage, 
     setSystemMessage,
     attendanceRecords,
-    setAttendanceRecords
+    setAttendanceRecords,
+    orders,
+    vatRateHistory,
+    onNavigateToOrder,
+    onRefetchData
 }) => {
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingConfig, setEditingConfig] = useState<OrderStatusConfiguration | null>(null);
-    const [activeTab, setActiveTab] = useState<'statuses' | 'employees' | 'general'>('statuses');
+    const [activeTab, setActiveTab] = useState<'statuses' | 'employees' | 'general' | 'logs' | 'usage'>('statuses');
+    const [localSystemMessage, setLocalSystemMessage] = useState(systemMessage);
+    const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+    const [transferDeleteModal, setTransferDeleteModal] = useState<{ config: OrderStatusConfiguration; orderCount: number } | null>(null);
+    const [transferTargetId, setTransferTargetId] = useState<string>('');
+    const [transferInProgress, setTransferInProgress] = useState(false);
+    
+    // Update local state when prop changes
+    useEffect(() => {
+        setLocalSystemMessage(systemMessage);
+    }, [systemMessage]);
 
     const handleAdd = () => {
         setEditingConfig(null);
@@ -250,15 +273,55 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
         setIsModalOpen(true);
     };
 
-    const handleDelete = (id: string) => {
+    const handleDelete = async (id: string) => {
         const config = statusConfigs.find(c => c.id === id);
-        if (config?.isLead) {
+        if (!config) return;
+        if (config.isLead) {
             alert("לא ניתן למחוק סטטוס שמוגדר כ'ליד'. הגדר סטטוס אחר כליד לפני המחיקה.");
             return;
         }
-        if (window.confirm(`האם אתה בטוח שברצונך למחוק את הסטטוס "${config?.label}"?`)) {
+        try {
+            const count = await mongoService.getOrderCountByStatusId(id);
+            if (count > 0) {
+                const others = statusConfigs.filter(c => c.id !== id);
+                if (others.length === 0) {
+                    alert('לא ניתן למחוק – זה הסטטוס היחידי במערכת.');
+                    return;
+                }
+                setTransferDeleteModal({ config, orderCount: count });
+                setTransferTargetId(others[0]?.id || '');
+                return;
+            }
+        } catch (e) {
+            console.error('Failed to count orders:', e);
+            alert('שגיאה בבדיקת הזמנות. נסה שוב.');
+            return;
+        }
+        if (window.confirm(`האם אתה בטוח שברצונך למחוק את הסטטוס "${config.label}"?`)) {
             setStatusConfigs(prev => prev.filter(c => c.id !== id));
-            addActivity(`סטטוס נמחק: ${config?.label}`);
+            addActivity(`סטטוס נמחק: ${config.label}`, { entityType: 'settings', action: 'delete', metadata: { label: config.label, configId: id } });
+        }
+    };
+
+    const handleTransferAndDelete = async () => {
+        if (!transferDeleteModal || !transferTargetId || transferTargetId === transferDeleteModal.config.id) return;
+        setTransferInProgress(true);
+        try {
+            const { updated } = await mongoService.transferOrdersToStatus(transferDeleteModal.config.id, transferTargetId);
+            setStatusConfigs(prev => prev.filter(c => c.id !== transferDeleteModal.config.id));
+            addActivity(`סטטוס "${transferDeleteModal.config.label}" נמחק לאחר העברת ${updated} הזמנות`, {
+                entityType: 'settings',
+                action: 'delete',
+                metadata: { label: transferDeleteModal.config.label, configId: transferDeleteModal.config.id, transferredCount: updated }
+            });
+            setTransferDeleteModal(null);
+            setTransferTargetId('');
+            if (onRefetchData) await onRefetchData();
+        } catch (e) {
+            console.error('Transfer failed:', e);
+            alert((e instanceof Error ? e.message : 'שגיאה בהעברת הזמנות') + '. נסה שוב.');
+        } finally {
+            setTransferInProgress(false);
         }
     };
 
@@ -278,12 +341,12 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
 
             if (editingConfig) {
                 nextConfigs = nextConfigs.map(c => c.id === config.id ? config : c);
-                addActivity(`הגדרות סטטוס עודכנו: ${config.label}`);
+                addActivity(`הגדרות סטטוס עודכנו: ${config.label}`, { entityType: 'settings', action: 'update', metadata: { label: config.label, configId: config.id } });
             } else {
                 const maxIndex = Math.max(...nextConfigs.map(c => c.orderIndex), 0);
                 config.orderIndex = maxIndex + 1;
                 nextConfigs.push(config);
-                addActivity(`סטטוס חדש נוסף: ${config.label}`);
+                addActivity(`סטטוס חדש נוסף: ${config.label}`, { entityType: 'settings', action: 'create', metadata: { label: config.label, configId: config.id } });
             }
             
             return nextConfigs;
@@ -326,6 +389,18 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
                     className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${activeTab === 'general' ? 'bg-primary text-white shadow' : 'text-slate-600 hover:bg-slate-50'}`}
                 >
                     כללי
+                </button>
+                <button
+                    onClick={() => setActiveTab('logs')}
+                    className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${activeTab === 'logs' ? 'bg-primary text-white shadow' : 'text-slate-600 hover:bg-slate-50'}`}
+                >
+                    לוגים ותיעוד
+                </button>
+                <button
+                    onClick={() => setActiveTab('usage')}
+                    className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${activeTab === 'usage' ? 'bg-primary text-white shadow' : 'text-slate-600 hover:bg-slate-50'}`}
+                >
+                    שימוש וצפיות
                 </button>
             </div>
 
@@ -409,6 +484,51 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
                             </tbody>
                         </table>
                     </div>
+
+                    {transferDeleteModal && (
+                        <Modal title="העבר הזמנות ומחיקת סטטוס" onClose={() => !transferInProgress && setTransferDeleteModal(null)} size="lg">
+                            <div className="space-y-4" dir="rtl">
+                                <p className="text-slate-700">
+                                    יש <strong>{transferDeleteModal.orderCount}</strong> הזמנות בסטטוס &quot;{transferDeleteModal.config.label}&quot;.
+                                    העבר אותן לסטטוס אחר ואז מחק.
+                                </p>
+                                <div>
+                                    <label className="block text-sm font-medium text-slate-700 mb-1">העבר לסטטוס:</label>
+                                    <select
+                                        value={transferTargetId}
+                                        onChange={e => setTransferTargetId(e.target.value)}
+                                        disabled={transferInProgress}
+                                        className="w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary"
+                                    >
+                                        {statusConfigs
+                                            .filter(c => c.id !== transferDeleteModal.config.id)
+                                            .sort((a, b) => a.orderIndex - b.orderIndex)
+                                            .map(c => (
+                                                <option key={c.id} value={c.id}>{c.label}</option>
+                                            ))}
+                                    </select>
+                                </div>
+                                <div className="flex gap-2 justify-end pt-2">
+                                    <button
+                                        type="button"
+                                        onClick={() => setTransferDeleteModal(null)}
+                                        disabled={transferInProgress}
+                                        className="px-4 py-2 rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                                    >
+                                        ביטול
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={handleTransferAndDelete}
+                                        disabled={transferInProgress || !transferTargetId}
+                                        className="px-4 py-2 rounded-lg bg-red-600 text-white hover:bg-red-700 disabled:opacity-50"
+                                    >
+                                        {transferInProgress ? 'מעביר...' : 'העבר ומחק'}
+                                    </button>
+                                </div>
+                            </div>
+                        </Modal>
+                    )}
                 </>
             )}
 
@@ -428,41 +548,69 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
                 </>
             )}
 
+            {activeTab === 'logs' && (
+                <>
+                    <div className="mb-4">
+                        <h3 className="text-lg font-bold text-slate-800">לוגים ותיעוד פעולות</h3>
+                        <p className="text-slate-500 text-sm">תיעוד כל הפעולות והשינויים במערכת עם סינון וייצוא</p>
+                    </div>
+                    <LogsAndAuditTab employees={employees} onNavigateToOrder={onNavigateToOrder} />
+                </>
+            )}
+
+            {activeTab === 'usage' && (
+                <UsageAndViewsTab employees={employees} />
+            )}
+
             {activeTab === 'general' && (
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                    <div className="bg-white p-6 rounded-lg shadow-md border border-slate-200">
-                        <h3 className="text-lg font-bold text-slate-800 mb-4">הגדרות מע"מ</h3>
-                        <div>
-                            <label className="block text-sm font-medium text-slate-700 mb-1">אחוז מע"מ (%)</label>
-                            <div className="flex items-center gap-2">
-                                <input 
-                                    type="number" 
-                                    min="0" 
-                                    max="100"
-                                    step="0.1"
-                                    value={vatRate} 
-                                    onChange={(e) => setVatRate(parseFloat(e.target.value) || 0)} 
-                                    className="block w-24 rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" 
-                                />
-                                <span className="text-slate-500 font-medium">%</span>
-                            </div>
-                            <p className="text-xs text-slate-500 mt-2 bg-blue-50 p-2 rounded text-blue-700 border border-blue-100">
-                                <strong>שים לב:</strong> שינוי ערך זה ישפיע מיידית על כל החישובים במערכת המציגים סכומים כולל מע"מ.
-                            </p>
-                        </div>
-                    </div>
+                    <VatSettingsSection
+                        vatRate={vatRate}
+                        onVatRateChange={setVatRate}
+                        orders={orders}
+                        vatRateHistory={vatRateHistory}
+                    />
 
                     <div className="bg-white p-6 rounded-lg shadow-md border border-slate-200">
                         <h3 className="text-lg font-bold text-slate-800 mb-4">הודעות מערכת</h3>
                         <div>
                             <label className="block text-sm font-medium text-slate-700 mb-1">טקסט הודעה ללוח הבקרה</label>
-                            <textarea
-                                rows={4}
-                                value={systemMessage}
-                                onChange={(e) => setSystemMessage(e.target.value)}
-                                className="block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm"
+                            <TipTapEditor
+                                value={localSystemMessage}
+                                onChange={(newValue) => {
+                                    setLocalSystemMessage(newValue);
+                                    if (saveTimeoutRef.current) {
+                                        clearTimeout(saveTimeoutRef.current);
+                                    }
+                                    saveTimeoutRef.current = setTimeout(async () => {
+                                        try {
+                                            await setSystemMessage(newValue);
+                                            console.log('System message saved successfully');
+                                        } catch (err) {
+                                            console.error('Error saving system message:', err);
+                                            alert('שגיאה בשמירת הודעת המערכת. נסה שוב.');
+                                        }
+                                    }, 1000);
+                                }}
+                                onBlur={async () => {
+                                    if (saveTimeoutRef.current) {
+                                        clearTimeout(saveTimeoutRef.current);
+                                    }
+                                    if (localSystemMessage !== systemMessage) {
+                                        try {
+                                            await setSystemMessage(localSystemMessage);
+                                            console.log('System message saved on blur');
+                                        } catch (err) {
+                                            console.error('Error saving system message:', err);
+                                            alert('שגיאה בשמירת הודעת המערכת. נסה שוב.');
+                                        }
+                                    }
+                                }}
                                 placeholder="הזן כאן הודעה שתופיע לכל המשתמשים בראש לוח הבקרה..."
+                                dir="rtl"
+                                className="mb-1"
                             />
+                            <p className="text-xs text-slate-500 mt-1">ההודעה תישמר אוטומטית. ניתן להשתמש במודגש, נטוי, רשימות, כותרות וקישורים.</p>
                         </div>
                     </div>
                 </div>

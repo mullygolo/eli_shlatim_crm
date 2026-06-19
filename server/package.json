@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "tsx watch index.ts",
     "build": "cd .. && npm install && npm run build && cd server && tsc",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "migrate:order-statuses": "tsx scripts/migrate-order-statuses.ts"
   },
   "dependencies": {
     "@types/bcrypt": "^6.0.0",
@@ -16,12 +17,14 @@
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
     "jsonwebtoken": "^9.0.3",
-    "mongodb": "^7.0.0"
+    "mongodb": "^7.0.0",
+    "nodemailer": "^6.9.8"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
     "@types/node": "^22.14.0",
+    "@types/nodemailer": "^6.4.14",
     "tsx": "^4.7.0",
     "typescript": "^5.8.2"
   }

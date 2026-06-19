@@ -1,14 +1,14 @@
 import React, { useState, useMemo } from 'react';
 import { Employee, AttendanceRecord, EmployeeRole, EmployeeStatus, EmploymentPeriod, TimelineEvent, FieldChange, AttendanceStatus, Attachment, SalaryRecord } from '../types';
-import { PlusIcon, EditIcon, DeleteIcon, IdIcon, ClockIcon, LogIcon, NoteIcon, LockIcon, DownloadIcon, CashIcon } from './icons';
+import { PlusIcon, EditIcon, DeleteIcon, IdIcon, ClockIcon, LogIcon, NoteIcon, DownloadIcon, CashIcon, EyeIcon, EyeSlashIcon, CheckCircleIcon } from './icons';
 import Modal from './Modal';
-import ResetPasswordModal from './ResetPasswordModal';
 import { useAuth } from '../contexts/AuthContext';
+import * as mongoService from '../services/mongoService';
 
 interface EmployeesPageProps {
     employees: Employee[];
     setEmployees: React.Dispatch<React.SetStateAction<Employee[]>>;
-    addActivity: (description: string) => void;
+    addActivity: (description: string, options?: import('../types').AddActivityOptions) => void;
     attendanceRecords: AttendanceRecord[];
     setAttendanceRecords: React.Dispatch<React.SetStateAction<AttendanceRecord[]>>;
 }
@@ -22,7 +22,10 @@ const EmployeeForm: React.FC<{
     const { user } = useAuth();
     const isAdminOrManager = user?.roleType === 'ADMIN' || user?.roleType === 'MANAGER';
     const [activeTab, setActiveTab] = useState<'PERSONAL' | 'JOB' | 'HISTORY'>('PERSONAL');
-    const [showResetPassword, setShowResetPassword] = useState(false);
+    const [showPassword, setShowPassword] = useState(true);
+    const [showPasswordConfirm, setShowPasswordConfirm] = useState(false);
+    const [passwordValue, setPasswordValue] = useState('');
+    const [passwordConfirm, setPasswordConfirm] = useState('');
     const [formData, setFormData] = useState<Partial<Employee>>({
         name: employee?.name || '',
         status: employee?.status || 'ACTIVE',
@@ -47,6 +50,42 @@ const EmployeeForm: React.FC<{
         timeline: employee?.timeline || [],
         salaryHistory: employee?.salaryHistory || []
     });
+
+    // Password strength calculator
+    const calculatePasswordStrength = (password: string): { strength: 'weak' | 'medium' | 'strong' | 'very-strong', score: number, feedback: string[] } => {
+        if (!password) return { strength: 'weak', score: 0, feedback: [] };
+        
+        let score = 0;
+        const feedback: string[] = [];
+        
+        if (password.length >= 6) score += 1;
+        else feedback.push('מינימום 6 תווים');
+        
+        if (password.length >= 8) score += 1;
+        if (password.length >= 12) score += 1;
+        
+        if (/[a-z]/.test(password)) score += 1;
+        else feedback.push('הוסף אותיות קטנות');
+        
+        if (/[A-Z]/.test(password)) score += 1;
+        else feedback.push('הוסף אותיות גדולות');
+        
+        if (/[0-9]/.test(password)) score += 1;
+        else feedback.push('הוסף מספרים');
+        
+        if (/[^a-zA-Z0-9]/.test(password)) score += 1;
+        else feedback.push('הוסף תווים מיוחדים');
+        
+        let strength: 'weak' | 'medium' | 'strong' | 'very-strong' = 'weak';
+        if (score >= 5) strength = 'very-strong';
+        else if (score >= 4) strength = 'strong';
+        else if (score >= 2) strength = 'medium';
+        
+        return { strength, score, feedback };
+    };
+
+    const passwordStrength = useMemo(() => calculatePasswordStrength(passwordValue), [passwordValue]);
+    const hasPasswordSet = employee?.passwordHash && employee.passwordHash.length > 0;
 
     // Helper: Find effective salary record for display
     const latestSalaryRecord = useMemo(() => {
@@ -172,6 +211,18 @@ const EmployeeForm: React.FC<{
             return;
         }
 
+        // Validate password if provided
+        if (passwordValue) {
+            if (passwordValue.length < 6) {
+                alert('סיסמה חייבת להכיל לפחות 6 תווים');
+                return;
+            }
+            if (passwordConfirm && passwordConfirm !== passwordValue) {
+                alert('הסיסמאות לא תואמות. אנא ודא שהסיסמאות זהות.');
+                return;
+            }
+        }
+
         const isNew = !employee;
         let finalData = { ...formData } as Employee;
         finalData.id = employee?.id || `emp_${Date.now()}`;
@@ -251,26 +302,13 @@ const EmployeeForm: React.FC<{
             delete finalData.passwordHash;
         }
         
+        // Keep password visible in field after save (do not clear)
+        
         onSave(finalData);
     };
 
     return (
         <>
-            {showResetPassword && employee && (
-                <ResetPasswordModal
-                    onClose={() => setShowResetPassword(false)}
-                    onSuccess={() => {
-                        setShowResetPassword(false);
-                        // Refresh employee data
-                        if (employee) {
-                            const updatedEmployee = { ...employee };
-                            onSave(updatedEmployee);
-                        }
-                    }}
-                    employeeId={employee.id}
-                    employeeName={employee.name}
-                />
-            )}
             <div className="flex flex-col h-full">
                 <div className="flex space-x-1 space-x-reverse border-b border-slate-200 mb-4 overflow-x-auto">
                 <button type="button" onClick={() => setActiveTab('PERSONAL')} className={`px-4 py-2 text-sm font-medium border-b-2 whitespace-nowrap transition-colors ${activeTab === 'PERSONAL' ? 'border-primary text-primary' : 'border-transparent text-slate-500 hover:text-slate-700'}`}>פרטים אישיים</button>
@@ -324,7 +362,15 @@ const EmployeeForm: React.FC<{
                         
                         {/* Authentication Fields */}
                         <div className="md:col-span-2 border-t border-slate-200 pt-4 mt-4">
-                            <h3 className="text-sm font-bold text-slate-700 mb-4">פרטי התחברות</h3>
+                            <h3 className="text-sm font-bold text-slate-700 mb-4 flex items-center gap-2">
+                                פרטי התחברות
+                                {hasPasswordSet && (
+                                    <span className="flex items-center gap-1 text-xs text-green-600 font-medium">
+                                        <CheckCircleIcon className="w-4 h-4" />
+                                        סיסמה הוגדרה
+                                    </span>
+                                )}
+                            </h3>
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                 <div>
                                     <label className="block text-sm font-medium text-slate-700">
@@ -346,34 +392,111 @@ const EmployeeForm: React.FC<{
                                     )}
                                 </div>
                                 <div>
-                                    <div className="flex items-center justify-between mb-2">
+                                    <label className="block text-sm font-medium text-slate-700 mb-2">
+                                        סיסמה {employee ? '(השאר ריק כדי לא לשנות)' : ''}
+                                    </label>
+                                    <div className="relative">
+                                        <input 
+                                            type={showPassword ? "text" : "password"} 
+                                            name="password" 
+                                            value={passwordValue}
+                                            onChange={(e) => {
+                                                const value = e.target.value;
+                                                setPasswordValue(value);
+                                                setFormData(prev => ({ ...prev, passwordHash: value }));
+                                            }}
+                                            className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm pr-10" 
+                                            placeholder={employee ? "הזן סיסמה חדשה (אופציונלי)" : "הזן סיסמה"}
+                                            autoComplete="new-password"
+                                        />
+                                        <button
+                                            type="button"
+                                            onClick={() => setShowPassword(!showPassword)}
+                                            className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-1"
+                                            tabIndex={-1}
+                                        >
+                                            {showPassword ? <EyeSlashIcon className="w-5 h-5" /> : <EyeIcon className="w-5 h-5" />}
+                                        </button>
+                                    </div>
+                                    
+                                    {/* Password Strength Indicator */}
+                                    {passwordValue && (
+                                        <div className="mt-2 space-y-1">
+                                            <div className="flex items-center gap-2">
+                                                <div className="flex-1 h-2 bg-slate-200 rounded-full overflow-hidden">
+                                                    <div 
+                                                        className={`h-full transition-all duration-300 ${
+                                                            passwordStrength.strength === 'very-strong' ? 'bg-green-500 w-full' :
+                                                            passwordStrength.strength === 'strong' ? 'bg-green-400 w-3/4' :
+                                                            passwordStrength.strength === 'medium' ? 'bg-yellow-400 w-1/2' :
+                                                            'bg-red-400 w-1/4'
+                                                        }`}
+                                                    />
+                                                </div>
+                                                <span className={`text-xs font-bold ${
+                                                    passwordStrength.strength === 'very-strong' ? 'text-green-600' :
+                                                    passwordStrength.strength === 'strong' ? 'text-green-500' :
+                                                    passwordStrength.strength === 'medium' ? 'text-yellow-600' :
+                                                    'text-red-500'
+                                                }`}>
+                                                    {passwordStrength.strength === 'very-strong' ? 'חזקה מאוד' :
+                                                     passwordStrength.strength === 'strong' ? 'חזקה' :
+                                                     passwordStrength.strength === 'medium' ? 'בינונית' :
+                                                     'חלשה'}
+                                                </span>
+                                            </div>
+                                            {passwordStrength.feedback.length > 0 && passwordStrength.score < 4 && (
+                                                <ul className="text-xs text-slate-500 list-disc list-inside space-y-0.5">
+                                                    {passwordStrength.feedback.slice(0, 2).map((msg, idx) => (
+                                                        <li key={idx}>{msg}</li>
+                                                    ))}
+                                                </ul>
+                                            )}
+                                        </div>
+                                    )}
+                                    
+                                    {!passwordValue && (
+                                        <p className="text-xs text-slate-500 mt-1">מינימום 6 תווים • מומלץ: אותיות גדולות וקטנות, מספרים ותווים מיוחדים</p>
+                                    )}
+                                </div>
+                                
+                                {/* Password Confirmation Field */}
+                                {passwordValue && (
+                                    <div>
                                         <label className="block text-sm font-medium text-slate-700">
-                                            סיסמה {employee ? '(השאר ריק כדי לא לשנות)' : ''}
+                                            אימות סיסמה
                                         </label>
-                                        {employee && isAdminOrManager && (
+                                        <div className="relative">
+                                            <input 
+                                                type={showPasswordConfirm ? "text" : "password"} 
+                                                value={passwordConfirm}
+                                                onChange={(e) => setPasswordConfirm(e.target.value)}
+                                                className={`mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm pr-10 ${
+                                                    passwordConfirm && passwordConfirm !== passwordValue ? 'border-red-300 focus:border-red-500 focus:ring-red-500' : ''
+                                                }`}
+                                                placeholder="הזן שוב את הסיסמה"
+                                                autoComplete="new-password"
+                                            />
                                             <button
                                                 type="button"
-                                                onClick={() => setShowResetPassword(true)}
-                                                className="text-xs text-indigo-600 hover:text-indigo-800 font-bold flex items-center gap-1"
+                                                onClick={() => setShowPasswordConfirm(!showPasswordConfirm)}
+                                                className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-1"
+                                                tabIndex={-1}
                                             >
-                                                <LockIcon className="w-3 h-3" />
-                                                אפס סיסמה
+                                                {showPasswordConfirm ? <EyeSlashIcon className="w-5 h-5" /> : <EyeIcon className="w-5 h-5" />}
                                             </button>
+                                        </div>
+                                        {passwordConfirm && passwordConfirm !== passwordValue && (
+                                            <p className="text-xs text-red-600 mt-1 font-bold">⚠️ הסיסמאות לא תואמות</p>
+                                        )}
+                                        {passwordConfirm && passwordConfirm === passwordValue && (
+                                            <p className="text-xs text-green-600 mt-1 font-bold flex items-center gap-1">
+                                                <CheckCircleIcon className="w-3 h-3" />
+                                                הסיסמאות תואמות
+                                            </p>
                                         )}
                                     </div>
-                                    <input 
-                                        type="password" 
-                                        name="password" 
-                                        onChange={(e) => {
-                                            // Store password temporarily for hashing on backend
-                                            setFormData(prev => ({ ...prev, passwordHash: e.target.value }));
-                                        }}
-                                        className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" 
-                                        placeholder={employee ? "הזן סיסמה חדשה (אופציונלי)" : "הזן סיסמה"}
-                                        autoComplete="new-password"
-                                    />
-                                    <p className="text-xs text-slate-500 mt-1">מינימום 6 תווים</p>
-                                </div>
+                                )}
                             </div>
                         </div>
                     </div>
@@ -648,44 +771,89 @@ const EmployeesPage: React.FC<EmployeesPageProps> = ({ employees, setEmployees, 
     const handleEditEmployee = (employee: Employee) => { setEditingEmployee(employee); setIsModalOpen(true); };
 
     const handleSaveEmployee = (employee: Employee) => {
-        if (editingEmployee) { setEmployees(prev => prev.map(e => e.id === employee.id ? employee : e)); addActivity(`עובד עודכן: ${employee.name}`); }
-        else { setEmployees(prev => [...prev, employee]); addActivity(`עובד חדש נוסף: ${employee.name}`); }
+        if (editingEmployee) { setEmployees(prev => prev.map(e => e.id === employee.id ? employee : e)); addActivity(`עובד עודכן: ${employee.name}`, { entityType: 'employee', entityId: employee.id, action: 'update', metadata: { name: employee.name } }); }
+        else { setEmployees(prev => [...prev, employee]); addActivity(`עובד חדש נוסף: ${employee.name}`, { entityType: 'employee', entityId: employee.id, action: 'create', metadata: { name: employee.name } }); }
         setIsModalOpen(false); setEditingEmployee(null);
     };
 
-    const handleApproveRequest = (recordId: string, approve: boolean) => {
-        setAttendanceRecords(prev => prev.map(record => {
-            if (record.id !== recordId || !record.correctionRequest) return record;
+    const handleApproveRequest = async (recordId: string, approve: boolean) => {
+        const record = attendanceRecords.find(r => r.id === recordId && r.correctionRequest);
+        if (!record) return;
 
-            if (approve) {
-                const start = record.correctionRequest.requestedClockIn;
-                const end = record.correctionRequest.requestedClockOut;
-                const reqStatus = record.correctionRequest.requestedStatus;
-                
-                const isLeave = reqStatus === 'VACATION' || reqStatus === 'SICK';
+        const segs = record.correctionRequest!.segments?.length
+            ? record.correctionRequest!.segments!
+            : (record.correctionRequest!.requestedClockIn && record.correctionRequest!.requestedClockOut
+                ? [{ requestedClockIn: record.correctionRequest!.requestedClockIn!, requestedClockOut: record.correctionRequest!.requestedClockOut! }]
+                : []);
+
+        if (!approve) {
+            const updatedRecord: AttendanceRecord = {
+                ...record,
+                status: 'REJECTED',
+                note: `${record.note ? record.note + ' | ' : ''}בקשת תיקון נדחתה`,
+                correctionRequest: undefined
+            };
+            try {
+                await mongoService.updateAttendanceRecord(updatedRecord);
+                setAttendanceRecords(prev => prev.map(r => r.id === recordId ? updatedRecord : r));
+                addActivity('נדחתה בקשת תיקון שעות/היעדרות');
+            } catch (err: any) {
+                console.error('Failed to save rejection:', err);
+                alert(err?.message || 'שגיאה בשמירת הדחייה. נסה שוב.');
+            }
+            return;
+        }
+
+        const reqStatus = record.correctionRequest!.requestedStatus;
+        const isLeave = reqStatus === 'VACATION' || reqStatus === 'SICK';
+        const statusLabel = reqStatus === 'VACATION' ? 'חופשה' : reqStatus === 'SICK' ? 'מחלה' : reqStatus === 'WFH' ? 'עבודה מהבית' : 'תיקון שעות';
+
+        const recordDate = record.date instanceof Date ? record.date : new Date(record.date);
+        try {
+            if (segs.length > 1) {
+                for (const seg of segs) {
+                    const segIn = seg.requestedClockIn instanceof Date ? seg.requestedClockIn : new Date(seg.requestedClockIn);
+                    const segOut = seg.requestedClockOut instanceof Date ? seg.requestedClockOut : new Date(seg.requestedClockOut);
+                    const totalHours = isLeave ? 0 : (segOut.getTime() - segIn.getTime()) / (1000 * 60 * 60);
+                    await mongoService.createAttendanceRecord({
+                        id: `att_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
+                        employeeId: record.employeeId,
+                        employeeName: record.employeeName,
+                        employeeUsername: record.employeeUsername,
+                        date: recordDate,
+                        clockIn: isLeave ? undefined : segIn,
+                        clockOut: isLeave ? undefined : segOut,
+                        totalHours: Math.max(0, totalHours),
+                        status: reqStatus || 'PRESENT',
+                        note: `אושר ${statusLabel}: ${record.correctionRequest!.reason}`,
+                        certificate: record.correctionRequest!.certificate || record.certificate
+                    });
+                }
+                await mongoService.deleteAttendanceRecord(record.id);
+                setAttendanceRecords(prev => prev.filter(r => r.id !== recordId));
+            } else if (segs.length === 1) {
+                const start = segs[0].requestedClockIn instanceof Date ? segs[0].requestedClockIn : new Date(segs[0].requestedClockIn);
+                const end = segs[0].requestedClockOut instanceof Date ? segs[0].requestedClockOut : new Date(segs[0].requestedClockOut);
                 const totalHours = isLeave ? 0 : (end.getTime() - start.getTime()) / (1000 * 60 * 60);
-
-                const statusLabel = reqStatus === 'VACATION' ? 'חופשה' : reqStatus === 'SICK' ? 'מחלה' : reqStatus === 'WFH' ? 'עבודה מהבית' : 'תיקון שעות';
-
-                return {
+                const updatedRecord: AttendanceRecord = {
                     ...record,
-                    clockIn: isLeave ? undefined : start, 
-                    clockOut: isLeave ? undefined : end, 
+                    date: recordDate,
+                    clockIn: isLeave ? undefined : start,
+                    clockOut: isLeave ? undefined : end,
                     totalHours: Math.max(0, totalHours),
                     status: reqStatus || 'PRESENT',
-                    certificate: record.correctionRequest.certificate || record.certificate,
-                    note: `${record.note ? record.note + ' | ' : ''}אושר ${statusLabel}: ${record.correctionRequest.reason}`,
+                    certificate: record.correctionRequest!.certificate || record.certificate,
+                    note: `${record.note ? record.note + ' | ' : ''}אושר ${statusLabel}: ${record.correctionRequest!.reason}`,
                     correctionRequest: undefined
                 };
-            } else {
-                return {
-                    ...record,
-                    status: 'REJECTED',
-                    note: `${record.note ? record.note + ' | ' : ''}בקשת תיקון נדחתה`
-                };
+                await mongoService.updateAttendanceRecord(updatedRecord);
+                setAttendanceRecords(prev => prev.map(r => r.id === recordId ? updatedRecord : r));
             }
-        }));
-        addActivity(approve ? 'אושרה בקשת תיקון שעות/היעדרות' : 'נדחתה בקשת תיקון שעות/היעדרות');
+            addActivity(approve ? 'אושרה בקשת תיקון שעות/היעדרות' : 'נדחתה בקשת תיקון שעות/היעדרות');
+        } catch (err: any) {
+            console.error('Failed to save approval/rejection:', err);
+            alert(err?.message || 'שגיאה בשמירת האישור/דחייה. נסה שוב.');
+        }
     };
 
     return (
@@ -709,7 +877,27 @@ const EmployeesPage: React.FC<EmployeesPageProps> = ({ employees, setEmployees, 
             </div>
 
             {activeMainTab === 'LIST' && (
-                <div className="bg-white rounded-xl shadow-md border border-slate-200 overflow-hidden">
+                <>
+                {/* Mobile: employee cards */}
+                <div className="md:hidden space-y-3 pb-4">
+                    {filteredEmployees.map(employee => (
+                        <button
+                            key={employee.id}
+                            type="button"
+                            onClick={() => handleEditEmployee(employee)}
+                            className={`w-full text-right bg-white rounded-xl border border-slate-200 shadow-sm p-4 hover:bg-slate-50 active:bg-slate-100 transition-colors min-h-[44px] ${employee.status === 'INACTIVE' ? 'opacity-60' : ''}`}
+                        >
+                            <div className="font-bold text-slate-900">{employee.name}</div>
+                            <p className="text-sm text-slate-600 mt-0.5">{employee.role}</p>
+                            <div className="flex flex-wrap gap-2 mt-2">
+                                <span className={`text-[10px] px-2 py-0.5 rounded font-black uppercase ${employee.salaryType === 'GLOBAL' ? 'bg-indigo-100 text-indigo-700' : 'bg-slate-100 text-slate-600'}`}>{employee.salaryType === 'GLOBAL' ? 'גלובלי' : 'שעתי'}</span>
+                                <span className={`text-[10px] px-2.5 py-1 rounded-full font-black uppercase ${employee.status === 'ACTIVE' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>{employee.status === 'ACTIVE' ? 'פעיל' : 'לא פעיל'}</span>
+                            </div>
+                            <p className="text-sm font-bold text-slate-700 mt-2">₪{employee.salaryType === 'GLOBAL' ? (employee.monthlyBaseSalary || 0).toLocaleString() : employee.hourlyWage}</p>
+                        </button>
+                    ))}
+                </div>
+                <div className="hidden md:block bg-white rounded-xl shadow-md border border-slate-200 overflow-hidden">
                     <div className="overflow-x-auto">
                         <table className="min-w-full divide-y divide-slate-200 text-start">
                             <thead className="bg-slate-50">
@@ -730,6 +918,7 @@ const EmployeesPage: React.FC<EmployeesPageProps> = ({ employees, setEmployees, 
                         </table>
                     </div>
                 </div>
+                </>
             )}
 
             {activeMainTab === 'REQUESTS' && (
@@ -744,30 +933,47 @@ const EmployeesPage: React.FC<EmployeesPageProps> = ({ employees, setEmployees, 
                                 const isLeave = reqType === 'VACATION' || reqType === 'SICK';
                                 const isWfh = reqType === 'WFH';
                                 const requestCertificate = req.correctionRequest.certificate;
+                                const segs = req.correctionRequest.segments?.length
+                                    ? req.correctionRequest.segments
+                                    : (req.correctionRequest.requestedClockIn && req.correctionRequest.requestedClockOut
+                                        ? [{ requestedClockIn: req.correctionRequest.requestedClockIn, requestedClockOut: req.correctionRequest.requestedClockOut }]
+                                        : []);
                                 
-                                const originalStart = req.clockIn ? req.clockIn.toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : '-';
-                                const originalEnd = req.clockOut ? req.clockOut.toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : '-';
-                                const newStart = req.correctionRequest.requestedClockIn.toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'});
-                                const newEnd = req.correctionRequest.requestedClockOut.toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'});
+                                const reqDate = req.date instanceof Date ? req.date : new Date(req.date);
+                                const originalStart = req.clockIn ? new Date(req.clockIn).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : '-';
+                                const originalEnd = req.clockOut ? new Date(req.clockOut).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : '-';
                                 
                                 return (
                                     <div key={req.id} className="p-4 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
                                         <div className="flex-1">
                                             <div className="flex items-center gap-2">
                                                 <span className="font-bold text-slate-800">{emp?.name}</span>
-                                                <span className="text-sm text-slate-500">{req.date.toLocaleDateString('he-IL')}</span>
+                                                <span className="text-sm text-slate-500">{reqDate.toLocaleDateString('he-IL')}</span>
                                                 <span className={`text-[10px] px-2 py-0.5 rounded font-bold ${reqType === 'VACATION' ? 'bg-amber-100 text-amber-800' : reqType === 'SICK' ? 'bg-rose-100 text-rose-800' : isWfh ? 'bg-indigo-100 text-indigo-800' : 'bg-blue-100 text-blue-800'}`}>
-                                                    {reqType === 'VACATION' ? 'בקשת חופשה' : reqType === 'SICK' ? 'בקשת מחלה' : isWfh ? 'עבודה מהבית' : 'תיקון שעות'}
+                                                    {reqType === 'VACATION' ? 'בקשת חופשה' : reqType === 'SICK' ? 'בקשת מחלה' : isWfh ? 'עבודה מהבית' : segs.length > 1 ? `תיקון שעות (${segs.length} זמנים)` : 'תיקון שעות'}
                                                 </span>
                                             </div>
                                             <p className="text-sm text-slate-600 mt-1"><span className="font-medium">סיבה:</span> {req.correctionRequest.reason}</p>
                                             <div className="flex items-center gap-4 mt-2 text-sm bg-slate-50 p-2 rounded border border-slate-200">
                                                 {!isLeave ? (
                                                     <>
-                                                        <div><span className="block text-xs text-slate-400">מקור</span><span className="line-through text-slate-500">{originalStart} - {originalEnd}</span></div>
-                                                        <div className="text-slate-400">➔</div>
-                                                        <div><span className="block text-xs text-green-600 font-bold">מבוקש</span><span className="font-bold text-slate-800">{newStart} - {newEnd}</span></div>
-                                                        {isWfh && <div className="border-r border-slate-300 pr-4 mr-2"><span className="block text-xs text-indigo-500 font-bold">מיקום</span><span className="font-bold text-indigo-700">🏠 מהבית</span></div>}
+                                                        {segs.length > 0 && (
+                                                            <>
+                                                                {req.clockIn != null && (
+                                                                    <>
+                                                                        <div><span className="block text-xs text-slate-400">מקור</span><span className="line-through text-slate-500">{originalStart} - {originalEnd}</span></div>
+                                                                        <div className="text-slate-400">➔</div>
+                                                                    </>
+                                                                )}
+                                                                <div>
+                                                                    <span className="block text-xs text-green-600 font-bold">מבוקש</span>
+                                                                    <span className="font-bold text-slate-800">
+                                                                        {segs.map((s, i) => `${new Date(s.requestedClockIn).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'})} – ${new Date(s.requestedClockOut).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'})}`).join(' · ')}
+                                                                    </span>
+                                                                </div>
+                                                                {isWfh && <div className="border-r border-slate-300 pr-4 mr-2"><span className="block text-xs text-indigo-500 font-bold">מיקום</span><span className="font-bold text-indigo-700">🏠 מהבית</span></div>}
+                                                            </>
+                                                        )}
                                                     </>
                                                 ) : (
                                                     <div className="flex items-center gap-4 flex-1">

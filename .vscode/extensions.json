@@ -1,0 +1,20 @@
+{
+  "recommendations": [
+    "dbaeumer.vscode-eslint",
+    "esbenp.prettier-vscode",
+    "bradlc.vscode-tailwindcss",
+    "usernamehw.errorlens",
+    "eamodio.gitlens",
+    "humao.rest-client",
+    "mongodb.mongodb-vscode",
+    "editorconfig.editorconfig",
+    "snyk-security.snyk-vscode",
+    "wix.vscode-import-cost",
+    "sonarsource.sonarlint-vscode",
+    "gruntfuggly.todo-tree",
+    "dsznajder.es7-react-js-snippets",
+    "mhutchie.git-graph",
+    "alefragnani.project-manager",
+    "ms-thunderclient.thunderclient"
+  ]
+}

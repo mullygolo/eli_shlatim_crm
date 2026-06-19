@@ -1,5 +1,27 @@
 
-export type Page = 'Dashboard' | 'Orders' | 'Customers' | 'Suppliers' | 'Employees' | 'Deals' | 'Transactions' | 'Timesheets' | 'Quotes' | 'Reports' | 'Settings' | 'Finance' | 'Attendance';
+export type Page = 'Dashboard' | 'Orders' | 'Customers' | 'Suppliers' | 'Employees' | 'Deals' | 'Transactions' | 'Timesheets' | 'Quotes' | 'Reports' | 'Settings' | 'Finance' | 'Attendance' | 'CallCenter' | 'ImprovementSuggestions';
+
+export type ImprovementSuggestionType = 'BUG' | 'IMPROVEMENT' | 'OTHER';
+export type ImprovementSuggestionStatus = 'NEW' | 'IN_PROGRESS' | 'DONE';
+export type ImprovementSuggestionPriority = 'LOW' | 'MEDIUM' | 'HIGH';
+
+export interface ImprovementSuggestion {
+    id: string;
+    type: ImprovementSuggestionType;
+    title: string;
+    description: string;
+    pageContext?: string;
+    priority?: ImprovementSuggestionPriority;
+    status: ImprovementSuggestionStatus;
+    attachments?: Attachment[];
+    authorId: string;
+    authorName: string;
+    createdAt: Date;
+    updatedAt?: Date;
+    adminComment?: string;
+    voteCount: number;
+    votedBy?: string[];
+}
 
 export enum PaymentMethod {
     BANK_TRANSFER = 'העברה בנקאית',
@@ -36,6 +58,7 @@ export interface Contact {
     role: string;
     isBillingContact: boolean;
     isDefault?: boolean;
+    contactPreference?: 'EMAIL' | 'WHATSAPP' | 'PHONE'; // Preferred communication method, default: 'EMAIL'
 }
 
 export interface Customer {
@@ -44,6 +67,12 @@ export interface Customer {
     businessId?: string; // ח.פ / ת.ז
     website: string;
     address: string;
+    /** רחוב ומספר — תואם לשדה "רחוב ומספר" בחשבונית ירוקה */
+    addressStreet?: string;
+    /** יישוב — תואם לשדה "יישוב" בחשבונית ירוקה */
+    addressCity?: string;
+    /** מיקוד — תואם לשדה "מיקוד" בחשבונית ירוקה */
+    addressZip?: string;
     category: string;
     notes: string;
     isSpecial: boolean;
@@ -51,6 +80,12 @@ export interface Customer {
     createdAt: Date;
     paymentMethod: PaymentMethod;
     paymentTerms?: string;
+    // GreenInvoice integration field
+    greenInvoiceClientId?: string; // ID of client in GreenInvoice
+    /** When set, creation date in Green Invoice (for display; avoids showing sync date as "created in GI") */
+    greenInvoiceCreatedAt?: Date;
+    /** Created from control-table import when customer name was not matched; do not sync to Green Invoice until user links to real customer */
+    isImportPlaceholder?: boolean;
 }
 
 /* Fix: Added missing Supplier interface export to resolve module errors */
@@ -103,6 +138,8 @@ export interface CustomerPayment {
     drawerName?: string; // Name on check
     bankDetails?: string; // Bank/Branch/Account
     batchId?: string; // NEW: Link to batch payment (Single transaction -> multiple orders)
+    /** True when this payment was added automatically on order import (טבלת שליטה); user can delete it to then link a real document. */
+    isImportPlaceholder?: boolean;
 }
 
 export interface LineItem {
@@ -117,6 +154,20 @@ export interface LineItem {
     supplierId?: string; // Specific supplier for this item
     supplierPayments?: SupplierPayment[]; // Payments made to supplier for this item
     customDueDate?: Date; // Override due date for this item
+    priceListProductId?: string; // Link to price list product
+    selectedAddons?: string[]; // Selected addon IDs
+    priceListNotes?: string; // Notes from price list
+    variantId?: string; // Selected variant ID from price list
+    notes?: string; // General notes
+    preparationStatus?: string; // Free-text preparation status per item
+    serviceType?: 'DELIVERY' | 'INSTALLATION'; // For delivery/installation line items
+    serviceDetails?: {
+        scheduledDate?: Date;
+        address?: string;
+        siteContactName?: string;
+        siteContactDetails?: string;
+        notes?: string;
+    };
 }
 
 export interface AdditionalService {
@@ -132,6 +183,9 @@ export interface AdditionalService {
     notes?: string;
     customDueDate?: Date; // Override due date for this service
     scheduledDate?: Date; // NEW: Date and time for delivery/installation
+    priceListProductId?: string; // Link to price list product
+    selectedAddons?: string[]; // Selected addon IDs
+    priceListNotes?: string; // Notes from price list
 }
 
 export interface Attachment {
@@ -141,6 +195,7 @@ export interface Attachment {
     type: string; // MIME type
     uploadedAt?: Date;
     category?: AttachmentCategory;
+    isPrimary?: boolean; // For product images - indicates primary/main image
 }
 
 export type AttachmentCategory = 'GRAPHICS' | 'SITE_BEFORE' | 'SITE_AFTER' | 'DOCUMENTS' | 'GENERAL';
@@ -169,14 +224,120 @@ export interface TimelineEvent {
     dueDate?: string; // YYYY-MM-DD
 }
 
+export type ActivityEntityType =
+    | 'order' | 'customer' | 'supplier' | 'employee' | 'settings' | 'quote'
+    | 'transaction' | 'manual_event' | 'finance' | 'system';
+
+export type ActivityAction =
+    | 'create' | 'update' | 'delete' | 'status_change' | 'payment' | 'merge'
+    | 'sync' | 'login' | 'logout' | 'other';
+
 export interface Activity {
     id: string;
     description: string;
     timestamp: Date;
+    userId?: string;
+    username?: string;
+    entityType?: ActivityEntityType;
+    entityId?: string;
+    action?: ActivityAction;
+    metadata?: Record<string, unknown>;
 }
 
+export interface ActivityFilters {
+    from?: string;
+    to?: string;
+    userId?: string;
+    entityType?: string;
+    action?: string;
+    search?: string;
+    page?: number;
+    limit?: number;
+}
+
+export interface ActivitiesResult {
+    activities: Activity[];
+    total: number;
+}
+
+export interface ViewEvent {
+    id?: string;
+    userId: string;
+    username?: string;
+    entityType: string;
+    entityId?: string;
+    label?: string;
+    startedAt: string;
+    endedAt?: string;
+    durationSeconds?: number;
+}
+
+export interface ViewEventsAggregatedRow {
+    userId: string;
+    username?: string;
+    entityType: string;
+    dateKey: string;
+    viewCount: number;
+    totalDurationSeconds: number;
+}
+
+export interface ViewEventsAggregatedResult {
+    from: string;
+    to: string;
+    rows: ViewEventsAggregatedRow[];
+}
+
+export interface ViewEventsRawFilters {
+    from?: string;
+    to?: string;
+    userId?: string;
+    entityType?: string;
+    page?: number;
+    limit?: number;
+}
+
+export interface ViewEventsRawResult {
+    events: ViewEvent[];
+    total: number;
+}
+
+export type ViewEventsChartType = 'byHour' | 'byDay' | 'byEntity' | 'byUser';
+
+export interface ViewEventsChartRowByHour {
+    hour: number;
+    totalDurationSeconds: number;
+    viewCount: number;
+}
+
+export interface ViewEventsChartRowByDay {
+    dateKey: string;
+    totalDurationSeconds: number;
+    viewCount: number;
+}
+
+export interface ViewEventsChartRowByEntity {
+    entityType: string;
+    label?: string;
+    totalDurationSeconds: number;
+    viewCount: number;
+}
+
+export interface ViewEventsChartRowByUser {
+    userId: string;
+    username?: string;
+    totalDurationSeconds: number;
+    viewCount: number;
+}
+
+export type ViewEventsChartResult =
+    | { type: 'byHour'; data: ViewEventsChartRowByHour[] }
+    | { type: 'byDay'; data: ViewEventsChartRowByDay[] }
+    | { type: 'byEntity'; data: ViewEventsChartRowByEntity[] }
+    | { type: 'byUser'; data: ViewEventsChartRowByUser[] };
+
 export interface StatusHistoryEntry {
-    status: string;
+    status: string;       // legacy – label for fallback
+    statusId?: string;    // primary – id from OrderStatusConfiguration
     startDate: Date;
     endDate?: Date;
 }
@@ -192,12 +353,14 @@ export interface Order {
     description: string;
     date: Date;
     createdAt?: Date; // Immutable creation date
+    updatedAt?: Date; // Last update time (for "sort by recently updated")
     dealStartDate?: Date; // The date when the deal effectively started (e.g. status changed to "In Graphics")
     customerId: string;
     contactId?: string;
     supplierId?: string; // Main supplier if applicable
     employeeId: string; // Sales rep
-    orderStatus: string; // Now dynamic based on configuration
+    orderStatus: string;      // legacy – label for fallback
+    orderStatusId?: string;   // primary – id from OrderStatusConfiguration
     paymentStatus: PaymentStatus;
     payments: CustomerPayment[]; // New field for collection
     paymentTerms: string;
@@ -211,6 +374,24 @@ export interface Order {
     type?: OrderType;
     parentOrderId?: string; // For service calls linked to original orders
     vatRate?: number; // Deal-specific VAT rate snapshot/override
+    // GreenInvoice integration fields
+    greenInvoiceId?: string; // ID of invoice in GreenInvoice
+    greenInvoiceReceiptId?: string; // ID of receipt in GreenInvoice
+    greenInvoiceCreditId?: string; // ID of credit invoice in GreenInvoice
+    greenInvoiceEstimateId?: string; // ID of estimate in GreenInvoice
+    /** When true, this order is excluded from the Dashboard monthly sales goal widget (admin only) */
+    hiddenFromSalesGoal?: boolean;
+}
+
+/** שיוך מסמך חשבונית ירוקה להזמנה — טבלת קישור many-to-many */
+export interface OrderDocumentLink {
+    id: string;
+    orderId: string;
+    documentId: string;      // מזהה בחשבונית ירוקה
+    documentType: 'invoice' | 'invoice_receipt' | 'receipt' | 'credit_invoice' | 'estimate';
+    amount?: number;         // הקצאה להזמנה (מסמך מכסה מספר הזמנות)
+    linkedAt: Date;
+    linkedBy?: string;
 }
 
 export type EmployeeRole = 'ADMIN' | 'MANAGER' | 'EMPLOYEE';
@@ -363,6 +544,8 @@ export interface Debt {
     isPaid?: boolean;
     includesVat?: boolean; // NEW
     isVatExempt?: boolean; // NEW
+    attachment?: Attachment;
+    attachments?: Attachment[];
 }
 
 export interface ReceivablePayment {
@@ -388,6 +571,7 @@ export interface Receivable {
     isPaid?: boolean;
     includesVat?: boolean;
     isVatExempt?: boolean;
+    attachments?: Attachment[];
 }
 
 export interface EquityInvestment {
@@ -458,11 +642,13 @@ export interface AttendanceRecord {
     note?: string;
     certificate?: Attachment; // Added: Optional medical certificate
     correctionRequest?: {
-        requestedClockIn: Date;
-        requestedClockOut: Date;
+        requestedClockIn?: Date;
+        requestedClockOut?: Date;
+        /** אחד או כמה זוגות כניסה–יציאה באותה בקשה. אם קיים, יש להשתמש בו במקום requestedClockIn/Out */
+        segments?: Array<{ requestedClockIn: Date; requestedClockOut: Date }>;
         requestedStatus: AttendanceStatus;
         reason: string;
-        certificate?: Attachment; // Added: Optional certificate during request
+        certificate?: Attachment;
     }
 }
 
@@ -470,6 +656,7 @@ export interface AttendanceRecord {
 export interface PayrollOverride {
     finalGross?: number;
     finalEmployerCost?: number;
+    note?: string;
 }
 
 export type PayrollOverrideMap = Record<string, PayrollOverride>; // Key: empId_year_month
@@ -496,4 +683,167 @@ export interface ManualEvent {
     description?: string;
     date: Date;
     time?: string;
+}
+
+export interface WallPost {
+    id: string;
+    authorId: string;
+    authorName: string;
+    content: string;
+    createdAt: Date;
+    orderId?: string;
+    orderNumber?: string;
+    timelineEventId?: string;
+}
+
+/** Per-user state for which notifications have been seen (bell) */
+export interface NotificationReadState {
+    employeeId: string;
+    readNoteIds: string[];       // timeline event IDs (NOTE)
+    readWallPostIds: string[];   // wall post IDs
+    readLogisticsDate?: string;  // 'YYYY-MM-DD' – user marked "seen" logistics for this day
+    dismissedForgotClockOutAt?: string; // 'YYYY-MM-DD' – user dismissed forgot-clock-out for this date
+}
+
+/** One item in the bell dropdown (explanations only, no links) */
+export type NotificationType = 'NOTE' | 'TASK' | 'LOGISTICS_TODAY' | 'WALL_POST' | 'FORGOT_CLOCK_OUT';
+export interface NotificationItem {
+    id: string;
+    type: NotificationType;
+    title: string;
+    description: string;
+}
+
+export interface CallLog {
+    id: string;
+    uniqueId: string;
+    file: string;
+    caller: string;
+    callee: string;
+    calleeName?: string;
+    startDate: Date;
+    endDate?: Date;
+    durationSeconds: number;
+    answerSeconds?: number;
+    status: string;
+    direction: 'incoming' | 'outgoing' | 'unknown';
+    hangupReason?: string;
+    forward?: string;
+    /** Number the customer dialed (e.g. main line 0505348555). From PBX: dialed_number, called_number, destination, etc. */
+    dialedNumber?: string;
+    /** Recording audio stored in MongoDB (Buffer). Not sent to client; use hasStoredRecording + GET /recording/:uniqueId. */
+    recordingData?: Buffer;
+}
+
+// Price List Types
+export type ProductType = 'standard' | 'shipping';
+
+export interface PriceTier {
+    min: number; // Generic 'min' (can be m² or other unit)
+    max?: number; // Generic 'max'
+    price: number; // Price to customer
+    cost?: number; // Cost from supplier
+}
+
+export interface SupplierPricing {
+    supplierId: string;
+    supplierName: string;
+    baseCost?: number; // מחיר בסיס למ"ר (אופציונלי)
+    priceTiers?: PriceTier[]; // טווחי מחירים לפי כמויות
+    costRange?: { min: number; max: number }; // טווח עלות פשוט (מ-X עד Y ללא קשר ליחידות מידה)
+    variantCosts?: { variantId: string; cost: number }[]; // עלויות לכל תת-מוצר
+}
+
+export interface ProductAddon {
+    id: string;
+    name: string; // e.g., "תפירה", "חיתוך צורני"
+    price: number; // Additional price
+    cost?: number; // Additional cost
+    isPercentage?: boolean; // Whether the addon is a percentage
+}
+
+export interface ProductVariant {
+    id: string;
+    name?: string; // Optional name for the variant (e.g., "קטן", "בינוני")
+    width?: number; // Width in cm
+    height?: number; // Height in cm
+    notes?: string; // הערה על התת-מוצר (e.g., "10/10 ס״מ")
+    customerPrice: number; // מחיר ללקוח
+    isActive?: boolean;
+}
+
+export interface PriceListProduct {
+    id: string;
+    name: string;
+    category?: string;
+    description?: string;
+    images?: Attachment[];
+    isActive: boolean;
+    createdAt: Date;
+    updatedAt: Date;
+
+    productType: ProductType;
+    
+    // --- Pricing for 'standard' type ---
+    baseUnit?: LineItemUnit; // e.g., m², unit
+    customerBasePrice?: number; // מחיר בסיס למ"ר ללקוח (אופציונלי)
+    customerPriceTiers?: PriceTier[]; // טווחי מחירים ללקוח לפי כמויות
+
+    // מחירים מספקים (מערך של ספקים)
+    supplierPricings?: SupplierPricing[]; // מחירים לפי ספקים שונים
+
+    // Legacy fields (deprecated, kept for backward compatibility)
+    supplierBaseCost?: number; // Base cost from supplier per baseUnit (deprecated - use supplierPricings)
+    supplierPriceTiers?: PriceTier[]; // Tiered pricing for supplier (deprecated - use supplierPricings)
+
+    // --- Pricing for 'shipping' type ---
+    customerPriceRange?: { min: number; max: number };
+    supplierCostRange?: { min: number; max: number };
+
+    // --- Common fields ---
+    addons?: ProductAddon[];
+    notes?: string;
+    
+    // --- Product Variants (predefined sizes) ---
+    variants?: ProductVariant[]; // רשימת מידות מוגדרות מראש
+}
+
+export interface SalesHistoryEntry {
+    id: string;
+    productId: string;
+    productName: string;
+    orderId: string;
+    orderNumber: string;
+    supplierId: string;
+    supplierName: string;
+    quantity: number;
+    unitPrice: number;
+    totalPrice: number;
+    cost: number;
+    unitType: LineItemUnit;
+    size?: { width?: number; height?: number };
+    addons?: string[];
+    date: Date;
+    customerId?: string;
+    customerName?: string;
+    notes?: string;
+}
+
+export interface AdHocProduct {
+    id: string;
+    name: string;
+    description?: string;
+    orderId: string;
+    orderNumber: string;
+    supplierId?: string;
+    supplierName?: string;
+    quantity: number;
+    unitPrice: number;
+    cost?: number;
+    unitType: LineItemUnit;
+    date: Date;
+    customerId?: string;
+    customerName?: string;
+    notes?: string;
+    suggestedProductId?: string;
 }

@@ -1,22 +1,34 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { Customer, Contact, Order, PaymentMethod, CustomerPayment, TimelineEvent, OrderStatusConfiguration, PaymentStatus } from '../types';
+import { Customer, Contact, Order, PaymentMethod, CustomerPayment, TimelineEvent, OrderStatusConfiguration, PaymentStatus, CallLog } from '../types';
+import { getStatusConfigForOrder, getOrderStatusLabel } from '../utils/statusHelpers';
 import { PlusIcon, EditIcon, DeleteIcon, ImportIcon, WhatsAppIcon, EmailIcon, PhoneIcon, CashIcon } from './icons';
 import Modal from './Modal';
 import { CUSTOMER_CATEGORIES, PAYMENT_TERMS_OPTIONS } from '../constants';
 import { calculateOrderTotals } from '../utils/calculations';
 import * as mongoService from '../services/mongoService';
+import { useViewTracker } from '../contexts/ViewTrackerContext';
+import CustomerSyncBadges, { fromGreenInvoice, formatCustomerCreatedAt } from './CustomerSyncBadges';
 
 // Added missing interface definition for CustomersPageProps
 interface CustomersPageProps {
     customers: Customer[];
     setCustomers: React.Dispatch<React.SetStateAction<Customer[]>>;
+    setCustomersLocal: (updater: (prev: Customer[]) => Customer[]) => void;
     orders: Order[];
     setOrders: React.Dispatch<React.SetStateAction<Order[]>>;
-    addActivity: (description: string) => void;
+    addActivity: (description: string, options?: import('../types').AddActivityOptions) => void;
     onNavigateToOrder: (orderId: string) => void;
     statusConfigs: OrderStatusConfiguration[];
     vatRate: number;
+    selectedCustomerId?: string | null;
+    setSelectedCustomerId?: (id: string | null) => void;
+    newCustomerWithPhone?: string | null;
+    onClearedNewCustomerWithPhone?: () => void;
 }
+
+// Logical key for customer deduplication (must match server)
+const customerLogicalKey = (c: Customer & { debt?: number }) =>
+    (c.name || '').trim().toLowerCase() + '|' + (c.businessId || '').trim().toLowerCase();
 
 // Helper to check for duplicates
 const findDuplicateCustomer = (customers: Customer[], name: string, hp?: string, email?: string, phone?: string) => {
@@ -33,23 +45,286 @@ const findDuplicateCustomer = (customers: Customer[], name: string, hp?: string,
     });
 };
 
+// Enhanced document linking with list selection, allocation editing, and validation
+interface DocumentLinkingState {
+    selectedDoc: { id: string; amount: number; type: number; description: string; date?: string } | null;
+    allocations: Record<string, number>;
+    manualDocId: string;
+}
+
+const DocumentLinkingSection: React.FC<{
+    customer: Customer;
+    orderData: Array<Order & { gross: number; paid: number; remaining: number }>;
+    setOrders: React.Dispatch<React.SetStateAction<Order[]>>;
+    addActivity: (description: string, options?: import('../types').AddActivityOptions) => void;
+    onClose: () => void;
+}> = ({ customer, orderData, setOrders, addActivity, onClose }) => {
+    const [state, setState] = useState<DocumentLinkingState>({ selectedDoc: null, allocations: {}, manualDocId: '' });
+    const [customerDocs, setCustomerDocs] = useState<any[]>([]);
+    const [loadingDocs, setLoadingDocs] = useState(false);
+    const [loadingLink, setLoadingLink] = useState(false);
+
+    // Fetch customer documents from GreenInvoice
+    useEffect(() => {
+        if (!customer.greenInvoiceClientId) return;
+        setLoadingDocs(true);
+        fetch(`/api/green-invoice/documents/by-client/${customer.greenInvoiceClientId}`, {
+            headers: { Authorization: `Bearer ${localStorage.getItem('authToken')}` }
+        })
+            .then(r => r.ok ? r.json() : { documents: [] })
+            .then(data => setCustomerDocs(data.documents || []))
+            .catch(() => setCustomerDocs([]))
+            .finally(() => setLoadingDocs(false));
+    }, [customer.greenInvoiceClientId]);
+
+    const docTypeLabel = (t: number) => {
+        if (t === 10) return 'הצעת מחיר';
+        if (t === 305) return 'חשבונית מס';
+        if (t === 320) return 'חשבונית מס+קבלה';
+        if (t === 330) return 'חשבונית זיכוי';
+        if (t === 400) return 'קבלה';
+        return 'מסמך';
+    };
+
+    const totalDebt = orderData.reduce((s, o) => s + o.remaining, 0);
+    const allocatedTotal = Object.values(state.allocations).reduce((s, a) => s + a, 0);
+    const docAmount = state.selectedDoc?.amount || 0;
+    const overAllocated = allocatedTotal > docAmount + 0.01;
+
+    // Auto-allocate when document is selected
+    const handleSelectDoc = async (docId: string, fromList: boolean = true) => {
+        if (!docId.trim()) return;
+        try {
+            const docRes = await fetch(`/api/green-invoice/documents/${docId}/raw`, {
+                headers: { Authorization: `Bearer ${localStorage.getItem('authToken')}` }
+            });
+            if (!docRes.ok) throw new Error('מסמך לא נמצא');
+            const doc = await docRes.json();
+            const docTotal = Number(doc.amount ?? doc.total ?? 0);
+            if (docTotal <= 0) throw new Error('סכום המסמך לא תקין');
+            
+            // Auto-allocate FIFO
+            let remainingToAlloc = Math.min(docTotal, totalDebt);
+            const allocations: Record<string, number> = {};
+            orderData.forEach(o => {
+                if (remainingToAlloc <= 0.01) allocations[o.id] = 0;
+                else {
+                    const amt = Math.min(o.remaining, remainingToAlloc);
+                    allocations[o.id] = Number(amt.toFixed(2));
+                    remainingToAlloc -= amt;
+                }
+            });
+            
+            setState({
+                selectedDoc: { id: doc.id, amount: docTotal, type: doc.type, description: doc.description || doc.desc || '', date: doc.date },
+                allocations,
+                manualDocId: fromList ? '' : docId
+            });
+        } catch (e: any) {
+            alert(e.message || 'שגיאה בטעינת מסמך');
+        }
+    };
+
+    const handleAllocationChange = (orderId: string, value: string) => {
+        const val = Math.max(0, parseFloat(value) || 0);
+        setState(prev => ({ ...prev, allocations: { ...prev.allocations, [orderId]: val } }));
+    };
+
+    const handleLink = async () => {
+        if (!state.selectedDoc || orderData.length === 0 || overAllocated) return;
+        setLoadingLink(true);
+        try {
+            const res = await fetch('/api/green-invoice/documents/link-orders', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('authToken')}` },
+                body: JSON.stringify({ documentId: state.selectedDoc.id, allocations: state.allocations })
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'שגיאה בשיוך');
+            if (data.updatedOrders?.length) {
+                setOrders(prev => prev.map(o => {
+                    const u = data.updatedOrders.find((uo: Order) => uo.id === o.id);
+                    return u || o;
+                }));
+            }
+            const linkedCount = Object.values(state.allocations).filter(a => a > 0).length;
+            addActivity(`שויך מסמך חשבונית ירוקה (${docTypeLabel(state.selectedDoc.type)}) ל־${linkedCount} הזמנות`);
+            setState({ selectedDoc: null, allocations: {}, manualDocId: '' });
+            onClose();
+        } catch (e: any) {
+            alert(e.message || 'שגיאה בשיוך מסמך');
+        } finally {
+            setLoadingLink(false);
+        }
+    };
+
+    return (
+        <div className="space-y-4">
+            {/* Document Selection */}
+            {!state.selectedDoc && (
+                <>
+                    {customer.greenInvoiceClientId && (
+                        <div>
+                            <label className="block text-xs font-bold text-emerald-800 mb-2">בחר מסמך מרשימת הלקוח</label>
+                            {loadingDocs ? (
+                                <div className="text-sm text-slate-500 py-2">טוען מסמכים...</div>
+                            ) : customerDocs.length > 0 ? (
+                                <div className="max-h-48 overflow-y-auto border border-emerald-200 rounded-lg bg-white">
+                                    {customerDocs.map(doc => (
+                                        <button
+                                            key={doc.id}
+                                            type="button"
+                                            onClick={() => handleSelectDoc(doc.id, true)}
+                                            className="w-full text-right p-2 hover:bg-emerald-50 border-b last:border-0 transition-colors"
+                                        >
+                                            <div className="flex justify-between items-start">
+                                                <div className="flex-1">
+                                                    <div className="text-xs font-bold text-slate-700">{docTypeLabel(doc.type)}</div>
+                                                    <div className="text-[10px] text-slate-500 line-clamp-1">{doc.description || doc.desc || 'ללא תיאור'}</div>
+                                                </div>
+                                                <div className="text-sm font-black text-emerald-700">₪{Number(doc.amount || doc.total || 0).toLocaleString()}</div>
+                                            </div>
+                                        </button>
+                                    ))}
+                                </div>
+                            ) : (
+                                <div className="text-xs text-slate-500 py-2">אין מסמכים זמינים</div>
+                            )}
+                        </div>
+                    )}
+                    <div>
+                        <label className="block text-xs font-bold text-emerald-800 mb-1">או הזן מזהה מסמך ידנית</label>
+                        <div className="flex gap-2">
+                            <input
+                                type="text"
+                                value={state.manualDocId}
+                                onChange={e => setState(prev => ({ ...prev, manualDocId: e.target.value }))}
+                                placeholder="מזהה מסמך (ID)"
+                                className="flex-1 text-sm border border-emerald-300 rounded px-2 py-1.5"
+                            />
+                            <button
+                                type="button"
+                                onClick={() => handleSelectDoc(state.manualDocId, false)}
+                                disabled={!state.manualDocId.trim()}
+                                className="px-3 py-1.5 bg-emerald-600 text-white text-sm rounded hover:bg-emerald-700 disabled:opacity-50"
+                            >
+                                טען
+                            </button>
+                        </div>
+                    </div>
+                </>
+            )}
+
+            {/* Selected Document & Allocations */}
+            {state.selectedDoc && (
+                <div className="space-y-3">
+                    <div className="bg-emerald-100 border border-emerald-300 rounded-lg p-3">
+                        <div className="flex justify-between items-start mb-2">
+                            <div>
+                                <div className="text-sm font-bold text-emerald-900">{docTypeLabel(state.selectedDoc.type)}</div>
+                                <div className="text-[10px] text-emerald-700 line-clamp-1">{state.selectedDoc.description || 'ללא תיאור'}</div>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => setState({ selectedDoc: null, allocations: {}, manualDocId: '' })}
+                                className="text-emerald-600 hover:text-emerald-800 text-xs"
+                            >
+                                ✕ שנה
+                            </button>
+                        </div>
+                        <div className="text-xl font-black text-emerald-800">₪{docAmount.toLocaleString()}</div>
+                        {state.selectedDoc.date && <div className="text-[10px] text-emerald-600">תאריך: {state.selectedDoc.date}</div>}
+                    </div>
+
+                    <div>
+                        <div className="flex justify-between items-center mb-2">
+                            <label className="text-xs font-bold text-slate-700">הקצאה להזמנות</label>
+                            <div className={`text-xs font-bold ${overAllocated ? 'text-red-600' : allocatedTotal > 0 ? 'text-emerald-700' : 'text-slate-400'}`}>
+                                ₪{allocatedTotal.toLocaleString()} / ₪{docAmount.toLocaleString()}
+                            </div>
+                        </div>
+                        {overAllocated && (
+                            <div className="text-[10px] text-red-600 bg-red-50 border border-red-200 rounded p-2 mb-2">
+                                ⚠️ סכום ההקצאות עולה על סכום המסמך
+                            </div>
+                        )}
+                        <div className="max-h-40 overflow-y-auto border border-slate-200 rounded-lg bg-white">
+                            {orderData.map(order => (
+                                <div key={order.id} className="flex items-center gap-2 p-2 border-b last:border-0 hover:bg-slate-50">
+                                    <div className="flex-1 min-w-0">
+                                        <div className="text-xs font-bold text-slate-700 truncate">{order.orderNumber}</div>
+                                        <div className="text-[10px] text-slate-500">יתרה: ₪{order.remaining.toLocaleString()}</div>
+                                    </div>
+                                    <input
+                                        type="number"
+                                        value={state.allocations[order.id] || ''}
+                                        onChange={e => handleAllocationChange(order.id, e.target.value)}
+                                        placeholder="0.00"
+                                        className="w-24 text-xs font-bold p-1.5 border border-slate-300 rounded text-center"
+                                    />
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+
+                    <button
+                        type="button"
+                        onClick={handleLink}
+                        disabled={loadingLink || allocatedTotal <= 0 || overAllocated || orderData.length === 0}
+                        className="w-full py-3 bg-emerald-600 text-white rounded-lg font-black text-sm shadow-lg hover:bg-emerald-700 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                        {loadingLink ? 'משייך...' : `שייך מסמך ל־${Object.values(state.allocations).filter(a => a > 0).length} הזמנות`}
+                    </button>
+                </div>
+            )}
+        </div>
+    );
+};
+
 const CollectionCenterModal: React.FC<{
     customer: Customer;
     orders: Order[];
     setOrders: React.Dispatch<React.SetStateAction<Order[]>>;
     onClose: () => void;
-    addActivity: (description: string) => void;
+    addActivity: (description: string, options?: import('../types').AddActivityOptions) => void;
     statusConfigs: OrderStatusConfiguration[];
     vatRate: number;
 }> = ({ customer, orders, setOrders, onClose, addActivity, statusConfigs, vatRate }) => {
-    // 1. Get all orders for this customer and calculate their actual balance
-    const allCustomerOrders = useMemo(() => {
-        return orders
-            .filter(o => {
-                // Filter: Only ACTIVE deals count towards debt
-                const config = statusConfigs.find(c => c.label === o.orderStatus);
-                return o.customerId === customer.id && config?.isActiveDeal;
-            })
+    const [loading, setLoading] = useState(false);
+    const [allCustomerOrders, setAllCustomerOrders] = useState<Order[]>([]);
+    
+    // מרכז גבייה: רק הזמנות פתוחות לתשלום של הלקוח הנבחר – שום לקוח אחר
+    useEffect(() => {
+        const fetchCustomerOrders = async () => {
+            setLoading(true);
+            try {
+                const filters = {
+                    customerFilter: [customer.id],
+                    collectionCenterView: true,
+                    showCompletedOrders: false
+                };
+                const result = await mongoService.getOrdersPaginated(filters, 1, 10000);
+                const raw = result.orders || [];
+                const forThisCustomer = raw.filter((o: Order) => o.customerId === customer.id);
+                // Calculate balance for each order
+                const ordersWithBalance = forThisCustomer.map(o => {
+                    const { totalAmount, totalPaid } = calculateOrderTotals(o);
+                    const currentOrderVat = o.vatRate ?? vatRate;
+                    const gross = totalAmount * (1 + currentOrderVat / 100);
+                    const remaining = Math.max(0, gross - totalPaid);
+                    return { 
+                        ...o,
+                        gross,
+                        paid: totalPaid,
+                        remaining: Number(remaining.toFixed(2))
+                    };
+                }).sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+                
+                setAllCustomerOrders(ordersWithBalance);
+            } catch (error) {
+                console.error('Error fetching customer orders:', error);
+                const localOrders = orders
+            .filter(o => o.customerId === customer.id && o.paymentStatus !== 'שולם')
             .map(o => {
                 const { totalAmount, totalPaid } = calculateOrderTotals(o);
                 const currentOrderVat = o.vatRate ?? vatRate;
@@ -63,7 +338,14 @@ const CollectionCenterModal: React.FC<{
                 };
             })
             .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-    }, [orders, customer.id, statusConfigs, vatRate]);
+                setAllCustomerOrders(localOrders);
+            } finally {
+                setLoading(false);
+            }
+        };
+        
+        fetchCustomerOrders();
+    }, [customer.id, statusConfigs, vatRate]);
 
     // 2. Filter only orders that REALLY have a debt ( > 1 NIS to avoid rounding issues)
     const orderData = useMemo(() => {
@@ -173,7 +455,7 @@ const CollectionCenterModal: React.FC<{
         });
 
         setOrders(newOrders);
-        addActivity(`בוצע תשלום מרוכז עבור לקוח: ${customer.name} בסך ₪${allocatedTotal.toLocaleString()}`);
+        addActivity(`בוצע תשלום מרוכז עבור לקוח: ${customer.name} בסך ₪${allocatedTotal.toLocaleString()}`, { entityType: 'customer', entityId: customer.id, action: 'payment', metadata: { amount: allocatedTotal, name: customer.name } });
         onClose();
     };
 
@@ -270,12 +552,37 @@ const CollectionCenterModal: React.FC<{
                     </div>
                 </div>
 
-                {/* Right Side: Payment Form */}
+                {/* Right Side: Document Linking (Primary) + Manual Payment (Secondary) */}
                 <div className="w-full md:w-80 space-y-4">
-                    <div className="bg-slate-50 p-5 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+                    {/* PRIMARY: Document Linking */}
+                    <div className="bg-emerald-50 p-4 rounded-2xl border-2 border-emerald-300 shadow-lg space-y-3">
+                        <h4 className="font-black text-slate-800 border-b border-emerald-300 pb-2 text-sm flex items-center gap-2">
+                            <svg className="w-5 h-5 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" /></svg>
+                            שיוך מרוכז - מסמך חשבונית ירוקה
+                        </h4>
+                        <p className="text-xs text-slate-600 leading-relaxed">בחר מסמך (קבלה/חשבונית) מהרשימה או הזן מזהה — הסכום יחולק אוטומטית לפי יתרות, ניתן לערוך ידנית</p>
+                        <DocumentLinkingSection
+                            customer={customer}
+                            orderData={orderData as Array<Order & { gross: number; paid: number; remaining: number }>}
+                            setOrders={setOrders}
+                            addActivity={addActivity}
+                            onClose={onClose}
+                        />
+                    </div>
+
+                    {/* SECONDARY: Manual Payment (Collapsible) */}
+                    <details className="bg-slate-50 rounded-2xl border border-slate-200 shadow-sm">
+                        <summary className="p-4 cursor-pointer hover:bg-slate-100 transition-colors rounded-2xl">
+                            <div className="flex items-center gap-2">
+                                <CashIcon className="w-5 h-5 text-slate-600"/>
+                                <span className="font-black text-slate-700 text-sm">רישום תשלום ידני (ללא מסמך)</span>
+                            </div>
+                            <p className="text-[10px] text-slate-500 mt-1">למקרים שבהם התקבל תשלום ועדיין אין מסמך בחשבונית ירוקה</p>
+                        </summary>
+                        <div className="p-5 pt-2 space-y-4">
                         <h4 className="font-black text-slate-800 border-b pb-3 flex items-center gap-2">
                             <CashIcon className="w-5 h-5 text-emerald-600"/>
-                            פרטי תקבול
+                            פרטי תקבול (ידני)
                         </h4>
                         
                         <div>
@@ -332,14 +639,15 @@ const CollectionCenterModal: React.FC<{
                             </div>
                         </div>
 
-                        <button 
-                            onClick={handleSaveBatchPayment}
-                            disabled={allocatedTotal <= 0}
-                            className="w-full py-4 bg-emerald-600 text-white rounded-xl font-black text-lg shadow-xl hover:bg-emerald-700 transition-all disabled:opacity-50 disabled:cursor-not-allowed mt-4"
-                        >
-                            בצע גבייה מרוכזת
-                        </button>
-                    </div>
+                            <button 
+                                onClick={handleSaveBatchPayment}
+                                disabled={allocatedTotal <= 0}
+                                className="w-full py-3 bg-slate-600 text-white rounded-lg font-black text-sm shadow-md hover:bg-slate-700 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                רשום תשלום ידני
+                            </button>
+                        </div>
+                    </details>
                 </div>
             </div>
         </Modal>
@@ -425,19 +733,25 @@ const ManualMergeModal: React.FC<{
 };
 
 // Enhanced form for adding a new customer with all details
-const NewCustomerForm: React.FC<{ onSave: (customer: Partial<Customer>, firstContact: Partial<Contact>) => void; onCancel: () => void; }> = ({ onSave, onCancel }) => {
+const NewCustomerForm: React.FC<{ initialPhone?: string; onSave: (customer: Partial<Customer>, firstContact: Partial<Contact>) => void; onCancel: () => void; saving?: boolean }> = ({ initialPhone = '', onSave, onCancel, saving }) => {
     const [customerData, setCustomerData] = useState({ 
         name: '', 
         businessId: '',
         category: '',
         website: '',
         address: '',
+        addressStreet: '',
+        addressCity: '',
+        addressZip: '',
         notes: '',
         paymentMethod: PaymentMethod.BANK_TRANSFER,
-        paymentTerms: 'שוטף 30',
+        paymentTerms: 'תשלום מיידי',
         isSpecial: false
     });
-    const [contactData, setContactData] = useState({ name: '', email: '', phone: '', role: '' });
+    const [contactData, setContactData] = useState({ name: '', email: '', phone: initialPhone || '', role: '' });
+    useEffect(() => {
+        if (initialPhone) setContactData(prev => ({ ...prev, phone: initialPhone }));
+    }, [initialPhone]);
 
     const handleCustomerChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
         const { name, value, type } = e.target;
@@ -452,18 +766,28 @@ const NewCustomerForm: React.FC<{ onSave: (customer: Partial<Customer>, firstCon
 
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
+        const companyName = (customerData.name || '').trim();
+        const contactName = (contactData.name || '').trim();
+        if (!companyName) {
+            alert('נא למלא את שם החברה.');
+            return;
+        }
+        if (!contactName) {
+            alert('נא למלא את שם איש הקשר.');
+            return;
+        }
         onSave(customerData, contactData);
     };
 
     return (
-        <form onSubmit={handleSubmit} className="space-y-6 text-start">
+        <form onSubmit={handleSubmit} className="space-y-6 text-start" noValidate>
             {/* Section 1: Company Details */}
             <div>
                 <h3 className="font-semibold text-lg text-slate-800 mb-3 border-b pb-1">פרטי החברה</h3>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div className="md:col-span-2">
                         <label className="block text-sm font-medium text-slate-700">שם החברה <span className="text-red-500">*</span></label>
-                        <input type="text" name="name" value={customerData.name} onChange={handleCustomerChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" required />
+                        <input type="text" name="name" value={customerData.name} onChange={handleCustomerChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" placeholder="חובה" required />
                     </div>
                     <div>
                         <label className="block text-sm font-medium text-slate-700">ח.פ / ת.ז (למניעת כפילויות)</label>
@@ -493,8 +817,16 @@ const NewCustomerForm: React.FC<{ onSave: (customer: Partial<Customer>, firstCon
                         </select>
                     </div>
                     <div>
-                        <label className="block text-sm font-medium text-slate-700">כתובת</label>
-                        <input type="text" name="address" value={customerData.address} onChange={handleCustomerChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
+                        <label className="block text-sm font-medium text-slate-700">רחוב ומספר</label>
+                        <input type="text" name="addressStreet" value={customerData.addressStreet} onChange={handleCustomerChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" placeholder="רחוב ומספר בית" />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-slate-700">יישוב</label>
+                        <input type="text" name="addressCity" value={customerData.addressCity} onChange={handleCustomerChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" placeholder="עיר / יישוב" />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-slate-700">מיקוד</label>
+                        <input type="text" name="addressZip" value={customerData.addressZip} onChange={handleCustomerChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" placeholder="מיקוד" />
                     </div>
                     <div>
                         <label className="block text-sm font-medium text-slate-700">אתר אינטרנט</label>
@@ -513,15 +845,15 @@ const NewCustomerForm: React.FC<{ onSave: (customer: Partial<Customer>, firstCon
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
                         <label className="block text-sm font-medium text-slate-700">שם מלא <span className="text-red-500">*</span></label>
-                        <input type="text" name="name" value={contactData.name} onChange={handleContactChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" required />
+                        <input type="text" name="contactName" value={contactData.name} onChange={e => { const v = e.target.value; setContactData(prev => ({ ...prev, name: v })); }} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" placeholder="חובה" required />
                     </div>
                     <div>
                         <label className="block text-sm font-medium text-slate-700">תפקיד</label>
                         <input type="text" name="role" value={contactData.role} onChange={handleContactChange} placeholder="לדוג': מנכ''ל, מנהל רכש" className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
                     </div>
                     <div>
-                        <label className="block text-sm font-medium text-slate-700">אימייל <span className="text-red-500">*</span></label>
-                        <input type="email" name="email" value={contactData.email} onChange={handleContactChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" required />
+                        <label className="block text-sm font-medium text-slate-700">אימייל</label>
+                        <input type="email" name="email" value={contactData.email} onChange={handleContactChange} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm" />
                     </div>
                      <div>
                         <label className="block text-sm font-medium text-slate-700">טלפון</label>
@@ -537,8 +869,10 @@ const NewCustomerForm: React.FC<{ onSave: (customer: Partial<Customer>, firstCon
             </div>
 
             <div className="flex justify-end space-x-2 pt-4 space-x-reverse">
-                <button type="button" onClick={onCancel} className="px-4 py-2 bg-slate-200 text-slate-800 rounded-md hover:bg-slate-300">ביטול</button>
-                <button type="submit" className="px-4 py-2 bg-primary text-white rounded-md hover:bg-indigo-700">שמירה</button>
+                <button type="button" onClick={onCancel} disabled={saving} className="px-4 py-2 bg-slate-200 text-slate-800 rounded-md hover:bg-slate-300 disabled:opacity-50">ביטול</button>
+                <button type="submit" disabled={saving} className="px-4 py-2 bg-primary text-white rounded-md hover:bg-indigo-700 disabled:opacity-70">
+                    {saving ? 'שומר...' : 'שמירה'}
+                </button>
             </div>
         </form>
     );
@@ -548,6 +882,7 @@ const NewCustomerForm: React.FC<{ onSave: (customer: Partial<Customer>, firstCon
 interface CustomerDetailViewProps {
     customer: Customer;
     customerOrders: Order[];
+    customerOrdersLoading?: boolean;
     onSave: (customer: Customer) => void;
     onCancel: () => void;
     onNavigateToOrder: (orderId: string) => void;
@@ -556,13 +891,78 @@ interface CustomerDetailViewProps {
     vatRate: number;
 }
 
-const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, customerOrders, onSave, onCancel, onNavigateToOrder, onMergeClick, statusConfigs, vatRate }) => {
+const formatCallDateTime = (d: Date | string | undefined): string => {
+    if (!d) return '—';
+    const date = typeof d === 'string' ? new Date(d) : d;
+    if (isNaN(date.getTime())) return '—';
+    return date.toLocaleString('he-IL', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+};
+const formatCallDuration = (seconds: number): string => {
+    if (!seconds || isNaN(seconds)) return '0:00';
+    const m = Math.floor(seconds / 60);
+    const s = Math.floor(seconds % 60);
+    return `${m}:${s.toString().padStart(2, '0')}`;
+};
+
+const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, customerOrders, customerOrdersLoading, onSave, onCancel, onNavigateToOrder, onMergeClick, statusConfigs, vatRate }) => {
     const [activeTab, setActiveTab] = useState<'details' | 'contacts' | 'orders'>('details');
     const [editableCustomer, setEditableCustomer] = useState<Customer>(customer);
     const [editingContact, setEditingContact] = useState<Contact | null>(null);
+    const [callLogs, setCallLogs] = useState<CallLog[]>([]);
+    const [callLogsLoading, setCallLogsLoading] = useState(false);
+    const [playingLog, setPlayingLog] = useState<CallLog | null>(null);
+    const [playingAudioUrl, setPlayingAudioUrl] = useState<string | null>(null);
+    const [playingAudioLoading, setPlayingAudioLoading] = useState(false);
 
     useEffect(() => {
-        setEditableCustomer(customer);
+        setCallLogs([]);
+        setCallLogsLoading(true);
+        let cancelled = false;
+        mongoService.getCallLogsForCustomer(customer.id, 20).then((logs) => {
+            if (!cancelled) setCallLogs(logs);
+        }).catch(() => {
+            if (!cancelled) setCallLogs([]);
+        }).finally(() => {
+            if (!cancelled) setCallLogsLoading(false);
+        });
+        return () => { cancelled = true; };
+    }, [customer.id]);
+
+    const playingAudioUrlRef = useRef<string | null>(null);
+    useEffect(() => {
+        if (!playingLog || !playingLog.hasStoredRecording) {
+            setPlayingAudioUrl(null);
+            setPlayingAudioLoading(false);
+            return;
+        }
+        setPlayingAudioLoading(true);
+        setPlayingAudioUrl(null);
+        let cancelled = false;
+        mongoService.getCallLogRecordingBlob(playingLog.uniqueId).then((blob) => {
+            if (cancelled) return;
+            const url = URL.createObjectURL(blob);
+            playingAudioUrlRef.current = url;
+            setPlayingAudioUrl(url);
+            setPlayingAudioLoading(false);
+        }).catch(() => {
+            if (!cancelled) setPlayingAudioLoading(false);
+        });
+        return () => {
+            cancelled = true;
+            if (playingAudioUrlRef.current) {
+                URL.revokeObjectURL(playingAudioUrlRef.current);
+                playingAudioUrlRef.current = null;
+            }
+        };
+    }, [playingLog?.uniqueId]);
+
+    useEffect(() => {
+        setEditableCustomer({
+            ...customer,
+            addressStreet: customer.addressStreet ?? customer.address ?? '',
+            addressCity: customer.addressCity ?? '',
+            addressZip: customer.addressZip ?? '',
+        });
     }, [customer]);
 
     const handleCustomerChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
@@ -601,21 +1001,36 @@ const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, custo
     };
 
     const removeContact = (contactId: string) => {
+        const contact = editableCustomer.contacts.find(c => c.id === contactId);
+        const contactName = contact?.name || 'איש קשר';
+        if (!window.confirm(`האם אתה בטוח שברצונך למחוק את איש הקשר "${contactName}"?`)) {
+            return;
+        }
         setEditableCustomer(prev => ({...prev, contacts: prev.contacts.filter(c => c.id !== contactId)}));
     };
 
     return (
         <div className="flex flex-col text-start">
+            <CustomerSyncBadges customer={editableCustomer} />
              <div className="border-b border-slate-200">
                 <nav className="-mb-px flex space-x-6 space-x-reverse px-1">
                     <button onClick={() => setActiveTab('details')} className={`whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm ${activeTab === 'details' ? 'border-primary text-primary' : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'}`}>פרטים</button>
                     <button onClick={() => setActiveTab('contacts')} className={`whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm ${activeTab === 'contacts' ? 'border-primary text-primary' : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'}`}>אנשי קשר</button>
-                    <button onClick={() => setActiveTab('orders')} className={`whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm ${activeTab === 'orders' ? 'border-primary text-primary' : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'}`}>היסטוריית הזמנות ({customerOrders.length})</button>
+                    <button onClick={() => setActiveTab('orders')} className={`whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm ${activeTab === 'orders' ? 'border-primary text-primary' : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'}`}>היסטוריית הזמנות {customerOrdersLoading ? '(טוען...)' : `(${customerOrders.length})`}</button>
                 </nav>
             </div>
             <div className="py-6">
                 {activeTab === 'details' && (
                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        {/* תאריך יצירה + מקור (תוכנה / חשבונית ירוקה) */}
+                        <div className="md:col-span-2 flex items-center gap-2 text-sm text-slate-600 bg-slate-50 rounded-lg px-3 py-2 border border-slate-200">
+                            <span className="font-medium text-slate-700">תאריך יצירה:</span>
+                            {fromGreenInvoice(editableCustomer) ? (
+                                <span>נוצר בחשבונית ירוקה ב־{formatCustomerCreatedAt(editableCustomer.greenInvoiceCreatedAt ?? editableCustomer.createdAt)}</span>
+                            ) : (
+                                <span>נוצר בתוכנה ב־{formatCustomerCreatedAt(editableCustomer.createdAt)}</span>
+                            )}
+                        </div>
                         <div>
                             <label className="block text-sm font-medium text-slate-700 mb-1">שם חברה</label>
                             <input name="name" value={editableCustomer.name} onChange={handleCustomerChange} className="p-2 border rounded w-full"/>
@@ -629,8 +1044,16 @@ const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, custo
                             <input name="website" value={editableCustomer.website} onChange={handleCustomerChange} className="p-2 border rounded w-full"/>
                         </div>
                         <div>
-                            <label className="block text-sm font-medium text-slate-700 mb-1">כתובת</label>
-                            <input name="address" value={editableCustomer.address} onChange={handleCustomerChange} className="p-2 border rounded w-full"/>
+                            <label className="block text-sm font-medium text-slate-700 mb-1">רחוב ומספר</label>
+                            <input name="addressStreet" value={editableCustomer.addressStreet ?? ''} onChange={handleCustomerChange} className="p-2 border rounded w-full" placeholder="רחוב ומספר בית"/>
+                        </div>
+                        <div>
+                            <label className="block text-sm font-medium text-slate-700 mb-1">יישוב</label>
+                            <input name="addressCity" value={editableCustomer.addressCity ?? ''} onChange={handleCustomerChange} className="p-2 border rounded w-full" placeholder="עיר / יישוב"/>
+                        </div>
+                        <div>
+                            <label className="block text-sm font-medium text-slate-700 mb-1">מיקוד</label>
+                            <input name="addressZip" value={editableCustomer.addressZip ?? ''} onChange={handleCustomerChange} className="p-2 border rounded w-full" placeholder="מיקוד"/>
                         </div>
                         <div>
                              <label className="block text-sm font-medium text-slate-700 mb-1">קטגוריה</label>
@@ -655,7 +1078,7 @@ const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, custo
                             <label className="block text-sm font-medium text-slate-700 mb-1">תנאי תשלום</label>
                             <select 
                                 name="paymentTerms" 
-                                value={editableCustomer.paymentTerms || 'שוטף 30'} 
+                                value={editableCustomer.paymentTerms || 'תשלום מיידי'} 
                                 onChange={handleCustomerChange} 
                                 className="p-2 border rounded w-full bg-white border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm"
                             >
@@ -668,6 +1091,57 @@ const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, custo
                         <div className="md:col-span-2">
                             <label className="block text-sm font-medium text-slate-700 mb-1">הערות</label>
                             <textarea name="notes" value={editableCustomer.notes} onChange={handleCustomerChange} className="w-full p-2 border rounded h-24"/>
+                        </div>
+                        <div className="md:col-span-2 border border-slate-200 rounded-lg p-4 bg-slate-50">
+                            <h4 className="text-sm font-medium text-slate-700 mb-2">שיחות אחרונות</h4>
+                            {callLogsLoading ? (
+                                <p className="text-sm text-slate-500">טוען...</p>
+                            ) : callLogs.length === 0 ? (
+                                <p className="text-sm text-slate-500">אין שיחות</p>
+                            ) : (
+                                <div className="overflow-x-auto">
+                                    <table className="min-w-full text-sm">
+                                        <thead>
+                                            <tr className="border-b border-slate-200">
+                                                <th className="text-start py-2 px-2 font-medium text-slate-600">תאריך</th>
+                                                <th className="text-start py-2 px-2 font-medium text-slate-600">כיוון</th>
+                                                <th className="text-start py-2 px-2 font-medium text-slate-600">משך</th>
+                                                <th className="text-start py-2 px-2 font-medium text-slate-600">האזנה</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {callLogs.map((log) => {
+                                                const hasRecording = log.hasStoredRecording;
+                                                const isPlaying = playingLog?.uniqueId === log.uniqueId;
+                                                return (
+                                                    <tr key={log.uniqueId} className="border-b border-slate-100">
+                                                        <td className="py-2 px-2 text-slate-700">{formatCallDateTime(log.startDate)}</td>
+                                                        <td className="py-2 px-2 text-slate-700">{log.direction === 'incoming' ? 'נכנס' : log.direction === 'outgoing' ? 'יוצא' : '—'}</td>
+                                                        <td className="py-2 px-2 text-slate-700">{formatCallDuration(log.durationSeconds ?? 0)}</td>
+                                                        <td className="py-2 px-2">
+                                                            {hasRecording ? (
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => setPlayingLog(isPlaying ? null : log)}
+                                                                    disabled={playingAudioLoading && isPlaying}
+                                                                    className="text-primary hover:underline text-xs"
+                                                                >
+                                                                    {playingAudioLoading && isPlaying ? '...' : isPlaying ? 'עצור' : 'האזן'}
+                                                                </button>
+                                                            ) : (
+                                                                <span className="text-slate-400">—</span>
+                                                            )}
+                                                        </td>
+                                                    </tr>
+                                                );
+                                            })}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            )}
+                            {playingAudioUrl && (
+                                <audio src={playingAudioUrl} autoPlay onEnded={() => setPlayingLog(null)} className="mt-2 w-full max-w-xs" controls />
+                            )}
                         </div>
                     </div>
                 )}
@@ -800,7 +1274,9 @@ const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, custo
                 )}
                 {activeTab === 'orders' && (
                     <div className="border rounded-xl overflow-hidden shadow-sm">
-                        {customerOrders.length > 0 ? (
+                        {customerOrdersLoading ? (
+                            <div className="p-8 text-center text-slate-500">טוען היסטוריית הזמנות...</div>
+                        ) : customerOrders.length > 0 ? (
                             <table className="min-w-full text-xs text-right">
                                 <thead className="bg-slate-50 text-slate-500 font-bold border-b">
                                     <tr>
@@ -820,7 +1296,7 @@ const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, custo
                                         const currentVat = o.vatRate ?? vatRate;
                                         const gross = totalAmount * (1 + currentVat / 100);
                                         const remaining = Math.max(0, gross - totalPaid);
-                                        const orderStatusConfig = statusConfigs.find(c => c.label === o.orderStatus);
+                                        const orderStatusConfig = getStatusConfigForOrder(o, statusConfigs);
                                         const contact = editableCustomer.contacts.find(c => c.id === o.contactId);
                                         const isActiveDeal = orderStatusConfig?.isActiveDeal;
                                         
@@ -857,7 +1333,7 @@ const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, custo
                                                 </td>
                                                 <td className="px-4 py-3">
                                                     <span className={`px-2 py-1 rounded-full text-[10px] font-black uppercase tracking-tighter ${orderStatusConfig?.color || 'bg-slate-100 text-slate-600'}`}>
-                                                        {o.orderStatus}
+                                                        {getOrderStatusLabel(o, statusConfigs)}
                                                     </span>
                                                 </td>
                                                 <td className="px-4 py-3">
@@ -879,7 +1355,7 @@ const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, custo
             </div>
              <div className="flex justify-between space-x-2 pt-4 space-x-reverse mt-4 border-t">
                 {activeTab === 'details' && (
-                    <button type="button" onClick={onMergeClick} className="px-4 py-2 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-md hover:bg-indigo-100 flex items-center gap-2">
+                    <button type="button" disabled title="מיזוג לקוחות בתוכנה מושבת כרגע. למזג: בצע מיזוג בחשבונית ירוקה ואז לחץ סנכרן מחשבונית ירוקה." className="px-4 py-2 bg-slate-100 text-slate-400 border border-slate-200 rounded-md cursor-not-allowed opacity-70 flex items-center gap-2" aria-disabled="true">
                         <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
                         מיזוג לקוחות
                     </button>
@@ -893,130 +1369,155 @@ const CustomerDetailView: React.FC<CustomerDetailViewProps> = ({ customer, custo
     )
 };
 
-const CustomerImportModal: React.FC<{ onImport: (customers: Customer[]) => void; onCancel: () => void; }> = ({ onImport, onCancel }) => {
-    const [pastedData, setPastedData] = useState('');
-    const [errors, setErrors] = useState<string[]>([]);
-    
-    const handleImportClick = () => {
-        const lines = pastedData.trim().split('\n');
-        const newCustomers: Customer[] = [];
-        const parsingErrors: string[] = [];
-
-        if (pastedData.trim() === '') {
-            setErrors(["לא נמצאו נתונים לייבוא. אנא הדבק מידע בתיבה."]);
-            return;
-        }
-
-        lines.forEach((line, index) => {
-            const columns = line.split('\t'); // Tab-separated for spreadsheet compatibility
-            
-            const [companyName, contactName, email, phone = '', category = ''] = columns.map(c => c.trim());
-
-            if (!companyName || !contactName || !email) {
-                parsingErrors.push(`שורה ${index + 1}: חסר שם חברה, שם איש קשר או אימייל.`);
-                return;
-            }
-
-            const newContact: Contact = {
-                id: `cont_import_${Date.now()}_${index}`,
-                name: contactName,
-                email: email,
-                phone: phone,
-                role: 'איש קשר ראשי',
-                isBillingContact: true,
-                isDefault: true
-            };
-
-            const newCustomer: Customer = {
-                id: `cust_import_${Date.now()}_${index}`,
-                name: companyName,
-                website: '',
-                address: '',
-                category: category,
-                notes: 'לקוח שיובא מהמערכת הישנה',
-                isSpecial: false,
-                contacts: [newContact],
-                createdAt: new Date(),
-                paymentMethod: PaymentMethod.BANK_TRANSFER,
-                paymentTerms: 'שוטף 30',
-            };
-            newCustomers.push(newCustomer);
-        });
-
-        setErrors(parsingErrors);
-        
-        if (parsingErrors.length === 0 && newCustomers.length > 0) {
-            onImport(newCustomers);
-        }
-    };
-
-    return (
-        <div className="space-y-4 text-start">
-            <p className="text-sm text-slate-600">
-                כדי לייבא לקוחות, העתק נתונים מטבלת ה-Excel או Google Sheets שלך והדבק אותם כאן.
-                <br />
-                ודא שהעמודות הן בסדר הבא:
-                <strong className="block mt-1">שם חברה, שם איש קשר, אימייל, טלפון (אופציונלי), קטגוריה (אופציונלי)</strong>
-            </p>
-            <textarea
-                value={pastedData}
-                onChange={(e) => setPastedData(e.target.value)}
-                rows={10}
-                className="w-full p-2 border rounded font-mono text-sm border-slate-300 focus:border-primary focus:ring-primary"
-                placeholder="הדבק כאן את נתוני הלקוחות שלך..."
-                aria-label="אזור להדבקת נתוני לקוחות לייבוא"
-            />
-            {errors.length > 0 && (
-                <div className="bg-red-50 p-3 rounded-md">
-                    <h4 className="font-semibold text-red-700">שגיאות בנתונים:</h4>
-                    <ul className="list-disc list-inside text-sm text-red-600">
-                        {errors.map((error, i) => <li key={i}>{error}</li>)}
-                    </ul>
-                </div>
-            )}
-            <div className="flex justify-end space-x-2 pt-4 space-x-reverse">
-                <button type="button" onClick={onCancel} className="px-4 py-2 bg-slate-200 text-slate-800 rounded-md hover:bg-slate-300">ביטול</button>
-                <button type="button" onClick={handleImportClick} className="px-4 py-2 bg-primary text-white rounded-md hover:bg-indigo-700">ייבא נתונים</button>
-            </div>
-        </div>
-    );
-};
-
-
-const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, orders, setOrders, addActivity, onNavigateToOrder, statusConfigs, vatRate }) => {
+const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, setCustomersLocal, orders, setOrders, addActivity, onNavigateToOrder, statusConfigs, vatRate, selectedCustomerId, setSelectedCustomerId, newCustomerWithPhone, onClearedNewCustomerWithPhone }) => {
+    const { trackViewStart, trackViewEnd } = useViewTracker();
     const [isNewCustomerModalOpen, setIsNewCustomerModalOpen] = useState(false);
-    const [isImportModalOpen, setIsImportModalOpen] = useState(false);
     const [isDetailModalOpen, setIsDetailModalOpen] = useState(false);
     const [isCollectionCenterOpen, setIsCollectionCenterOpen] = useState(false);
     const [viewingCustomer, setViewingCustomer] = useState<Customer | null>(null);
     const [searchTerm, setSearchTerm] = useState('');
+    const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
     
     // Duplicate Detection State
     const [duplicateFound, setDuplicateFound] = useState<Customer | null>(null);
     const [pendingNewCustomer, setPendingNewCustomer] = useState<{customer: Partial<Customer>, contact: Partial<Contact>} | null>(null);
     const [isMergeModalOpen, setIsMergeModalOpen] = useState(false);
+    const [isSyncingFromGreenInvoice, setIsSyncingFromGreenInvoice] = useState(false);
+    const [isSavingNewCustomer, setIsSavingNewCustomer] = useState(false);
 
-    const filteredCustomers = useMemo(() => {
-        if (!searchTerm) {
-            return customers;
+    // Fetched customer orders (server source of truth for "היסטוריית הזמנות" – avoids stale global state)
+    const [customerOrdersFetched, setCustomerOrdersFetched] = useState<Order[] | null>(null);
+    const [customerOrdersFetchedForId, setCustomerOrdersFetchedForId] = useState<string | null>(null);
+    const [customerOrdersLoading, setCustomerOrdersLoading] = useState(false);
+
+    // Pagination state
+    const [currentPage, setCurrentPage] = useState(1);
+    const [pageSize, setPageSize] = useState(50);
+    const [totalCount, setTotalCount] = useState(0);
+    const [loading, setLoading] = useState(true);
+    const [paginatedCustomers, setPaginatedCustomers] = useState<(Customer & { debt?: number })[]>([]);
+
+    // Debounce search: update debouncedSearchTerm 350ms after user stops typing (reduces API calls)
+    useEffect(() => {
+        const t = setTimeout(() => setDebouncedSearchTerm(searchTerm), 350);
+        return () => clearTimeout(t);
+    }, [searchTerm]);
+
+    // Load customers from API with pagination (silent = true: don't show loading, for background refresh)
+    const refetchCustomers = async (silent: boolean = false) => {
+        if (!silent) setLoading(true);
+        try {
+            const filters = { searchTerm: debouncedSearchTerm || undefined };
+            const result = await mongoService.getCustomersPaginated(filters, currentPage, pageSize);
+            setPaginatedCustomers(result.customers);
+            setTotalCount(result.totalCount);
+        } catch (error) {
+            console.error('Error loading customers:', error);
+        } finally {
+            if (!silent) setLoading(false);
         }
-        const lowercasedTerm = searchTerm.toLowerCase();
-        return customers.filter(customer => {
-            const nameMatch = customer.name.toLowerCase().includes(lowercasedTerm);
-            const hpMatch = customer.businessId?.toLowerCase().includes(lowercasedTerm);
-            if (nameMatch || hpMatch) return true;
+    };
 
-            return customer.contacts.some(contact => 
-                contact.name.toLowerCase().includes(lowercasedTerm) ||
-                contact.email.toLowerCase().includes(lowercasedTerm) ||
-                contact.phone.toLowerCase().includes(lowercasedTerm)
-            );
+    // Load customers when debounced search term or pagination changes; if customers already in props, show first page immediately then refetch in background
+    useEffect(() => {
+        // Only show in-memory slice when we have no active search (avoid showing unfiltered slice when search is applied)
+        if (customers.length > 0 && paginatedCustomers.length === 0 && !debouncedSearchTerm) {
+            const start = (currentPage - 1) * pageSize;
+            const slice = customers.slice(start, start + pageSize);
+            setPaginatedCustomers(slice);
+            setTotalCount(customers.length);
+            setLoading(false);
+            refetchCustomers(true);
+        } else {
+            refetchCustomers();
+        }
+    }, [debouncedSearchTerm, currentPage, pageSize]);
+
+    // Reset to page 1 when search term changes (avoid empty list / wrong range when filtered results have fewer pages)
+    useEffect(() => {
+        setCurrentPage(1);
+    }, [debouncedSearchTerm]);
+
+    // Open customer when navigated from Call Center (selectedCustomerId)
+    useEffect(() => {
+        if (!selectedCustomerId || !setSelectedCustomerId) return;
+        let cancelled = false;
+        mongoService.getCustomerById(selectedCustomerId).then((customer) => {
+            if (cancelled) return;
+            if (customer) {
+                setViewingCustomer(customer);
+                trackViewStart(`customer_${customer.id}`, 'customer', customer.id, customer.name);
+                setIsDetailModalOpen(true);
+            }
+            setSelectedCustomerId(null);
+        }).catch(() => {
+            if (!cancelled) setSelectedCustomerId(null);
         });
-    }, [customers, searchTerm]);
+        return () => { cancelled = true; };
+    }, [selectedCustomerId, setSelectedCustomerId, trackViewStart]);
+
+    // Open new-customer modal with phone pre-filled when navigated from Call Center
+    const [initialPhoneForNewCustomer, setInitialPhoneForNewCustomer] = useState<string>('');
+    useEffect(() => {
+        if (newCustomerWithPhone) {
+            setInitialPhoneForNewCustomer(newCustomerWithPhone);
+            setIsNewCustomerModalOpen(true);
+            onClearedNewCustomerWithPhone?.();
+        }
+    }, [newCustomerWithPhone, onClearedNewCustomerWithPhone]);
+
+    // Use paginated customers for display; dedupe by logical key as safety net (server already dedupes)
+    const filteredCustomers = useMemo(() => {
+        const byKey = new Map<string, (Customer & { debt?: number })[]>();
+        for (const c of paginatedCustomers) {
+            const key = customerLogicalKey(c);
+            if (!byKey.has(key)) byKey.set(key, []);
+            byKey.get(key)!.push(c);
+        }
+        const out: (Customer & { debt?: number })[] = [];
+        for (const group of byKey.values()) {
+            if (group.length === 0) continue;
+            const rep = group.find(c => c.greenInvoiceClientId) || group[0];
+            const debt = group.reduce((s, c) => s + (c.debt ?? 0), 0);
+            out.push({ ...rep, debt: Number(debt.toFixed(2)) });
+        }
+        return out.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'he'));
+    }, [paginatedCustomers]);
+
+    const refetchCustomerOrders = React.useCallback(async () => {
+        if (!viewingCustomer) {
+            setCustomerOrdersFetched(null);
+            setCustomerOrdersFetchedForId(null);
+            return;
+        }
+        setCustomerOrdersLoading(true);
+        try {
+            const result = await mongoService.getOrdersPaginated(
+                { customerFilter: [viewingCustomer.id], showCompletedOrders: true },
+                1,
+                1000
+            );
+            setCustomerOrdersFetched(result.orders || []);
+            setCustomerOrdersFetchedForId(viewingCustomer.id);
+        } catch (err) {
+            console.error('Error fetching customer orders:', err);
+            setCustomerOrdersFetched(null);
+            setCustomerOrdersFetchedForId(null);
+        } finally {
+            setCustomerOrdersLoading(false);
+        }
+    }, [viewingCustomer?.id]);
 
     const handleViewCustomer = (customer: Customer) => {
         setViewingCustomer(customer);
+        trackViewStart(`customer_${customer.id}`, 'customer', customer.id, customer.name);
         setIsDetailModalOpen(true);
+    };
+
+    const handleCloseDetailModal = () => {
+        if (viewingCustomer) trackViewEnd(`customer_${viewingCustomer.id}`);
+        setIsDetailModalOpen(false);
+        setViewingCustomer(null);
     };
 
     const handleOpenCollectionCenter = (customer: Customer) => {
@@ -1024,13 +1525,14 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
         setIsCollectionCenterOpen(true);
     };
 
-    const handleDeleteCustomer = (customerId: string) => {
-        const customerName = customers.find(c => c.id === customerId)?.name;
-        if(window.confirm(`האם אתה בטוח שברצונך למחוק את ${customerName}?`)) {
-            setCustomers(prev => prev.filter(c => c.id !== customerId));
-            addActivity(`לקוח נמחק: ${customerName}`);
-        }
-    };
+    // Customer deletion is disabled - customers should not be deleted
+    // const handleDeleteCustomer = (customerId: string) => {
+    //     const customerName = customers.find(c => c.id === customerId)?.name;
+    //     if(window.confirm(`האם אתה בטוח שברצונך למחוק את ${customerName}?`)) {
+    //         setCustomers(prev => prev.filter(c => c.id !== customerId));
+    //         addActivity(`לקוח נמחק: ${customerName}`);
+    //     }
+    // };
 
     const handleSaveNewCustomer = (customerData: Partial<Customer>, contactData: Partial<Contact>) => {
         // Search for existing duplicates before creating
@@ -1046,6 +1548,7 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
     };
 
     const performCreateCustomer = async (customerData: Partial<Customer>, contactData: Partial<Contact>) => {
+        setIsSavingNewCustomer(true);
         try {
             const newContact: Contact = {
                 id: `cont_${Date.now()}`,
@@ -1057,43 +1560,64 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
                 isDefault: true // Default to true for the first contact
             };
 
+            const addrStreet = (customerData as any).addressStreet ?? '';
+            const addrCity = (customerData as any).addressCity ?? '';
+            const addrZip = (customerData as any).addressZip ?? '';
+            const combinedAddress = [addrStreet, addrCity, addrZip].filter(Boolean).join(', ') || (customerData.address || '');
             const newCustomer: Customer = {
                 id: `cust_${Date.now()}`,
                 name: customerData.name || 'לקוח חדש',
                 businessId: customerData.businessId || '',
                 website: customerData.website || '',
-                address: customerData.address || '',
+                address: combinedAddress,
+                addressStreet: addrStreet || undefined,
+                addressCity: addrCity || undefined,
+                addressZip: addrZip || undefined,
                 category: customerData.category || '',
                 notes: customerData.notes || '',
                 isSpecial: !!customerData.isSpecial,
                 contacts: [newContact],
                 createdAt: new Date(),
                 paymentMethod: customerData.paymentMethod || PaymentMethod.BANK_TRANSFER,
-                paymentTerms: customerData.paymentTerms || 'שוטף 30',
+                paymentTerms: customerData.paymentTerms || 'תשלום מיידי',
             };
             
-            // Save to MongoDB
+            // Save to MongoDB (server creates customer and returns immediately; Green Invoice sync runs in background)
             const savedCustomer = await mongoService.createCustomer(newCustomer);
-            
-            // Update local state with the saved customer (which may have MongoDB _id)
+
+            // Update global customers list
             setCustomers(prev => [...prev, savedCustomer]);
-            addActivity(`לקוח חדש נוסף: ${savedCustomer.name}`);
+            // Show new customer in table immediately (optimistic) so UI feels instant
+            setPaginatedCustomers(prev => [{ ...savedCustomer, debt: 0 } as Customer & { debt?: number }, ...prev]);
+            setTotalCount(prev => prev + 1);
+            addActivity(`לקוח חדש נוסף: ${savedCustomer.name}`, { entityType: 'customer', entityId: savedCustomer.id, action: 'create', metadata: { name: savedCustomer.name } });
             setIsNewCustomerModalOpen(false);
+            setInitialPhoneForNewCustomer('');
+            onClearedNewCustomerWithPhone?.();
             setPendingNewCustomer(null);
             setDuplicateFound(null);
-        } catch (error) {
+            // Refresh list in background to get server truth (debt, order) — don't block UI
+            refetchCustomers(true);
+        } catch (error: any) {
             console.error('Error creating customer:', error);
-            alert('שגיאה בשמירת הלקוח. אנא נסה שוב.');
+            const msg = error?.message || '';
+            if (msg.includes('כבר קיים') || msg.includes('DUPLICATE')) {
+                alert('לקוח עם אותו שם ו/או ח.פ כבר קיים במערכת. לא נוצר כפילות.');
+                refetchCustomers(true);
+            } else {
+                alert('שגיאה בשמירת הלקוח. אנא נסה שוב.');
+            }
+        } finally {
+            setIsSavingNewCustomer(false);
         }
     };
 
-    const handleMergeWithExisting = () => {
+    const handleMergeWithExisting = async () => {
         if (!duplicateFound || !pendingNewCustomer) return;
 
         const oldCustomer = duplicateFound;
         const newData = pendingNewCustomer;
 
-        // Merge Contacts: Add the new contact to the old list
         const newContact: Contact = {
             id: `cont_merged_${Date.now()}`,
             name: newData.contact.name || '',
@@ -1106,103 +1630,144 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
 
         const updatedOldCustomer: Customer = {
             ...oldCustomer,
-            contacts: [...oldCustomer.contacts, newContact],
-            notes: oldCustomer.notes + (newData.customer.notes ? `\n[מיזוג]: ${newData.customer.notes}` : '')
+            contacts: [...(oldCustomer.contacts || []), newContact],
+            notes: (oldCustomer.notes || '') + (newData.customer.notes ? `\n[מיזוג]: ${newData.customer.notes}` : '')
         };
 
-        setCustomers(prev => prev.map(c => c.id === oldCustomer.id ? updatedOldCustomer : c));
-        addActivity(`לקוח מוזג לתוך כרטיס קיים: ${oldCustomer.name}`);
-        
-        setDuplicateFound(null);
-        setPendingNewCustomer(null);
-        setIsNewCustomerModalOpen(false);
+        try {
+            await mongoService.updateCustomer(updatedOldCustomer);
+            setCustomers(prev => prev.map(c => c.id === oldCustomer.id ? updatedOldCustomer : c));
+            await refetchCustomers();
+            addActivity(`לקוח מוזג לתוך כרטיס קיים: ${oldCustomer.name}`, { entityType: 'customer', entityId: oldCustomer.id, action: 'merge', metadata: { name: oldCustomer.name } });
+            setDuplicateFound(null);
+            setPendingNewCustomer(null);
+            setIsNewCustomerModalOpen(false);
+            setInitialPhoneForNewCustomer('');
+            onClearedNewCustomerWithPhone?.();
+        } catch (err: any) {
+            console.error('Merge with existing failed:', err);
+            alert(err?.message || 'שמירת המיזוג נכשלה. נסה שוב.');
+        }
     };
 
-    // MANUAL MERGE HANDLER
-    const handleManualMerge = (victimId: string) => {
+    // MANUAL MERGE HANDLER — persists on server (orders reassigned, victim deleted)
+    const handleManualMerge = async (victimId: string) => {
         if (!viewingCustomer) return;
         const veteranId = viewingCustomer.id;
         const victim = customers.find(c => c.id === victimId);
-        
         if (!victim) return;
-
-        // 1. Move Contacts
-        const transferredContacts = victim.contacts.map(c => ({
-            ...c,
-            isDefault: false, // Ensure no conflict with default contact of veteran
-            id: `cont_merged_${c.id}` // Regenerate ID just in case
-        }));
-
-        // 2. Update Orders
-        setOrders(prev => prev.map(o => {
-            if (o.customerId === victimId) {
-                return { ...o, customerId: veteranId };
-            }
-            return o;
-        }));
-
-        // 3. Update Veteran Customer
-        const updatedVeteran: Customer = {
-            ...viewingCustomer,
-            contacts: [...viewingCustomer.contacts, ...transferredContacts],
-            notes: viewingCustomer.notes + `\n[מיזוג ידני ${new Date().toLocaleDateString('he-IL')}]: מוזג מ-${victim.name} (ח.פ ${victim.businessId || '-'})`
-        };
-
-        setCustomers(prev => prev
-            .filter(c => c.id !== victimId) // Delete Victim
-            .map(c => c.id === veteranId ? updatedVeteran : c) // Update Veteran
-        );
-
-        addActivity(`בוצע מיזוג ידני: ${victim.name} מוזג לתוך ${viewingCustomer.name}`);
-        setViewingCustomer(updatedVeteran); // Update view
-        setIsMergeModalOpen(false);
+        try {
+            const updatedVeteran = await mongoService.mergeCustomers(veteranId, victimId);
+            setCustomers(prev => prev.filter(c => c.id !== victimId).map(c => c.id === veteranId ? updatedVeteran : c));
+            setOrders(prev => prev.map(o => o.customerId === victimId ? { ...o, customerId: veteranId } : o));
+            await refetchCustomers();
+            addActivity(`בוצע מיזוג ידני: ${victim.name} מוזג לתוך ${viewingCustomer.name}`, { entityType: 'customer', entityId: viewingCustomer.id, action: 'merge', metadata: { victimName: victim.name, targetName: viewingCustomer.name } });
+            setViewingCustomer(updatedVeteran);
+            setCustomerOrdersFetched(null);
+            setCustomerOrdersFetchedForId(null);
+            setIsMergeModalOpen(false);
+        } catch (err: any) {
+            console.error('Merge failed:', err);
+            alert(err?.message || 'מיזוג נכשל. נסה שוב.');
+        }
     };
 
-    const handleSaveCustomerUpdate = (updatedCustomer: Customer) => {
-        // Find previous state to check for changes
+    const handleSaveCustomerUpdate = async (updatedCustomer: Customer) => {
         const originalCustomer = customers.find(c => c.id === updatedCustomer.id);
-        
-        setCustomers(prev => prev.map(c => c.id === updatedCustomer.id ? updatedCustomer : c));
-        
-        // Automatic cascading update for Payment Terms
-        if (originalCustomer && updatedCustomer.paymentTerms && originalCustomer.paymentTerms !== updatedCustomer.paymentTerms) {
+        const combinedAddress = [updatedCustomer.addressStreet, updatedCustomer.addressCity, updatedCustomer.addressZip].filter(Boolean).join(', ') || updatedCustomer.address || '';
+        const toSave: Customer = { ...updatedCustomer, address: combinedAddress };
+        let response: Customer & { syncToGI?: 'ok' | 'skipped' | 'error'; syncToGIMessage?: string };
+        try {
+            response = await mongoService.updateCustomer(toSave);
+        } catch (error) {
+            console.error('Error saving customer:', error);
+            alert('שגיאה בשמירת הלקוח. אנא נסה שוב.');
+            return;
+        }
+        const saved = response as Customer;
+        setCustomersLocal(prev => prev.map(c => c.id === saved.id ? saved : c));
+        setPaginatedCustomers(prev => prev.map(c => c.id === saved.id ? { ...c, ...saved } : c));
+
+        if (response.syncToGI === 'error' && response.syncToGIMessage) {
+            alert(`הלקוח נשמר, אך סנכרון לחשבונית ירוקה נכשל:\n${response.syncToGIMessage}\n\nודא ש-GREENINVOICE_SYNC_ENABLED=true ושהלקוח מקושר לחשבונית ירוקה.`);
+        }
+
+        if (originalCustomer && saved.paymentTerms && originalCustomer.paymentTerms !== saved.paymentTerms) {
             setOrders(prevOrders => prevOrders.map(order => {
-                if (order.customerId === updatedCustomer.id) {
-                     return { ...order, paymentTerms: updatedCustomer.paymentTerms! };
-                }
+                if (order.customerId === saved.id) return { ...order, paymentTerms: saved.paymentTerms! };
                 return order;
             }));
-            addActivity(`לקוח עודכן: ${updatedCustomer.name} (עודכנו תנאי תשלום ב-${orders.filter(o => o.customerId === updatedCustomer.id).length} הזמנות)`);
+            addActivity(`לקוח עודכן: ${saved.name} (עודכנו תנאי תשלום ב-${orders.filter(o => o.customerId === saved.id).length} הזמנות)${response.syncToGI === 'ok' ? ' • סונכרן לחשבונית ירוקה' : ''}`, { entityType: 'customer', entityId: saved.id, action: 'update', metadata: { name: saved.name } });
         } else {
-            addActivity(`לקוח עודכן: ${updatedCustomer.name}`);
+            addActivity(`לקוח עודכן: ${saved.name}${response.syncToGI === 'ok' ? ' • סונכרן לחשבונית ירוקה' : ''}`, { entityType: 'customer', entityId: saved.id, action: 'update', metadata: { name: saved.name } });
         }
 
-        setIsDetailModalOpen(false);
-        setViewingCustomer(null);
+        handleCloseDetailModal();
     };
 
-    const handleImportCustomers = async (newCustomers: Customer[]) => {
+    const handleSyncFromGreenInvoice = async () => {
+        if (!confirm('האם אתה בטוח שברצונך לסנכרן לקוחות מחשבונית ירוקה? זה עלול ליצור לקוחות כפולים אם לא נזהרים.')) {
+            return;
+        }
+
+        setIsSyncingFromGreenInvoice(true);
         try {
-            // Save all customers to MongoDB
-            const savedCustomers = await Promise.all(
-                newCustomers.map(customer => mongoService.createCustomer(customer))
-            );
+            const token = localStorage.getItem('authToken');
+            const response = await fetch('/api/customers/sync-from-greeninvoice', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                }
+            });
+
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.error || 'שגיאה בסנכרון');
+            }
+
+            const results = await response.json();
             
-            // Update local state with saved customers
-            setCustomers(prev => [...prev, ...savedCustomers]);
-            addActivity(`${savedCustomers.length} לקוחות יובאו בהצלחה`);
-            setIsImportModalOpen(false);
-        } catch (error) {
-            console.error('Error importing customers:', error);
-            alert('שגיאה בייבוא הלקוחות. חלק מהלקוחות אולי לא נשמרו.');
-            setIsImportModalOpen(false);
+            // Refetch customers to show updates
+            await refetchCustomers();
+            
+            // Show results
+            const merged = results.mergedFromOrphans?.length ?? 0;
+            const unlinked = results.unlinkedOrphans?.length ?? 0;
+            const message = `סנכרון הושלם:
+- נוצרו: ${results.created.length} לקוחות חדשים
+- עודכנו: ${results.updated.length} לקוחות קיימים
+- דולגו: ${results.skipped?.length ?? 0} לקוחות
+${merged > 0 ? `- מוזגו (לאחר הסרת לקוח ב-GI): ${merged}` : ''}
+${unlinked > 0 ? `- נותקו מקישור ל-GI: ${unlinked}` : ''}
+${results.errors?.length > 0 ? `\n- שגיאות: ${results.errors.length}` : ''}`;
+            alert(message);
+            addActivity(`בוצע סנכרון מ-חשבונית ירוקה: ${results.created.length} חדשים, ${results.updated.length} עודכנו${merged ? `, ${merged} מוזגו` : ''}`, { entityType: 'customer', action: 'sync', metadata: { created: results.created.length, updated: results.updated.length, mergedFromOrphans: merged } });
+        } catch (error: any) {
+            console.error('Error syncing from GreenInvoice:', error);
+            alert(`שגיאה בסנכרון: ${error.message || 'שגיאה לא ידועה'}`);
+        } finally {
+            setIsSyncingFromGreenInvoice(false);
         }
     };
 
+    // Prefer server-fetched orders for this customer (avoids stale global state after order customerId change)
     const customerOrders = useMemo(() => {
         if (!viewingCustomer) return [];
+        if (customerOrdersFetched !== null && customerOrdersFetchedForId === viewingCustomer.id)
+            return customerOrdersFetched;
         return orders.filter(o => o.customerId === viewingCustomer.id);
-    }, [orders, viewingCustomer]);
+    }, [orders, viewingCustomer, customerOrdersFetched, customerOrdersFetchedForId]);
+
+    // Fetch customer orders from server when opening customer detail (source of truth)
+    useEffect(() => {
+        if (!viewingCustomer) {
+            setCustomerOrdersFetched(null);
+            setCustomerOrdersFetchedForId(null);
+            return;
+        }
+        refetchCustomerOrders();
+    }, [viewingCustomer?.id, refetchCustomerOrders]);
     
 
     return (
@@ -1219,9 +1784,23 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
                     />
                 </div>
                 <div className="flex gap-2">
-                    <button onClick={() => setIsImportModalOpen(true)} className="flex-shrink-0 flex items-center px-4 py-2 bg-secondary text-white rounded-lg hover:bg-emerald-600 transition-colors">
-                        <ImportIcon className="h-5 w-5 me-2" />
-                        ייבוא לקוחות
+                    <button 
+                        onClick={handleSyncFromGreenInvoice} 
+                        disabled={isSyncingFromGreenInvoice}
+                        className="flex-shrink-0 flex items-center px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        title="סנכרן לקוחות מחשבונית ירוקה"
+                    >
+                        {isSyncingFromGreenInvoice ? (
+                            <>
+                                <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white me-2"></div>
+                                מסנכרן...
+                            </>
+                        ) : (
+                            <>
+                                <ImportIcon className="h-5 w-5 me-2" />
+                                סנכרן מחשבונית ירוקה
+                            </>
+                        )}
                     </button>
                     <button onClick={() => setIsNewCustomerModalOpen(true)} className="flex-shrink-0 flex items-center px-4 py-2 bg-primary text-white rounded-lg hover:bg-indigo-700 transition-colors">
                         <PlusIcon className="h-5 w-5 me-2" />
@@ -1229,7 +1808,37 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
                     </button>
                 </div>
             </div>
-            <div className="bg-white shadow-md rounded-lg overflow-x-auto">
+            {/* Mobile: customer cards */}
+            <div className="md:hidden space-y-3 pb-4">
+                {filteredCustomers.length === 0 && !loading && (
+                    <div className="text-center py-8 text-slate-500 bg-white rounded-xl border border-slate-200 p-4">
+                        <p className="font-semibold">לא נמצאו לקוחות</p>
+                        <p className="text-sm mt-1">נסה חיפוש אחר או הוסף לקוח חדש.</p>
+                    </div>
+                )}
+                {filteredCustomers.map(customer => {
+                    const primaryContact = customer.contacts.find(c => c.isDefault) || customer.contacts.find(c => c.isBillingContact) || customer.contacts[0];
+                    const customerDebt = (customer as Customer & { debt?: number }).debt || 0;
+                    return (
+                        <button
+                            key={customer.id}
+                            type="button"
+                            onClick={() => handleViewCustomer(customer)}
+                            className="w-full text-right bg-white rounded-xl border border-slate-200 shadow-sm p-4 hover:bg-slate-50 active:bg-slate-100 transition-colors min-h-[44px]"
+                        >
+                            <div className="font-bold text-primary">{customer.name} {customer.isSpecial && '⭐'}</div>
+                            <p className="text-sm text-slate-600 mt-0.5">{primaryContact?.name || '—'}</p>
+                            <p className="text-xs text-slate-500 mt-1">{customer.category || '—'}</p>
+                            {customerDebt !== 0 && (
+                                <p className={`text-sm font-bold mt-2 ${customerDebt > 1 ? 'text-red-600' : 'text-green-600'}`}>
+                                    חוב: ₪{customerDebt.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                                </p>
+                            )}
+                        </button>
+                    );
+                })}
+            </div>
+            <div className="hidden md:block bg-white shadow-md rounded-lg overflow-x-auto">
                 <table className="min-w-full divide-y divide-slate-200 text-start">
                     <thead className="bg-slate-50">
                         <tr>
@@ -1264,26 +1873,18 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
                                 }
                             }
 
-                            // Calculate specific debt for this customer
-                            // ONLY include active deals based on configuration
-                            const customerDebt = orders
-                                .filter(o => {
-                                    const config = statusConfigs.find(c => c.label === o.orderStatus);
-                                    return o.customerId === customer.id && config?.isActiveDeal;
-                                })
-                                .reduce((sum, o) => {
-                                    const { totalAmount, totalPaid } = calculateOrderTotals(o);
-                                    const currentOrderVat = o.vatRate ?? vatRate;
-                                    const gross = totalAmount * (1 + currentOrderVat / 100);
-                                    return sum + Math.max(0, gross - totalPaid);
-                                }, 0);
+                            // Debt is already calculated on the server
+                            const customerDebt = (customer as Customer & { debt?: number }).debt || 0;
 
                             return(
                                 <tr key={customer.id} className="hover:bg-slate-50">
-                                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                                        <button onClick={() => handleViewCustomer(customer)} className="text-primary hover:text-indigo-800 font-semibold">
-                                            {customer.name} {customer.isSpecial && <span title="לקוח מיוחד">⭐</span>}
-                                        </button>
+                                    <td className="px-6 py-4 text-sm font-medium">
+                                        <div>
+                                            <button onClick={() => handleViewCustomer(customer)} className="text-primary hover:text-indigo-800 font-semibold">
+                                                {customer.name} {customer.isSpecial && <span title="לקוח מיוחד">⭐</span>}
+                                            </button>
+                                            <CustomerSyncBadges customer={customer} compact />
+                                        </div>
                                     </td>
                                     <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-500">{customer.businessId || '---'}</td>
                                     <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-500">
@@ -1320,9 +1921,6 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
                                             <button onClick={() => handleViewCustomer(customer)} className="p-2 bg-indigo-50 text-primary hover:bg-primary hover:text-white rounded-lg transition-all" title="ערוך">
                                                 <EditIcon className="h-5 w-5"/>
                                             </button>
-                                            <button onClick={() => handleDeleteCustomer(customer.id)} className="p-2 bg-red-50 text-red-600 hover:bg-red-600 hover:text-white rounded-lg transition-all" aria-label={`מחק את ${customer.name}`}>
-                                                <DeleteIcon className="h-5 w-5"/>
-                                            </button>
                                         </div>
                                     </td>
                                 </tr>
@@ -1330,18 +1928,82 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
                         })}
                     </tbody>
                 </table>
-                 {filteredCustomers.length === 0 && (
+                 {filteredCustomers.length === 0 && !loading && (
                     <div className="text-center py-12 text-slate-500">
                         <p className="font-semibold text-lg">לא נמצאו לקוחות</p>
                         <p>נסה מונח חיפוש אחר או הוסף לקוח חדש.</p>
                     </div>
                 )}
+                
+                {/* Pagination Controls */}
+                {totalCount > 0 && (
+                    <div className="mt-4 flex items-center justify-between bg-white px-4 py-3 border-t border-slate-200">
+                        <div className="flex items-center gap-4">
+                            <div className="text-sm text-slate-600">
+                                מציג {((currentPage - 1) * pageSize) + 1} - {Math.min(currentPage * pageSize, totalCount)} מתוך {totalCount} לקוחות
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <label className="text-sm text-slate-600">שורות לעמוד:</label>
+                                <select 
+                                    value={pageSize} 
+                                    onChange={(e) => {
+                                        setPageSize(parseInt(e.target.value));
+                                        setCurrentPage(1);
+                                    }}
+                                    className="text-sm border border-slate-300 rounded px-2 py-1 focus:ring-primary focus:border-primary"
+                                >
+                                    <option value={25}>25</option>
+                                    <option value={50}>50</option>
+                                    <option value={100}>100</option>
+                                    <option value={200}>200</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <button
+                                onClick={() => setCurrentPage(1)}
+                                disabled={currentPage === 1 || loading}
+                                className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                ראשון
+                            </button>
+                            <button
+                                onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
+                                disabled={currentPage === 1 || loading}
+                                className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                קודם
+                            </button>
+                            <span className="px-3 py-1 text-sm text-slate-600">
+                                עמוד {currentPage} מתוך {Math.ceil(totalCount / pageSize)}
+                            </span>
+                            <button
+                                onClick={() => setCurrentPage(prev => Math.min(Math.ceil(totalCount / pageSize), prev + 1))}
+                                disabled={currentPage >= Math.ceil(totalCount / pageSize) || loading}
+                                className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                הבא
+                            </button>
+                            <button
+                                onClick={() => setCurrentPage(Math.ceil(totalCount / pageSize))}
+                                disabled={currentPage >= Math.ceil(totalCount / pageSize) || loading}
+                                className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                אחרון
+                            </button>
+                        </div>
+                    </div>
+                )}
+                
+                {loading && (
+                    <div className="mt-4 text-center text-slate-500 text-sm">טוען...</div>
+                )}
             </div>
             
             {/* New Customer Modal */}
             {isNewCustomerModalOpen && (
-                <Modal title="הוספת לקוח חדש" onClose={() => { setIsNewCustomerModalOpen(false); setDuplicateFound(null); }} size="2xl">
-                    <NewCustomerForm onSave={handleSaveNewCustomer} onCancel={() => setIsNewCustomerModalOpen(false)} />
+                <Modal title="הוספת לקוח חדש" onClose={() => { setIsNewCustomerModalOpen(false); setDuplicateFound(null); setInitialPhoneForNewCustomer(''); onClearedNewCustomerWithPhone?.(); }} size="2xl">
+                    <NewCustomerForm initialPhone={initialPhoneForNewCustomer} onSave={handleSaveNewCustomer} onCancel={() => { setIsNewCustomerModalOpen(false); setInitialPhoneForNewCustomer(''); onClearedNewCustomerWithPhone?.(); }} saving={isSavingNewCustomer} />
                 </Modal>
             )}
 
@@ -1389,12 +2051,13 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
             )}
 
              {isDetailModalOpen && viewingCustomer && (
-                <Modal title={`כרטיס לקוח: ${viewingCustomer.name}`} onClose={() => setIsDetailModalOpen(false)} size="5xl">
+                <Modal title={`כרטיס לקוח: ${viewingCustomer.name}`} onClose={handleCloseDetailModal} size="5xl">
                     <CustomerDetailView 
                         customer={viewingCustomer} 
                         customerOrders={customerOrders}
+                        customerOrdersLoading={customerOrdersLoading}
                         onSave={handleSaveCustomerUpdate}
-                        onCancel={() => setIsDetailModalOpen(false)}
+                        onCancel={handleCloseDetailModal}
                         onNavigateToOrder={onNavigateToOrder}
                         onMergeClick={() => setIsMergeModalOpen(true)}
                         statusConfigs={statusConfigs}
@@ -1424,11 +2087,6 @@ const CustomersPage: React.FC<CustomersPageProps> = ({ customers, setCustomers, 
                 />
             )}
 
-             {isImportModalOpen && (
-                <Modal title="ייבוא לקוחות" onClose={() => setIsImportModalOpen(false)} size="2xl">
-                    <CustomerImportModal onImport={handleImportCustomers} onCancel={() => setIsImportModalOpen(false)} />
-                </Modal>
-            )}
         </div>
     );
 };

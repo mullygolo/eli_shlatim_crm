@@ -1,15 +1,17 @@
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { Supplier, Order, Contact, Transaction } from '../types';
 import { PlusIcon, DeleteIcon } from './icons';
 import Modal from './Modal';
 import { calculateOrderTotals } from '../utils/calculations';
 import { PAYMENT_TERMS_OPTIONS } from '../constants';
+import * as mongoService from '../services/mongoService';
+import { useViewTracker } from '../contexts/ViewTrackerContext';
 
 interface SuppliersPageProps {
     suppliers: Supplier[];
     setSuppliers: React.Dispatch<React.SetStateAction<Supplier[]>>;
-    addActivity: (description: string) => void;
+    addActivity: (description: string, options?: import('../types').AddActivityOptions) => void;
     orders: Order[];
     setOrders: React.Dispatch<React.SetStateAction<Order[]>>; // New prop
     transactions?: Transaction[]; // Optional, for completeness if used
@@ -114,7 +116,7 @@ const SupplierForm: React.FC<{
 }> = ({ supplier, onSave, onCancel, onMergeClick }) => {
     const [formData, setFormData] = useState<{ name: string, paymentTerms: string, contacts: Contact[] }>({
         name: supplier?.name || '',
-        paymentTerms: supplier?.paymentTerms || 'שוטף 30',
+        paymentTerms: supplier?.paymentTerms || 'שוטף 90',
         contacts: supplier?.contacts || [{
             id: `con_${Date.now()}`,
             name: '',
@@ -154,12 +156,18 @@ const SupplierForm: React.FC<{
     };
 
     const removeContact = (index: number) => {
-        if (formData.contacts.length > 1) {
-            setFormData(prev => ({
-                ...prev,
-                contacts: prev.contacts.filter((_, i) => i !== index)
-            }));
+        if (formData.contacts.length <= 1) {
+            return; // Keep at least one contact
         }
+        const contact = formData.contacts[index];
+        const contactName = contact?.name || 'איש קשר';
+        if (!window.confirm(`האם אתה בטוח שברצונך למחוק את איש הקשר "${contactName}"?`)) {
+            return;
+        }
+        setFormData(prev => ({
+            ...prev,
+            contacts: prev.contacts.filter((_, i) => i !== index)
+        }));
     };
 
     const handleSubmit = (e: React.FormEvent) => {
@@ -227,6 +235,18 @@ const SupplierForm: React.FC<{
                                     <label className="block text-xs text-slate-500">טלפון</label>
                                     <input type="tel" name="phone" value={contact.phone} onChange={e => handleContactChange(index, e)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-xs" />
                                 </div>
+                                <div>
+                                    <label className="block text-xs text-slate-500">שיטת תקשורת מועדפת</label>
+                                    <select 
+                                        name="contactPreference" 
+                                        value={contact.contactPreference || 'EMAIL'} 
+                                        onChange={e => handleContactChange(index, e)} 
+                                        className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary text-xs bg-white"
+                                    >
+                                        <option value="EMAIL">אימייל</option>
+                                        <option value="WHATSAPP">WhatsApp</option>
+                                    </select>
+                                </div>
                             </div>
                         </div>
                     ))}
@@ -252,6 +272,7 @@ const SupplierForm: React.FC<{
 
 
 const SuppliersPage: React.FC<SuppliersPageProps> = ({ suppliers, setSuppliers, addActivity, orders, setOrders, transactions, setTransactions }) => {
+    const { trackViewStart, trackViewEnd } = useViewTracker();
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingSupplier, setEditingSupplier] = useState<Supplier | null>(null);
     const [searchTerm, setSearchTerm] = useState('');
@@ -260,6 +281,35 @@ const SuppliersPage: React.FC<SuppliersPageProps> = ({ suppliers, setSuppliers, 
     const [duplicateFound, setDuplicateFound] = useState<Supplier | null>(null);
     const [pendingNewSupplier, setPendingNewSupplier] = useState<Supplier | null>(null);
     const [isMergeModalOpen, setIsMergeModalOpen] = useState(false);
+    
+    // Pagination state
+    const [paginatedSuppliers, setPaginatedSuppliers] = useState<Supplier[]>([]);
+    const [currentPage, setCurrentPage] = useState(1);
+    const [pageSize, setPageSize] = useState(50);
+    const [totalCount, setTotalCount] = useState(0);
+    const [loadingSuppliers, setLoadingSuppliers] = useState(false);
+    
+    // Refetch function for paginated suppliers
+    const refetchSuppliers = async () => {
+        try {
+            setLoadingSuppliers(true);
+            const filters: any = {};
+            if (searchTerm) filters.searchTerm = searchTerm;
+            
+            const result = await mongoService.getSuppliersPaginated(filters, currentPage, pageSize);
+            setPaginatedSuppliers(result.suppliers);
+            setTotalCount(result.totalCount);
+        } catch (error) {
+            console.error('Error loading paginated suppliers:', error);
+        } finally {
+            setLoadingSuppliers(false);
+        }
+    };
+    
+    // Load paginated suppliers when filters or pagination change
+    useEffect(() => {
+        refetchSuppliers();
+    }, [searchTerm, currentPage, pageSize]);
 
     const calculateOwedForMonth = (supplierId: string) => {
         const now = new Date();
@@ -292,20 +342,8 @@ const SuppliersPage: React.FC<SuppliersPageProps> = ({ suppliers, setSuppliers, 
         return totalOwed;
     };
 
-    const filteredSuppliers = useMemo(() => {
-        if (!searchTerm) {
-            return suppliers;
-        }
-        const lowercasedTerm = searchTerm.toLowerCase();
-        return suppliers.filter(supplier =>
-            supplier.name.toLowerCase().includes(lowercasedTerm) ||
-            supplier.contacts.some(c => 
-                c.name.toLowerCase().includes(lowercasedTerm) ||
-                c.email.toLowerCase().includes(lowercasedTerm) ||
-                c.phone.includes(lowercasedTerm)
-            )
-        );
-    }, [suppliers, searchTerm]);
+    // Use paginated suppliers instead of client-side filtering
+    const filteredSuppliers = paginatedSuppliers;
 
     const handleAddSupplier = () => {
         setEditingSupplier(null);
@@ -314,18 +352,26 @@ const SuppliersPage: React.FC<SuppliersPageProps> = ({ suppliers, setSuppliers, 
 
     const handleEditSupplier = (supplier: Supplier) => {
         setEditingSupplier(supplier);
+        trackViewStart(`supplier_${supplier.id}`, 'supplier', supplier.id, supplier.name);
         setIsModalOpen(true);
     };
 
-    const handleDeleteSupplier = (supplierId: string) => {
-        const supplierName = suppliers.find(c => c.id === supplierId)?.name;
-        if(window.confirm(`האם אתה בטוח שברצונך למחוק את הספק ${supplierName}?`)) {
-            setSuppliers(prev => prev.filter(c => c.id !== supplierId));
-            addActivity(`ספק נמחק: ${supplierName}`);
-        }
+    const handleCloseSupplierModal = () => {
+        if (editingSupplier) trackViewEnd(`supplier_${editingSupplier.id}`);
+        setEditingSupplier(null);
+        setIsModalOpen(false);
     };
 
-    const performMerge = (veteranId: string, victimId: string) => {
+    // Supplier deletion is disabled - suppliers should not be deleted
+    // const handleDeleteSupplier = (supplierId: string) => {
+    //     const supplierName = suppliers.find(c => c.id === supplierId)?.name;
+    //     if(window.confirm(`האם אתה בטוח שברצונך למחוק את הספק ${supplierName}?`)) {
+    //         setSuppliers(prev => prev.filter(c => c.id !== supplierId));
+    //         addActivity(`ספק נמחק: ${supplierName}`);
+    //     }
+    // };
+
+    const performMerge = async (veteranId: string, victimId: string) => {
         const victim = suppliers.find(s => s.id === victimId);
         const veteran = suppliers.find(s => s.id === veteranId);
         if (!victim || !veteran) return;
@@ -375,30 +421,39 @@ const SuppliersPage: React.FC<SuppliersPageProps> = ({ suppliers, setSuppliers, 
             .map(s => s.id === veteranId ? updatedVeteran : s)
         );
 
-        addActivity(`ספק ${victim.name} מוזג לתוך ${veteran.name}`);
+        addActivity(`ספק ${victim.name} מוזג לתוך ${veteran.name}`, { entityType: 'supplier', entityId: veteran.id, action: 'merge', metadata: { victimName: victim.name, targetName: veteran.name } });
         setDuplicateFound(null);
         setPendingNewSupplier(null);
         setIsMergeModalOpen(false);
+        if (editingSupplier) trackViewEnd(`supplier_${editingSupplier.id}`);
+        setEditingSupplier(null);
         setIsModalOpen(false);
+        // Refresh paginated suppliers after merge
+        await refetchSuppliers();
     };
 
-    const handleSaveSupplier = (supplier: Supplier) => {
+    const handleSaveSupplier = async (supplier: Supplier) => {
         if (editingSupplier) {
             setSuppliers(prev => prev.map(s => s.id === supplier.id ? supplier : s));
-            addActivity(`ספק עודכן: ${supplier.name}`);
-            setIsModalOpen(false);
-            setEditingSupplier(null);
+            addActivity(`ספק עודכן: ${supplier.name}`, { entityType: 'supplier', entityId: supplier.id, action: 'update', metadata: { name: supplier.name } });
+            handleCloseSupplierModal();
+            // Refresh paginated suppliers after update
+            await refetchSuppliers();
         } else {
-            // Duplicate Check on Create
-            const duplicate = findDuplicateSupplier(suppliers, supplier.name, supplier.contacts);
+            // Duplicate Check on Create - need to check all suppliers (not just paginated)
+            // So we'll fetch all suppliers for duplicate check
+            const allSuppliers = await mongoService.getSuppliers();
+            const duplicate = findDuplicateSupplier(allSuppliers, supplier.name, supplier.contacts);
             if (duplicate) {
                 setDuplicateFound(duplicate);
                 setPendingNewSupplier(supplier);
                 // Do NOT close modal yet, show warning
             } else {
                 setSuppliers(prev => [...prev, supplier]);
-                addActivity(`ספק חדש נוסף: ${supplier.name}`);
-                setIsModalOpen(false);
+                addActivity(`ספק חדש נוסף: ${supplier.name}`, { entityType: 'supplier', entityId: supplier.id, action: 'create', metadata: { name: supplier.name } });
+                handleCloseSupplierModal();
+                // Refresh paginated suppliers after create
+                await refetchSuppliers();
             }
         }
     };
@@ -411,7 +466,10 @@ const SuppliersPage: React.FC<SuppliersPageProps> = ({ suppliers, setSuppliers, 
                         type="text"
                         placeholder="חיפוש לפי שם ספק, איש קשר, טלפון או אימייל..."
                         value={searchTerm}
-                        onChange={(e) => setSearchTerm(e.target.value)}
+                        onChange={(e) => {
+                            setSearchTerm(e.target.value);
+                            setCurrentPage(1); // Reset to first page on search
+                        }}
                         className="w-full px-4 py-2 border border-slate-300 rounded-lg shadow-sm focus:ring-primary focus:border-primary transition"
                         aria-label="חיפוש ספקים"
                     />
@@ -421,7 +479,29 @@ const SuppliersPage: React.FC<SuppliersPageProps> = ({ suppliers, setSuppliers, 
                     הוסף ספק
                 </button>
             </div>
-            <div className="bg-white shadow-md rounded-lg">
+            {/* Mobile: supplier cards */}
+            <div className="md:hidden space-y-3 pb-4">
+                {filteredSuppliers.length === 0 && !loadingSuppliers && (
+                    <div className="text-center py-8 text-slate-500 bg-white rounded-xl border border-slate-200 p-4">
+                        <p className="font-semibold">לא נמצאו ספקים</p>
+                        <p className="text-sm mt-1">נסה חיפוש אחר או הוסף ספק חדש.</p>
+                    </div>
+                )}
+                {filteredSuppliers.map(supplier => (
+                    <button
+                        key={supplier.id}
+                        type="button"
+                        onClick={() => handleEditSupplier(supplier)}
+                        className="w-full text-right bg-white rounded-xl border border-slate-200 shadow-sm p-4 hover:bg-slate-50 active:bg-slate-100 transition-colors min-h-[44px]"
+                    >
+                        <div className="font-bold text-primary">{supplier.name}</div>
+                        {supplier.contacts[0] && <p className="text-sm text-slate-600 mt-0.5">{supplier.contacts[0].name}</p>}
+                        <p className="text-xs text-slate-500 mt-1">{supplier.paymentTerms}</p>
+                        <p className="text-sm font-semibold text-red-600 mt-2">{calculateOwedForMonth(supplier.id).toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 0, maximumFractionDigits: 0 })} חוב החודש</p>
+                    </button>
+                ))}
+            </div>
+            <div className="hidden md:block bg-white shadow-md rounded-lg">
                 <table className="min-w-full divide-y divide-slate-200 text-start">
                     <thead className="bg-slate-50">
                         <tr>
@@ -462,26 +542,90 @@ const SuppliersPage: React.FC<SuppliersPageProps> = ({ suppliers, setSuppliers, 
                                     {calculateOwedForMonth(supplier.id).toLocaleString('he-IL', { style: 'currency', currency: 'ILS', minimumFractionDigits: 0, maximumFractionDigits: 0 })}
                                 </td>
                                 <td className="px-6 py-4 whitespace-nowrap text-left text-sm font-medium space-x-2 space-x-reverse align-top">
-                                    <button onClick={() => handleDeleteSupplier(supplier.id)} className="text-red-600 hover:text-red-900 p-1"><DeleteIcon className="h-5 w-5"/></button>
+                                    {/* Supplier deletion is disabled - suppliers should not be deleted */}
                                 </td>
                             </tr>
                         ))}
                     </tbody>
                 </table>
-                {filteredSuppliers.length === 0 && (
+                {filteredSuppliers.length === 0 && !loadingSuppliers && (
                     <div className="text-center py-12 text-slate-500">
                         <p className="font-semibold text-lg">לא נמצאו ספקים</p>
                         <p>נסה מונח חיפוש אחר או הוסף ספק חדש.</p>
                     </div>
                 )}
+                
+                {/* Pagination Controls */}
+                {totalCount > 0 && (
+                    <div className="mt-4 flex items-center justify-between bg-white px-4 py-3 border-t border-slate-200">
+                        <div className="flex items-center gap-4">
+                            <div className="text-sm text-slate-600">
+                                מציג {((currentPage - 1) * pageSize) + 1} - {Math.min(currentPage * pageSize, totalCount)} מתוך {totalCount} ספקים
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <label className="text-sm text-slate-600">שורות לעמוד:</label>
+                                <select 
+                                    value={pageSize} 
+                                    onChange={(e) => {
+                                        setPageSize(parseInt(e.target.value));
+                                        setCurrentPage(1);
+                                    }}
+                                    className="text-sm border border-slate-300 rounded px-2 py-1 focus:ring-primary focus:border-primary"
+                                >
+                                    <option value={25}>25</option>
+                                    <option value={50}>50</option>
+                                    <option value={100}>100</option>
+                                    <option value={200}>200</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <button
+                                onClick={() => setCurrentPage(1)}
+                                disabled={currentPage === 1 || loadingSuppliers}
+                                className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                ראשון
+                            </button>
+                            <button
+                                onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
+                                disabled={currentPage === 1 || loadingSuppliers}
+                                className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                קודם
+                            </button>
+                            <span className="px-3 py-1 text-sm text-slate-600">
+                                עמוד {currentPage} מתוך {Math.ceil(totalCount / pageSize) || 1}
+                            </span>
+                            <button
+                                onClick={() => setCurrentPage(prev => Math.min(Math.ceil(totalCount / pageSize) || 1, prev + 1))}
+                                disabled={currentPage >= Math.ceil(totalCount / pageSize) || loadingSuppliers}
+                                className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                הבא
+                            </button>
+                            <button
+                                onClick={() => setCurrentPage(Math.ceil(totalCount / pageSize) || 1)}
+                                disabled={currentPage >= Math.ceil(totalCount / pageSize) || loadingSuppliers}
+                                className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                אחרון
+                            </button>
+                        </div>
+                    </div>
+                )}
+                
+                {loadingSuppliers && (
+                    <div className="mt-4 text-center text-slate-500 text-sm">טוען...</div>
+                )}
             </div>
             
             {isModalOpen && (
-                <Modal title={editingSupplier ? "עריכת ספק" : "הוספת ספק"} onClose={() => setIsModalOpen(false)}>
+                <Modal title={editingSupplier ? "עריכת ספק" : "הוספת ספק"} onClose={handleCloseSupplierModal}>
                     <SupplierForm 
                         supplier={editingSupplier} 
                         onSave={handleSaveSupplier} 
-                        onCancel={() => setIsModalOpen(false)} 
+                        onCancel={handleCloseSupplierModal} 
                         onMergeClick={() => setIsMergeModalOpen(true)}
                     />
                 </Modal>
@@ -492,7 +636,9 @@ const SuppliersPage: React.FC<SuppliersPageProps> = ({ suppliers, setSuppliers, 
                     targetSupplier={editingSupplier}
                     allSuppliers={suppliers}
                     onClose={() => setIsMergeModalOpen(false)}
-                    onConfirm={(victimId) => performMerge(editingSupplier.id, victimId)}
+                    onConfirm={async (victimId) => {
+                        await performMerge(editingSupplier.id, victimId);
+                    }}
                 />
             )}
 
@@ -511,7 +657,7 @@ const SuppliersPage: React.FC<SuppliersPageProps> = ({ suppliers, setSuppliers, 
                             <button 
                                 onClick={() => {
                                     setSuppliers(prev => [...prev, pendingNewSupplier]);
-                                    addActivity(`ספק חדש נוסף: ${pendingNewSupplier.name} (למרות כפילות)`);
+                                    addActivity(`ספק חדש נוסף: ${pendingNewSupplier.name} (למרות כפילות)`, { entityType: 'supplier', entityId: pendingNewSupplier.id, action: 'create', metadata: { name: pendingNewSupplier.name } });
                                     setDuplicateFound(null);
                                     setPendingNewSupplier(null);
                                     setIsModalOpen(false);
@@ -528,7 +674,7 @@ const SuppliersPage: React.FC<SuppliersPageProps> = ({ suppliers, setSuppliers, 
                                         contacts: [...duplicateFound.contacts, ...pendingNewSupplier.contacts]
                                     };
                                     setSuppliers(prev => prev.map(s => s.id === duplicateFound.id ? updatedVeteran : s));
-                                    addActivity(`ספק חדש מוזג לתוך הקיים: ${duplicateFound.name}`);
+                                    addActivity(`ספק חדש מוזג לתוך הקיים: ${duplicateFound.name}`, { entityType: 'supplier', entityId: duplicateFound.id, action: 'merge', metadata: { name: duplicateFound.name } });
                                     setDuplicateFound(null);
                                     setPendingNewSupplier(null);
                                     setIsModalOpen(false);

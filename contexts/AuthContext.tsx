@@ -29,25 +29,42 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     const [user, setUser] = useState<Omit<Employee, 'passwordHash'> | null>(null);
     const [isLoading, setIsLoading] = useState<boolean>(true);
 
-    // Check if user is authenticated on mount
-    useEffect(() => {
+        // Check if user is authenticated on mount (with timeout so we don't hang on white/loading)
+        useEffect(() => {
+        let cancelled = false;
+        const AUTH_CHECK_TIMEOUT_MS = 4000;
+
+        // Safety: force loading false after 6s no matter what (e.g. if Promise.race doesn't resolve)
+        const forceDoneTimer = setTimeout(() => {
+            if (!cancelled) setIsLoading(false);
+        }, 6000);
+
         const checkAuth = async () => {
             try {
                 if (authService.isAuthenticated()) {
-                    const currentUser = await authService.getCurrentUser();
-                    setUser(currentUser);
+                    const timeoutPromise = new Promise<never>((_, reject) =>
+                        setTimeout(() => reject(new Error('Auth check timeout')), AUTH_CHECK_TIMEOUT_MS)
+                    );
+                    const currentUser = await Promise.race([
+                        authService.getCurrentUser(),
+                        timeoutPromise,
+                    ]);
+                    if (!cancelled) setUser(currentUser);
                 }
             } catch (error) {
                 console.error('Auth check failed:', error);
-                // Token is invalid, remove it
                 localStorage.removeItem('authToken');
                 localStorage.removeItem('rememberMe');
             } finally {
-                setIsLoading(false);
+                if (!cancelled) setIsLoading(false);
             }
         };
 
         checkAuth();
+        return () => {
+            cancelled = true;
+            clearTimeout(forceDoneTimer);
+        };
     }, []);
 
     const login = useCallback(async (username: string, password: string, rememberMe: boolean = false) => {
@@ -60,12 +77,12 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     }, []);
 
     const logout = useCallback(async () => {
+        // Update UI immediately so user sees logged-out state
+        setUser(null);
         try {
             await authService.logout();
         } catch (error) {
             console.error('Logout error:', error);
-        } finally {
-            setUser(null);
         }
     }, []);
 

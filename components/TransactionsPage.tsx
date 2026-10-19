@@ -10,7 +10,7 @@ interface TransactionsPageProps {
     customers: Customer[];
     deals: Deal[];
     suppliers: Supplier[];
-    addActivity: (description: string) => void;
+    addActivity: (description: string, options?: import('../types').AddActivityOptions) => void;
 }
 
 const TransactionForm: React.FC<{ 

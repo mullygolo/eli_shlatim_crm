@@ -1,12 +1,14 @@
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Employee, AttendanceRecord, Order, OrderStatusConfiguration, AttendanceStatus, PaymentMethod, Attachment, PayrollOverrideMap } from '../types';
-import { ClockIcon, EditIcon, PlusIcon, ImportIcon, DownloadIcon } from './icons';
+import { ClockIcon, EditIcon, PlusIcon, ImportIcon, DownloadIcon, DeleteIcon } from './icons';
 import Modal from './Modal';
 import { calculateOrderTotals, getEmployeeSalaryAtDate } from '../utils/calculations';
+import { getStatusConfigForOrder } from '../utils/statusHelpers';
 import { getJewishHoliday } from '../utils/holidays';
 import { useAuth } from '../contexts/AuthContext';
 import * as mongoService from '../services/mongoService';
+import { getDateStringForComparison, getDateStringIsrael } from '../utils/timezone';
 
 interface AttendancePageProps {
     employees: Employee[];
@@ -16,6 +18,7 @@ interface AttendancePageProps {
     statusConfigs: OrderStatusConfiguration[];
     payrollOverrides: PayrollOverrideMap;
     setPayrollOverrides: React.Dispatch<React.SetStateAction<PayrollOverrideMap>>;
+    onAttendanceMutationBusy?: (busy: boolean) => void;
 }
 
 // --- Helpers ---
@@ -167,7 +170,7 @@ const CertificateViewer: React.FC<{
     );
 };
 
-// Correction Request Modal
+// Correction Request Modal — תומך בבקשה עם זוג כניסה–יציאה אחד או כמה
 const CorrectionRequestModal: React.FC<{ 
     date: Date;
     record?: AttendanceRecord; 
@@ -179,11 +182,29 @@ const CorrectionRequestModal: React.FC<{
         isFuture ? 'VACATION' : 'PRESENT'
     );
     const [isWFH, setIsWFH] = useState(record?.status === 'WFH');
-    const [start, setStart] = useState(record?.clockIn ? new Date(record.clockIn).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : '09:00');
-    const [end, setEnd] = useState(record?.clockOut ? new Date(record.clockOut).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : '17:00');
+    const defaultStart = record?.clockIn ? new Date(record.clockIn).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : '09:00';
+    const defaultEnd = record?.clockOut ? new Date(record.clockOut).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : '17:00';
+    const [segments, setSegments] = useState<Array<{ start: string; end: string }>>(() => {
+        if (record?.correctionRequest?.segments?.length) {
+            return record.correctionRequest.segments.map(s => ({
+                start: new Date(s.requestedClockIn).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}),
+                end: new Date(s.requestedClockOut).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'})
+            }));
+        }
+        return [{ start: defaultStart, end: defaultEnd }];
+    });
     const [reason, setReason] = useState('');
     const [certificate, setCertificate] = useState<Attachment | undefined>(record?.certificate);
     const [error, setError] = useState('');
+
+    const addSegment = () => setSegments(prev => [...prev, { start: '09:00', end: '17:00' }]);
+    const removeSegment = (idx: number) => {
+        if (segments.length <= 1) return;
+        setSegments(prev => prev.filter((_, i) => i !== idx));
+    };
+    const updateSegment = (idx: number, field: 'start' | 'end', value: string) => {
+        setSegments(prev => prev.map((s, i) => i === idx ? { ...s, [field]: value } : s));
+    };
 
     const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         if (e.target.files && e.target.files[0]) {
@@ -209,7 +230,8 @@ const CorrectionRequestModal: React.FC<{
             return; 
         }
         const finalStatus = reportType === 'PRESENT' && isWFH ? 'WFH' : reportType;
-        onSubmit({ start, end, reason, reportType: finalStatus, certificate });
+        const segs = reportType === 'PRESENT' ? segments : [{ start: '00:00', end: '23:59' }];
+        onSubmit({ segments: segs, reason, reportType: finalStatus, certificate });
     };
 
     return (
@@ -263,14 +285,23 @@ const CorrectionRequestModal: React.FC<{
                             </label>
                         </div>
 
-                        <div className="grid grid-cols-2 gap-4">
-                            <div>
-                                <label className="block text-sm font-medium text-slate-700">שעת כניסה</label>
-                                <input type="time" value={start} onChange={e => setStart(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary" />
+                        <div>
+                            <div className="flex items-center justify-between mb-2">
+                                <label className="block text-sm font-bold text-slate-700">כניסות ויציאות</label>
+                                <button type="button" onClick={addSegment} className="text-xs font-bold text-primary hover:bg-indigo-50 px-2 py-1 rounded">+ הוסף זמנים</button>
                             </div>
-                            <div>
-                                <label className="block text-sm font-medium text-slate-700">שעת יציאה</label>
-                                <input type="time" value={end} onChange={e => setEnd(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary" />
+                            <div className="space-y-3">
+                                {segments.map((seg, idx) => (
+                                    <div key={idx} className="flex items-center gap-2 flex-wrap">
+                                        <span className="text-slate-500 text-sm w-6">{idx + 1}.</span>
+                                        <input type="time" value={seg.start} onChange={e => updateSegment(idx, 'start', e.target.value)} className="rounded-md border-slate-300 shadow-sm text-sm w-28" aria-label="כניסה" />
+                                        <span className="text-slate-400">–</span>
+                                        <input type="time" value={seg.end} onChange={e => updateSegment(idx, 'end', e.target.value)} className="rounded-md border-slate-300 shadow-sm text-sm w-28" aria-label="יציאה" />
+                                        {segments.length > 1 && (
+                                            <button type="button" onClick={() => removeSegment(idx)} className="text-red-600 hover:bg-red-50 p-1 rounded text-xs font-bold" title="הסר">✕</button>
+                                        )}
+                                    </div>
+                                ))}
                             </div>
                         </div>
                     </div>
@@ -289,7 +320,11 @@ const CorrectionRequestModal: React.FC<{
                             {certificate && (
                                 <div className="flex-1 flex items-center justify-between text-xs text-slate-600 bg-white/50 p-1.5 rounded border border-rose-100">
                                     <span className="truncate max-w-[150px]">{certificate.fileName}</span>
-                                    <button type="button" onClick={() => setCertificate(undefined)} className="text-rose-600 font-bold px-1 hover:underline">מחק</button>
+                                    <button type="button" onClick={() => {
+                                        if (window.confirm(`האם אתה בטוח שברצונך למחוק את התעודה "${certificate.fileName}"?`)) {
+                                            setCertificate(undefined);
+                                        }
+                                    }} className="text-rose-600 font-bold px-1 hover:underline">מחק</button>
                                 </div>
                             )}
                         </div>
@@ -320,9 +355,10 @@ const CorrectionRequestModal: React.FC<{
     );
 };
 
-const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, setRecords, orders, statusConfigs, payrollOverrides, setPayrollOverrides }) => {
+const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, setRecords, orders, statusConfigs, payrollOverrides, setPayrollOverrides, onAttendanceMutationBusy }) => {
     const { user } = useAuth();
     const isUserManager = user?.roleType === 'ADMIN' || user?.roleType === 'MANAGER';
+    const isAdmin = user?.roleType === 'ADMIN';
     
     // עובד רגיל יכול לראות רק את עצמו, מנהל יכול לבחור כל עובד
     const [currentEmployeeId, setCurrentEmployeeId] = useState<string>(() => {
@@ -342,9 +378,11 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
     const [recordForCorrection, setRecordForCorrection] = useState<AttendanceRecord | undefined>(undefined);
     const [currentTime, setCurrentTime] = useState(new Date());
     const [isWFH, setIsWFH] = useState(false);
+    const [showClockInLocationModal, setShowClockInLocationModal] = useState(false);
     const [viewingCertificate, setViewingCertificate] = useState<Attachment | null>(null);
     const [isClocking, setIsClocking] = useState(false);
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
+    const clockInRequestInProgressRef = useRef(false);
 
     // Dynamic Year List: Start from 2023 up to current year + 1
     const availableYears = useMemo(() => {
@@ -361,6 +399,77 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
     useEffect(() => {
         const timer = setInterval(() => setCurrentTime(new Date()), 1000);
         return () => clearInterval(timer);
+    }, []);
+    
+    // Pagination state for monthly records
+    const [paginatedRecords, setPaginatedRecords] = useState<AttendanceRecord[]>([]);
+    const [currentPage, setCurrentPage] = useState(1);
+    const [pageSize, setPageSize] = useState(50);
+    const [totalCount, setTotalCount] = useState(0);
+    const [loadingRecords, setLoadingRecords] = useState(false);
+    
+    // Refetch function for paginated records
+    const refetchRecords = async () => {
+        try {
+            setLoadingRecords(true);
+            const filters: any = {
+                employeeId: currentEmployeeId,
+                month: selectedMonth,
+                year: selectedYear
+            };
+            
+            const result = await mongoService.getAttendanceRecordsPaginated(filters, currentPage, pageSize);
+            setPaginatedRecords(result.records);
+            setTotalCount(result.totalCount);
+        } catch (error) {
+            console.error('Error loading paginated records:', error);
+        } finally {
+            setLoadingRecords(false);
+        }
+    };
+    
+    // Load paginated records when filters or pagination change
+    useEffect(() => {
+        const loadRecords = async () => {
+            try {
+                setLoadingRecords(true);
+                const filters: any = {
+                    employeeId: currentEmployeeId,
+                    month: selectedMonth,
+                    year: selectedYear
+                };
+                
+                const result = await mongoService.getAttendanceRecordsPaginated(filters, currentPage, pageSize);
+                setPaginatedRecords(result.records);
+                setTotalCount(result.totalCount);
+            } catch (error) {
+                console.error('Error loading paginated records:', error);
+            } finally {
+                setLoadingRecords(false);
+            }
+        };
+        loadRecords();
+    }, [currentEmployeeId, selectedMonth, selectedYear, currentPage, pageSize]);
+    
+    // Keep ref to latest setRecords so we don't re-run the effect when it changes (which would overwrite optimistic clock-out)
+    const setRecordsRef = useRef(setRecords);
+    setRecordsRef.current = setRecords;
+
+    // Auto-close old records on component mount and periodically only (not when setRecords identity changes)
+    useEffect(() => {
+        const checkAndCloseOldRecords = async () => {
+            try {
+                const updatedRecords = await mongoService.getAttendanceRecords();
+                setRecordsRef.current(updatedRecords);
+                refetchRecords();
+            } catch (error) {
+                console.error('Error refreshing records to close old ones:', error);
+            }
+        };
+
+        checkAndCloseOldRecords();
+        const interval = setInterval(checkAndCloseOldRecords, 5 * 60 * 1000);
+        return () => clearInterval(interval);
     }, []);
     
     // עדכן currentEmployeeId אם המשתמש הוא עובד רגיל
@@ -386,13 +495,18 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
     const isManager = isUserManager;
 
     const todaysRecords = useMemo(() => {
-        const todayStr = new Date().toDateString();
+        const todayStr = getDateStringIsrael(); // Use Israel timezone
         return records
-            .filter(r => r.employeeId === currentEmployeeId && new Date(r.date).toDateString() === todayStr)
+            .filter(r => {
+                if (r.employeeId !== currentEmployeeId) return false;
+                const recordDateStr = getDateStringForComparison(r.date);
+                return recordDateStr === todayStr;
+            })
             .sort((a, b) => new Date(a.clockIn || 0).getTime() - new Date(b.clockIn || 0).getTime());
     }, [records, currentEmployeeId]);
 
-    const activeRecord = todaysRecords.find(r => !r.clockOut);
+    // Only real records (not optimistic att_opt_*) count as "active" for display/timer/clock-out
+    const activeRecord = todaysRecords.find(r => !r.clockOut && !String(r.id).startsWith('att_opt_'));
     const isClockedIn = !!activeRecord;
 
     // LIVE Shift Duration Logic
@@ -409,6 +523,35 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
     const saveToOfflineQueue = (action: 'IN' | 'OUT', data: any) => {
         try {
             const queue = JSON.parse(localStorage.getItem('attendanceQueue') || '[]');
+            const todayStr = getDateStringIsrael();
+            
+            // Check for duplicates before adding to queue
+            if (action === 'IN') {
+                // Check if there's already a pending clock-in for this employee today
+                const hasPendingClockIn = queue.some((item: any) => 
+                    item.action === 'IN' && 
+                    item.data.employeeId === data.employeeId &&
+                    // Check if it's from today (within last 24 hours)
+                    (Date.now() - item.timestamp) < 24 * 60 * 60 * 1000
+                );
+                
+                if (hasPendingClockIn) {
+                    console.log('Skipping duplicate clock-in in offline queue');
+                    return;
+                }
+            } else if (action === 'OUT') {
+                // Check if there's already a pending clock-out for this record
+                const hasPendingClockOut = queue.some((item: any) => 
+                    item.action === 'OUT' && 
+                    item.data.recordId === data.recordId
+                );
+                
+                if (hasPendingClockOut) {
+                    console.log('Skipping duplicate clock-out in offline queue');
+                    return;
+                }
+            }
+            
             queue.push({ action, data, timestamp: Date.now() });
             localStorage.setItem('attendanceQueue', JSON.stringify(queue));
         } catch (error) {
@@ -444,18 +587,59 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
                 const queue = JSON.parse(localStorage.getItem('attendanceQueue') || '[]');
                 if (queue.length === 0) return;
 
+                // First, refresh records to get latest state
+                const currentRecords = await mongoService.getAttendanceRecords();
+                setRecords(currentRecords);
+
                 const processed: number[] = [];
+                const todayStr = getDateStringIsrael();
+                
                 for (const item of queue) {
                     try {
+                        // Check if this action is still valid before processing
                         if (item.action === 'IN') {
+                            // Check if there's already an active clock-in for this employee today
+                            const hasActiveRecord = currentRecords.some(r => {
+                                if (r.employeeId !== item.data.employeeId) return false;
+                                const recordDateStr = getDateStringForComparison(r.date);
+                                return recordDateStr === todayStr && !r.clockOut;
+                            });
+                            
+                            if (hasActiveRecord) {
+                                // Skip this item - already clocked in
+                                console.log('Skipping duplicate clock-in from queue');
+                                processed.push(item.timestamp);
+                                continue;
+                            }
+                            
                             await mongoService.clockIn(item.data.employeeId, item.data.isWFH);
                         } else if (item.action === 'OUT') {
+                            // Check if the record still exists and doesn't have clockOut
+                            const record = currentRecords.find(r => r.id === item.data.recordId);
+                            if (!record) {
+                                // Record doesn't exist, skip
+                                console.log('Skipping clock-out for non-existent record');
+                                processed.push(item.timestamp);
+                                continue;
+                            }
+                            if (record.clockOut) {
+                                // Already clocked out, skip
+                                console.log('Skipping duplicate clock-out from queue');
+                                processed.push(item.timestamp);
+                                continue;
+                            }
+                            
                             await mongoService.clockOut(item.data.recordId);
                         }
                         processed.push(item.timestamp);
-                    } catch (error) {
+                    } catch (error: any) {
                         console.error('Error processing offline queue item:', error);
-                        // Keep failed items in queue for next attempt
+                        // If it's a duplicate error, mark as processed to avoid retrying
+                        if (error?.message && error.message.includes('already has an active clock-in')) {
+                            console.log('Skipping duplicate clock-in from queue (server rejected)');
+                            processed.push(item.timestamp);
+                        }
+                        // Otherwise, keep failed items in queue for next attempt
                     }
                 }
 
@@ -480,39 +664,46 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
 
             return () => clearInterval(interval);
         }
-    }, [setRecords]);
+    }, [setRecords, currentEmployeeId]);
 
-    const handleClockAction = async (action: 'IN' | 'OUT') => {
-        if (isClocking) return; // Prevent double-clicks
-        
-        setIsClocking(true);
+    const handleClockAction = async (action: 'IN' | 'OUT', isWFHOverride?: boolean) => {
+        if (isClocking) return;
+
         setErrorMessage(null);
 
-        try {
-            if (action === 'IN') {
-                if (activeRecord) {
-                    setErrorMessage('כבר יש כניסה פעילה להיום');
-                    setIsClocking(false);
-                    return;
-                }
+        if (action === 'IN') {
+            const wfh = isWFHOverride ?? isWFH;
+            if (clockInRequestInProgressRef.current) return;
+            clockInRequestInProgressRef.current = true;
+            if (todaysRecords.some(r => !r.clockOut)) {
+                setErrorMessage('כבר יש כניסה פעילה להיום');
+                clockInRequestInProgressRef.current = false;
+                return;
+            }
 
-                // Try to clock in with retry
-                const savedRecord = await retryWithBackoff(() => 
-                    mongoService.clockIn(currentEmployeeId, isWFH)
+            setIsClocking(true);
+            if (import.meta.env.DEV) console.log('[Attendance] clock-in start');
+            const optimisticId = `att_opt_${Date.now()}`;
+            const now = new Date();
+            const optimisticRecord: AttendanceRecord = {
+                id: optimisticId,
+                employeeId: currentEmployeeId,
+                date: now,
+                clockIn: now,
+                totalHours: 0,
+                status: wfh ? 'WFH' : 'PRESENT',
+            };
+            onAttendanceMutationBusy?.(true);
+            setRecords(prev => [...prev, optimisticRecord]);
+
+            try {
+                const savedRecord = await retryWithBackoff(() =>
+                    mongoService.clockIn(currentEmployeeId, wfh)
                 );
-
-                // Update local state with server response
-                setRecords(prev => {
-                    // Remove any existing record for today (shouldn't happen, but safety)
-                    const todayStr = new Date().toDateString();
-                    const filtered = prev.filter(r => {
-                        const recordDate = new Date(r.date).toDateString();
-                        return !(r.employeeId === currentEmployeeId && recordDate === todayStr && !r.clockOut);
-                    });
-                    return [...filtered, savedRecord];
-                });
-                
-                // Refresh all records from server to ensure consistency
+                setRecords(prev =>
+                    prev.map(r => r.id === optimisticId ? savedRecord : r).filter(r => !String(r.id).startsWith('att_opt_'))
+                );
+                if (import.meta.env.DEV) console.log('[Attendance] clock-in success', savedRecord.id);
                 setTimeout(async () => {
                     try {
                         const updatedRecords = await mongoService.getAttendanceRecords();
@@ -521,118 +712,149 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
                         console.error('Error refreshing records after clock-in:', err);
                     }
                 }, 500);
-            } else if (action === 'OUT') {
-                if (!activeRecord) {
-                    setErrorMessage('אין כניסה פעילה');
-                    setIsClocking(false);
-                    return;
-                }
+            } catch (error: any) {
+                console.error('Error clocking in:', error);
+                setRecords(prev => prev.filter(r => r.id !== optimisticId));
 
-                // Double-check that the record doesn't already have clockOut (prevent double-click)
-                if (activeRecord.clockOut) {
-                    setErrorMessage('כבר יצאת מהמשמרת');
-                    setIsClocking(false);
-                    // Refresh records to get latest state
-                    try {
-                        const updatedRecords = await mongoService.getAttendanceRecords();
-                        setRecords(updatedRecords);
-                    } catch (err) {
-                        console.error('Error refreshing records:', err);
+                const isNetworkError = !navigator.onLine ||
+                    (error.message && error.message.includes('fetch')) ||
+                    (error.message && error.message.includes('network'));
+
+                if (isNetworkError) {
+                    saveToOfflineQueue('IN', { employeeId: currentEmployeeId, isWFH: wfh });
+                    setErrorMessage('אין חיבור לאינטרנט. הפעולה נשמרה ותתבצע אוטומטית כשהחיבור יחזור.');
+                } else {
+                    const msg = error.message && error.message.includes('already has an active clock-in')
+                        ? 'כבר יש כניסה פעילה להיום'
+                        : (error.message || 'שגיאה בביצוע הפעולה. אנא נסה שוב.');
+                    setErrorMessage(msg);
+                    if (error.message && error.message.includes('already has an active clock-in')) {
+                        try {
+                            const latestRecords = await mongoService.getAttendanceRecords();
+                            setRecords(latestRecords);
+                        } catch (err) {
+                            console.error('Error refreshing records:', err);
+                        }
                     }
-                    return;
                 }
+            } finally {
+                clockInRequestInProgressRef.current = false;
+                setIsClocking(false);
+                onAttendanceMutationBusy?.(false);
+            }
+            return;
+        }
 
-                // #region agent log
-                fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AttendancePage.tsx:handleClockAction:OUT',message:'Before clock out API call',data:{recordId:activeRecord.id,activeRecord:JSON.stringify(activeRecord)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A,B,C'})}).catch(()=>{});
-                // #endregion
+        // action === 'OUT' — only close records that exist on the server (exclude optimistic ids from pending clock-in)
+        const toClose = todaysRecords.filter(r => !r.clockOut && !String(r.id).startsWith('att_opt_'));
+        if (toClose.length === 0) {
+            // Remove stale optimistic records (ghost entries) and sync with server
+            const hasStaleOptimistic = todaysRecords.some(r => !r.clockOut && String(r.id).startsWith('att_opt_'));
+            if (hasStaleOptimistic) {
+                setRecords(prev => prev.filter(r => !String(r.id).startsWith('att_opt_')));
+                try {
+                    const updatedRecords = await mongoService.getAttendanceRecords();
+                    setRecords(updatedRecords);
+                } catch (e) {
+                    console.error('Error syncing after filtering optimistic records:', e);
+                }
+            }
+            setErrorMessage('אין כניסה פעילה');
+            return;
+        }
 
-                // Try to clock out with retry
-                const savedRecord = await retryWithBackoff(() => 
-                    mongoService.clockOut(activeRecord.id)
+        setIsClocking(true);
+        if (import.meta.env.DEV) console.log('[Attendance] clock-out start', { toCloseCount: toClose.length, ids: toClose.map(r => r.id) });
+        const now = new Date();
+        const optimisticUpdates = Object.fromEntries(
+            toClose.map(r => [
+                r.id,
+                {
+                    ...r,
+                    clockOut: now,
+                    totalHours: r.clockIn
+                        ? Math.max(0, (now.getTime() - new Date(r.clockIn).getTime()) / (1000 * 60 * 60))
+                        : 0,
+                } as AttendanceRecord,
+            ])
+        );
+        onAttendanceMutationBusy?.(true);
+        setRecords(prev =>
+            prev.map(rec => (optimisticUpdates[rec.id] ? optimisticUpdates[rec.id] : rec))
+        );
+
+        let updatedFromServer: AttendanceRecord[] = [];
+        try {
+            let needRefetch = false;
+            for (const rec of toClose) {
+                try {
+                    const updatedRecord = await retryWithBackoff(() => mongoService.clockOut(rec.id));
+                    const withDates: AttendanceRecord = {
+                        ...updatedRecord,
+                        clockOut: updatedRecord.clockOut
+                            ? (updatedRecord.clockOut instanceof Date ? updatedRecord.clockOut : new Date(updatedRecord.clockOut as unknown as string))
+                            : undefined,
+                    };
+                    updatedFromServer.push(withDates);
+                } catch (perRecError: any) {
+                    const msg = perRecError?.message ?? '';
+                    if (msg.includes('already clocked out') || msg.includes('not found') || msg.includes('record not found')) {
+                        needRefetch = true;
+                        continue;
+                    }
+                    throw perRecError;
+                }
+            }
+            if (needRefetch || updatedFromServer.length < toClose.length) {
+                if (import.meta.env.DEV) console.log('[Attendance] clock-out refetch', { needRefetch, updatedCount: updatedFromServer.length, toCloseCount: toClose.length });
+                const updatedRecords = await mongoService.getAttendanceRecords();
+                setRecords(updatedRecords);
+                if (toClose.length > 1) setErrorMessage('חלק מהרשומות כבר נחתמו. המערכת עודכנה.');
+            } else {
+                if (import.meta.env.DEV) console.log('[Attendance] clock-out success', { updatedCount: updatedFromServer.length });
+                setRecords(prev =>
+                    prev.map(r => {
+                        const u = updatedFromServer.find(u => u.id === r.id);
+                        return u ?? r;
+                    }).filter(r => !String(r.id).startsWith('att_opt_'))
                 );
-
-                // #region agent log
-                fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AttendancePage.tsx:handleClockAction:OUT',message:'After clock out API call success',data:{savedRecord:JSON.stringify(savedRecord)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A,B,C'})}).catch(()=>{});
-                // #endregion
-
-                // Update local state with server response immediately
-                setRecords(prev => {
-                    const updated = prev.map(r => r.id === activeRecord.id ? savedRecord : r);
-                    // #region agent log
-                    fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AttendancePage.tsx:handleClockAction:OUT',message:'After setRecords update',data:{recordId:activeRecord.id,updatedRecordClockOut:savedRecord?.clockOut,updatedRecordsCount:updated.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-                    // #endregion
-                    return updated;
-                });
-                
-                // Refresh all records from server to ensure consistency
-                setTimeout(async () => {
-                    try {
-                        const updatedRecords = await mongoService.getAttendanceRecords();
-                        setRecords(updatedRecords);
-                        // #region agent log
-                        fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AttendancePage.tsx:handleClockAction:OUT',message:'After refresh from server',data:{refreshedRecordsCount:updatedRecords.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-                        // #endregion
-                    } catch (err) {
-                        console.error('Error refreshing records after clock-out:', err);
-                    }
-                }, 500);
             }
         } catch (error: any) {
-            console.error('Error clocking:', error);
-            
-            // #region agent log
-            fetch('http://127.0.0.1:7243/ingest/f69c159e-5684-4e4e-b8db-dd0ba98b5e42',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AttendancePage.tsx:handleClockAction:catch',message:'Error caught in clock action',data:{action,errorMessage:error?.message,errorStack:error?.stack,errorString:String(error)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A,B,C,D,E'})}).catch(()=>{});
-            // #endregion
-            
-            // Check if it's a network error
-            const isNetworkError = !navigator.onLine || 
-                (error.message && error.message.includes('fetch')) ||
-                (error.message && error.message.includes('network'));
-
-            if (isNetworkError) {
-                // Save to offline queue
-                if (action === 'IN') {
-                    saveToOfflineQueue('IN', { employeeId: currentEmployeeId, isWFH });
-                    setErrorMessage('אין חיבור לאינטרנט. הפעולה נשמרה ותתבצע אוטומטית כשהחיבור יחזור.');
-                } else {
-                    saveToOfflineQueue('OUT', { recordId: activeRecord.id });
-                    setErrorMessage('אין חיבור לאינטרנט. הפעולה נשמרה ותתבצע אוטומטית כשהחיבור יחזור.');
-                }
-
-                // Optimistically update UI (will be synced when online)
-                if (action === 'IN') {
-                    const optimisticRecord: AttendanceRecord = {
-                        id: `att_${Date.now()}_offline`,
-                        employeeId: currentEmployeeId,
-                        date: new Date(),
-                        clockIn: new Date(),
-                        totalHours: 0,
-                        status: isWFH ? 'WFH' : 'PRESENT',
-                    };
-                    setRecords(prev => [...prev, optimisticRecord]);
-                } else {
-                    const now = new Date();
-                    const updatedRecord = { 
-                        ...activeRecord, 
-                        clockOut: now,
-                        totalHours: activeRecord.clockIn ? 
-                            Math.max(0, (now.getTime() - new Date(activeRecord.clockIn).getTime()) / (1000 * 60 * 60)) : 0
-                    };
-                    setRecords(prev => prev.map(r => r.id === activeRecord.id ? updatedRecord : r));
+            console.error('Error clocking out:', error);
+            const msg = error?.message ?? '';
+            const isAlreadyOrNotFound = msg.includes('already clocked out') || msg.includes('not found') || msg.includes('record not found');
+            if (isAlreadyOrNotFound || updatedFromServer.length > 0) {
+                // Sync from server instead of reverting (partial success or record already closed / not found)
+                try {
+                    const updatedRecords = await mongoService.getAttendanceRecords();
+                    setRecords(updatedRecords);
+                    setErrorMessage(toClose.length > 1 ? 'חלק מהרשומות כבר נחתמו. המערכת עודכנה.' : 'כבר בוצעה יציאה לרשומה זו.');
+                } catch (syncErr) {
+                    setRecords(prev =>
+                        prev.map(rec => (optimisticUpdates[rec.id] ? toClose.find(r => r.id === rec.id)! : rec))
+                    );
+                    setErrorMessage('כבר בוצעה יציאה לרשומה זו.');
                 }
             } else {
-                // Other errors (e.g., already clocked in)
-                const errorMsg = error.message || 'שגיאה בביצוע הפעולה. אנא נסה שוב.';
-                setErrorMessage(errorMsg);
-                
-                if (error.message && error.message.includes('already has an active clock-in')) {
-                    setErrorMessage('כבר יש כניסה פעילה להיום');
-                } else if (error.message && error.message.includes('already clocked out')) {
-                    setErrorMessage('כבר בוצעה יציאה לרשומה זו');
+                setRecords(prev =>
+                    prev.map(rec => (optimisticUpdates[rec.id] ? toClose.find(r => r.id === rec.id)! : rec))
+                );
+                const isNetworkError = !navigator.onLine ||
+                    (error.message && error.message.includes('fetch')) ||
+                    (error.message && error.message.includes('network'));
+
+                if (isNetworkError) {
+                    for (const rec of toClose) {
+                        saveToOfflineQueue('OUT', { recordId: rec.id });
+                    }
+                    setErrorMessage('אין חיבור לאינטרנט. הפעולה נשמרה ותתבצע אוטומטית כשהחיבור יחזור.');
+                } else {
+                    setErrorMessage(error.message || 'שגיאה בביצוע הפעולה. אנא נסה שוב.');
                 }
             }
         } finally {
             setIsClocking(false);
+            onAttendanceMutationBusy?.(false);
         }
     };
 
@@ -642,60 +864,127 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
         setCorrectionModalOpen(true);
     };
 
-    const handleCorrectionSubmit = (data: any) => {
+    const handleDeleteRecord = async (record: AttendanceRecord) => {
+        const dateStr = record.date instanceof Date ? new Date(record.date).toLocaleDateString('he-IL') : new Date(record.date).toLocaleDateString('he-IL');
+        const hoursStr = formatDecimalHoursToTime(record.totalHours);
+        const msg = `האם למחוק את רשומת השעות?\nתאריך: ${dateStr}\nשעות: ${hoursStr}\nפעולה זו לא ניתנת לביטול.`;
+        if (!window.confirm(msg)) return;
+        try {
+            await mongoService.deleteAttendanceRecord(record.id);
+            setRecords(prev => prev.filter(r => r.id !== record.id));
+            await refetchRecords();
+        } catch (err: any) {
+            console.error('Failed to delete attendance record:', err);
+            alert(err?.message || 'שגיאה במחיקת הרשומה. נסה שוב.');
+        }
+    };
+
+    const handleCorrectionSubmit = async (data: any) => {
         if (!selectedDateForCorrection) return;
 
-        const [startH, startM] = data.start.split(':');
-        const [endH, endM] = data.end.split(':');
-        const reqIn = new Date(selectedDateForCorrection); 
-        reqIn.setHours(parseInt(startH), parseInt(startM), 0, 0);
-        const reqOut = new Date(selectedDateForCorrection); 
-        reqOut.setHours(parseInt(endH), parseInt(endM), 0, 0);
+        const rawSegments = Array.isArray(data.segments) && data.segments.length > 0
+            ? data.segments
+            : [{ start: data.start || '09:00', end: data.end || '17:00' }];
 
+        const toDate = (start: string, end: string) => {
+            const [sh, sm] = start.split(':');
+            const [eh, em] = end.split(':');
+            const reqIn = new Date(selectedDateForCorrection);
+            reqIn.setHours(parseInt(sh, 10), parseInt(sm, 10), 0, 0);
+            const reqOut = new Date(selectedDateForCorrection);
+            reqOut.setHours(parseInt(eh, 10), parseInt(em, 10), 0, 0);
+            return { requestedClockIn: reqIn, requestedClockOut: reqOut };
+        };
+
+        const segmentsAsDates = rawSegments.map((s: { start: string; end: string }) => toDate(s.start, s.end));
         const recordStatus: AttendanceStatus = 'PENDING_APPROVAL';
         const isPresence = data.reportType === 'PRESENT' || data.reportType === 'WFH';
+        const reasonText = `${data.reportType === 'VACATION' ? 'חופשה' : data.reportType === 'SICK' ? 'מחלה' : data.reportType === 'WFH' ? 'עבודה מהבית' : 'נוכחות'}: ${data.reason}`;
 
-        if (recordForCorrection) {
-            const updatedRecord: AttendanceRecord = {
-                ...recordForCorrection,
-                status: recordStatus,
-                correctionRequest: {
-                    requestedClockIn: reqIn,
-                    requestedClockOut: reqOut,
-                    requestedStatus: data.reportType,
-                    reason: `${data.reportType === 'VACATION' ? 'חופשה' : data.reportType === 'SICK' ? 'מחלה' : data.reportType === 'WFH' ? 'עבודה מהבית' : 'נוכחות'}: ${data.reason}`,
-                    certificate: data.certificate
-                }
-            };
-            setRecords(prev => prev.map(r => r.id === recordForCorrection.id ? updatedRecord : r));
-        } else {
-            const newRecord: AttendanceRecord = {
-                id: `att_req_${Date.now()}`,
+        let recordToSave: AttendanceRecord;
+        const multiSegment = segmentsAsDates.length > 1;
+
+        if (multiSegment) {
+            recordToSave = {
+                id: `att_req_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
                 employeeId: currentEmployeeId,
                 date: selectedDateForCorrection,
-                clockIn: isPresence ? reqIn : undefined,
-                clockOut: isPresence ? reqOut : undefined,
                 totalHours: 0,
                 status: recordStatus,
-                note: `בקשת ${data.reportType === 'VACATION' ? 'חופשה' : data.reportType === 'SICK' ? 'מחלה' : data.reportType === 'WFH' ? 'עבודה מהבית' : 'נוכחות'}`,
+                note: `בקשת נוכחות (${segmentsAsDates.length} זמנים)`,
                 correctionRequest: {
-                    requestedClockIn: reqIn,
-                    requestedClockOut: reqOut,
+                    segments: segmentsAsDates,
                     requestedStatus: data.reportType,
-                    reason: `${data.reportType === 'VACATION' ? 'חופשה' : data.reportType === 'SICK' ? 'מחלה' : data.reportType === 'WFH' ? 'עבודה מהבית' : 'נוכחות'} : ${data.reason}`,
+                    reason: reasonText,
                     certificate: data.certificate
                 }
             };
-            setRecords(prev => [...prev, newRecord]);
+        } else {
+            const first = segmentsAsDates[0];
+            const reqIn = first.requestedClockIn;
+            const reqOut = first.requestedClockOut;
+            if (recordForCorrection) {
+                recordToSave = {
+                    ...recordForCorrection,
+                    status: recordStatus,
+                    correctionRequest: {
+                        requestedClockIn: reqIn,
+                        requestedClockOut: reqOut,
+                        requestedStatus: data.reportType,
+                        reason: reasonText,
+                        certificate: data.certificate
+                    }
+                };
+            } else {
+                recordToSave = {
+                    id: `att_req_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
+                    employeeId: currentEmployeeId,
+                    date: selectedDateForCorrection,
+                    clockIn: isPresence ? reqIn : undefined,
+                    clockOut: isPresence ? reqOut : undefined,
+                    totalHours: 0,
+                    status: recordStatus,
+                    note: `בקשת ${data.reportType === 'VACATION' ? 'חופשה' : data.reportType === 'SICK' ? 'מחלה' : data.reportType === 'WFH' ? 'עבודה מהבית' : 'נוכחות'}`,
+                    correctionRequest: {
+                        requestedClockIn: reqIn,
+                        requestedClockOut: reqOut,
+                        requestedStatus: data.reportType,
+                        reason: reasonText,
+                        certificate: data.certificate
+                    }
+                };
+            }
         }
+
         setCorrectionModalOpen(false);
+        try {
+            if (recordForCorrection && multiSegment) {
+                // בקשת תיקון עם כמה מקטעים — מוחקים את הרשומה הישנה כדי שלא יישארו שעות כפולות אחרי האישור
+                await mongoService.deleteAttendanceRecord(recordForCorrection.id);
+            }
+            if (recordForCorrection && !multiSegment) {
+                await mongoService.updateAttendanceRecord(recordToSave);
+            } else {
+                await mongoService.createAttendanceRecord(recordToSave);
+            }
+            const allRecords = await mongoService.getAttendanceRecords();
+            setRecords(allRecords);
+            await refetchRecords();
+        } catch (err: any) {
+            console.error('Failed to save correction request:', err);
+            setCorrectionModalOpen(true);
+            alert(err?.message || 'שגיאה בשמירת בקשת התיקון. נסה שוב.');
+        }
     };
 
     const getMonthlyStats = (empId: string, month: number, year: number) => {
         const emp = employees.find(e => e.id === empId);
         if (!emp) return { totalHours: 0, baseSalary: 0, bonus: 0, totalGross: 0, workDays: 0, isGlobal: false, vacationDays: 0, sickDays: 0, sickCertificates: [], employerCost: 0 };
 
-        const empRecords = records.filter(r => {
+        // Always use full records list for monthly stats so manager report and PnL use the same source
+        const recordsToUse = records;
+        
+        const empRecords = recordsToUse.filter(r => {
             const d = new Date(r.date);
             return r.employeeId === empId && d.getMonth() + 1 === month && d.getFullYear() === year;
         });
@@ -703,7 +992,7 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
         const uniqueDays = new Set(
             empRecords
                 .filter(r => r.status === 'PRESENT' || r.status === 'WFH')
-                .map(r => new Date(r.date).toDateString())
+                .map(r => getDateStringForComparison(r.date))
         );
         const workDays = uniqueDays.size;
         
@@ -738,7 +1027,7 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
             const targetIds = emp.bonusBasisEmployeeIds && emp.bonusBasisEmployeeIds.length > 0 ? emp.bonusBasisEmployeeIds : [emp.id];
             const relevantOrders = orders.filter(o => {
                 const d = new Date(o.dealStartDate || o.date);
-                const isWon = statusConfigs.find(c => c.label === o.orderStatus)?.isActiveDeal; 
+                const isWon = getStatusConfigForOrder(o, statusConfigs)?.isActiveDeal; 
                 return targetIds.includes(o.employeeId) && d.getMonth() + 1 === month && d.getFullYear() === year && isWon && o.paymentStatus === 'שולם'; 
             });
             const totalSales = relevantOrders.reduce((sum, o) => sum + calculateOrderTotals(o).totalAmount, 0);
@@ -748,7 +1037,7 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
         let totalGross = baseSalary + bonus;
         let employerCost = totalGross * (1 + (emp.employerCostPercentage || 0) / 100);
 
-        const override = payrollOverrides[`${empId}_${year}_${month}`];
+        const override = (payrollOverrides ?? {})[`${empId}_${year}_${month}`];
         if (override) {
             if (override.finalGross !== undefined) {
                 totalGross = override.finalGross;
@@ -777,15 +1066,14 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
         };
     };
 
-    const handleOverrideChange = (empId: string, field: 'finalGross' | 'finalEmployerCost', value: string) => {
+    const handleOverrideChange = (empId: string, field: 'finalGross' | 'finalEmployerCost' | 'note', value: string) => {
         const key = `${empId}_${selectedYear}_${selectedMonth}`;
-        const numVal = value === '' ? undefined : parseFloat(value);
-        
+        const valueToSet = field === 'note' ? value : (value === '' ? undefined : parseFloat(value));
         setPayrollOverrides(prev => ({
             ...prev,
             [key]: {
                 ...(prev[key] || {}),
-                [field]: numVal
+                [field]: valueToSet
             }
         }));
     };
@@ -808,12 +1096,20 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
         });
     };
 
-    const handleExportExcel = () => {
+    const handleExportExcel = async () => {
         const emp = currentEmployee;
         if (!emp) return;
         
         const stats = getMonthlyStats(currentEmployeeId, selectedMonth, selectedYear);
         const daysInMonth = getDaysInMonth(selectedMonth, selectedYear);
+        
+        // For export, we need all records of the month, not just paginated
+        // So we'll fetch all records for the month
+        const allMonthRecords = await mongoService.getAttendanceRecordsPaginated(
+            { employeeId: currentEmployeeId, month: selectedMonth, year: selectedYear },
+            1,
+            10000 // Large limit to get all records
+        );
         
         const summaryRows = [
             ["סיכום דוח נוכחות ושכר"],
@@ -841,10 +1137,10 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
         ];
         
         const dataRows = daysInMonth.map(date => {
-            const dateKey = date.toDateString();
-            const dayRecords = records.filter(r => 
+            const dateKey = getDateStringForComparison(date);
+            const dayRecords = allMonthRecords.records.filter(r => 
                 r.employeeId === currentEmployeeId && 
-                new Date(r.date).toDateString() === dateKey
+                getDateStringForComparison(r.date) === dateKey
             );
             
             if (dayRecords.length === 0) {
@@ -961,11 +1257,12 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
                                     <th className="px-6 py-4 border-b">בונוס</th>
                                     <th className="px-6 py-4 border-b font-black text-slate-900 bg-slate-100/30">ברוטו סופי (תלוש)</th>
                                     <th className="px-6 py-4 border-b font-black text-indigo-900 bg-indigo-50/30">עלות מעביד סופית</th>
+                                    <th className="px-6 py-4 border-b font-medium text-slate-600">הערה</th>
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-100">
                                 {allStats.map(({ emp, stats }) => {
-                                    const override = payrollOverrides[`${emp.id}_${selectedYear}_${selectedMonth}`];
+                                    const override = (payrollOverrides ?? {})[`${emp.id}_${selectedYear}_${selectedMonth}`];
                                     const salaryAtEnd = getEmployeeSalaryAtDate(emp, new Date(selectedYear, selectedMonth, 0));
                                     return (
                                         <tr key={emp.id} className="hover:bg-slate-50 transition-colors">
@@ -1040,6 +1337,15 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
                                                     {!stats.hasCostOverride && <span className="text-[10px] text-indigo-400 italic">משוער: ₪{stats.employerCost.toLocaleString()}</span>}
                                                 </div>
                                             </td>
+                                            <td className="px-6 py-4 bg-slate-50/50">
+                                                <input
+                                                    type="text"
+                                                    value={override?.note ?? ''}
+                                                    onChange={(e) => handleOverrideChange(emp.id, 'note', e.target.value)}
+                                                    placeholder="הערה (מופיעה גם בדוח רווח והפסד)"
+                                                    className="w-full text-sm p-1.5 border border-slate-200 rounded-md focus:ring-1 focus:ring-primary text-slate-700"
+                                                />
+                                            </td>
                                         </tr>
                                     );
                                 })}
@@ -1055,6 +1361,7 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
                                     <td className="px-6 py-4 text-green-700">₪{grandTotals.bonus.toLocaleString()}</td>
                                     <td className="px-6 py-4 text-slate-900 text-lg bg-slate-200/20">₪{grandTotals.totalGross.toLocaleString()}</td>
                                     <td className="px-6 py-4 text-primary text-xl bg-indigo-100/50">₪{grandTotals.employerCost.toLocaleString()}</td>
+                                    <td className="px-6 py-4 bg-slate-100"></td>
                                 </tr>
                             </tfoot>
                         </table>
@@ -1086,7 +1393,7 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
                             <div className="p-3 border-2 border-primary/10 rounded-full shadow-inner bg-slate-50/50">
                                 {!isClockedIn ? (
                                     <button 
-                                        onClick={() => handleClockAction('IN')} 
+                                        onClick={() => setShowClockInLocationModal(true)} 
                                         disabled={isClocking}
                                         className={`w-36 h-36 rounded-full flex flex-col items-center justify-center shadow-2xl transition-all hover:scale-105 active:scale-95 bg-gradient-to-br from-secondary to-green-600 text-white border-4 border-green-100 group relative overflow-hidden ${isClocking ? 'opacity-50 cursor-not-allowed' : ''}`}
                                     >
@@ -1113,10 +1420,11 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
                                 )}
                             </div>
                             <div className="flex flex-col items-center gap-2">
-                                <div className="flex items-center gap-2">
-                                    <input type="checkbox" id="wfhToggle" checked={isWFH} onChange={e => setIsWFH(e.target.checked)} disabled={isClockedIn || isClocking} className="w-5 h-5 text-primary border-slate-300 rounded focus:ring-primary transition-colors cursor-pointer" />
-                                    <label htmlFor="wfhToggle" className="text-sm font-black text-slate-600 cursor-pointer select-none flex items-center gap-1">🏠 עבודה מהבית היום</label>
-                                </div>
+                                {isClockedIn && activeRecord && (
+                                    <div className="text-sm font-black text-slate-600 bg-slate-100 px-3 py-1 rounded-lg border border-slate-200 flex items-center gap-2">
+                                        {activeRecord.status === 'WFH' ? '🏠 מהבית' : '🏢 במשרד'}
+                                    </div>
+                                )}
                                 {isClockedIn && (
                                     <div className="text-sm font-black text-green-600 bg-green-50 px-3 py-1 rounded-lg border border-green-100 flex items-center gap-2 mt-1 shadow-sm">
                                         <span className="w-2 h-2 rounded-full bg-green-500 animate-ping"></span>זמן נוכחי: {liveDuration}
@@ -1173,10 +1481,11 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
                             </thead>
                             <tbody className="divide-y divide-slate-100">
                                 {daysInMonth.map((date) => {
-                                    const dateKey = date.toDateString();
+                                    const dateKey = getDateStringForComparison(date);
                                     const holiday = getJewishHoliday(date);
+                                    // All records for this day (one row per clock-in/out pair; allows multiple entries per day)
                                     const dayRecords = records
-                                        .filter(r => r.employeeId === currentEmployeeId && new Date(r.date).toDateString() === dateKey)
+                                        .filter(r => r.employeeId === currentEmployeeId && getDateStringForComparison(r.date) === dateKey)
                                         .sort((a, b) => new Date(a.clockIn || 0).getTime() - new Date(b.clockIn || 0).getTime());
                                     const isWeekend = date.getDay() === 5 || date.getDay() === 6;
                                     const isFuture = date > new Date();
@@ -1203,6 +1512,15 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
                                         const isWfh = record.status === 'WFH';
                                         const isPresence = record.status === 'PRESENT' || isWfh;
                                         const hasCertificate = !!record.certificate || !!record.correctionRequest?.certificate;
+                                        const segs = record.correctionRequest?.segments;
+                                        const displayIn = record.clockIn ?? segs?.[0]?.requestedClockIn ?? record.correctionRequest?.requestedClockIn;
+                                        const displayOut = record.clockOut ?? segs?.[0]?.requestedClockOut ?? record.correctionRequest?.requestedClockOut;
+                                        const multiSegmentLabel = segs && segs.length > 1 ? ` (${segs.length} זמנים)` : '';
+                                        
+                                        const todayStr = getDateStringIsrael();
+                                        const recordDateStr = getDateStringForComparison(record.date);
+                                        const isToday = recordDateStr === todayStr;
+                                        
                                         return (
                                             <tr key={record.id} className={`hover:bg-slate-50 transition-colors ${record.status === 'PENDING_APPROVAL' ? 'bg-orange-50/60' : isRejected ? 'bg-red-50' : isLeave ? 'bg-amber-50/40' : isWfh ? 'bg-indigo-50/40' : holiday ? 'bg-purple-50/30' : ''}`}>
                                                 <td className="px-6 py-4">
@@ -1215,11 +1533,16 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
                                                     )}
                                                 </td>
                                                 <td className="px-6 py-4 text-slate-500 font-medium">{idx === 0 && date.toLocaleDateString('he-IL', { weekday: 'long' })}</td>
-                                                <td className={`px-6 py-4 font-mono font-bold ${record.status === 'PENDING_APPROVAL' ? 'text-slate-400 italic' : 'text-slate-700'}`}>{record.clockIn ? new Date(record.clockIn).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : (record.correctionRequest?.requestedClockIn ? new Date(record.correctionRequest.requestedClockIn).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : '-')}</td>
-                                                <td className={`px-6 py-4 font-mono font-bold ${record.status === 'PENDING_APPROVAL' ? 'text-slate-400 italic' : 'text-slate-700'}`}>{record.clockOut ? new Date(record.clockOut).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : (record.correctionRequest?.requestedClockOut ? new Date(record.correctionRequest.requestedClockOut).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : (isPresence ? 'פעיל...' : '-'))}</td>
+                                                <td className={`px-6 py-4 font-mono font-bold ${record.status === 'PENDING_APPROVAL' ? 'text-slate-400 italic' : 'text-slate-700'}`}>{displayIn ? new Date(displayIn).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : '-'}{multiSegmentLabel}</td>
+                                                <td className={`px-6 py-4 font-mono font-bold ${record.status === 'PENDING_APPROVAL' ? 'text-slate-400 italic' : 'text-slate-700'}`}>{displayOut ? new Date(displayOut).toLocaleTimeString('he-IL', {hour: '2-digit', minute:'2-digit'}) : (isPresence && isToday ? 'פעיל...' : (isPresence && !isToday ? 'לא הושלם' : '-'))}</td>
                                                 <td className={`px-6 py-4 font-black ${isLeave ? 'text-slate-400 font-medium italic' : 'text-slate-800'}`}>{isPresence ? formatDecimalHoursToTime(record.totalHours) : (isLeave ? 'ללא שעות' : '0:00')}</td>
                                                 <td className="px-6 py-4"><div className="flex flex-col gap-1">{record.status === 'PENDING_APPROVAL' ? (<span className="text-[10px] bg-orange-100 text-orange-800 px-2 py-1 rounded-full font-black w-fit uppercase tracking-tight">ממתין לאישור</span>) : isRejected ? (<span className="text-[10px] bg-red-100 text-red-800 px-2 py-1 rounded-full font-black w-fit uppercase tracking-tight">נדחה</span>) : record.status === 'VACATION' ? (<span className="text-[10px] bg-amber-100 text-amber-800 px-2 py-1 rounded-full font-black w-fit uppercase tracking-tight">חופשה</span>) : record.status === 'SICK' ? (<button onClick={() => hasCertificate && setViewingCertificate(record.certificate || record.correctionRequest?.certificate || null)} className={`text-[10px] bg-rose-100 text-rose-800 px-2 py-1 rounded-full font-black w-fit flex items-center gap-1 uppercase tracking-tight ${hasCertificate ? 'hover:bg-rose-200 cursor-pointer shadow-sm' : 'cursor-default'}`} title={hasCertificate ? "לחץ לצפייה באישור" : "מחלה"}>מחלה {hasCertificate && <span>📄</span>}</button>) : record.status === 'WFH' ? (<span className="text-[10px] bg-indigo-100 text-indigo-800 px-2.5 py-1 rounded-full font-black w-fit flex items-center gap-1 uppercase tracking-tight shadow-sm ring-1 ring-indigo-200">🏠 מהבית</span>) : (<span className="text-[10px] bg-green-100 text-green-800 px-2.5 py-1 rounded-full font-black w-fit uppercase tracking-tight shadow-sm ring-1 ring-green-200">נוכח</span>)}{record.note && <span className="text-[9px] text-slate-400 font-bold max-w-[120px] truncate" title={record.note}>{record.note}</span>}</div></td>
-                                                <td className="px-6 py-4">{(record.status !== 'PENDING_APPROVAL' && !isRejected) && (<button onClick={() => openCorrectionModal(date, record)} className="text-primary hover:bg-indigo-100 p-2 rounded-full transition-all" title="בקש תיקון"><EditIcon className="w-4 h-4"/></button>)}</td>
+                                                <td className="px-6 py-4">
+                                                    <div className="flex items-center gap-1">
+                                                        {(record.status !== 'PENDING_APPROVAL' && !isRejected) && (<button onClick={() => openCorrectionModal(date, record)} className="text-primary hover:bg-indigo-100 p-2 rounded-full transition-all" title="בקש תיקון"><EditIcon className="w-4 h-4"/></button>)}
+                                                        {isAdmin && (<button onClick={() => handleDeleteRecord(record)} className="text-rose-600 hover:bg-rose-100 p-2 rounded-full transition-all" title="מחיקת שעות (מנהל מערכת)"><DeleteIcon className="w-4 h-4"/></button>)}
+                                                    </div>
+                                                </td>
                                             </tr>
                                         );
                                     });
@@ -1235,6 +1558,29 @@ const AttendancePage: React.FC<AttendancePageProps> = ({ employees, records, set
     return (
         <div>
             {viewingCertificate && <CertificateViewer file={viewingCertificate} onClose={() => setViewingCertificate(null)} />}
+            {showClockInLocationModal && (
+                <Modal title="איפה אתה עובד היום?" onClose={() => setShowClockInLocationModal(false)} size="lg">
+                    <div className="p-4 flex flex-col gap-4">
+                        <p className="text-slate-600 font-medium text-center">בחר את מיקום העבודה לפני החתמת הכניסה</p>
+                        <div className="flex gap-3 justify-center">
+                            <button
+                                type="button"
+                                onClick={() => { setShowClockInLocationModal(false); handleClockAction('IN', true); }}
+                                className="flex-1 flex items-center justify-center gap-2 px-6 py-3 rounded-xl bg-indigo-100 hover:bg-indigo-200 text-indigo-800 font-bold transition-colors border-2 border-indigo-200"
+                            >
+                                🏠 מהבית
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => { setShowClockInLocationModal(false); handleClockAction('IN', false); }}
+                                className="flex-1 flex items-center justify-center gap-2 px-6 py-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold transition-colors border-2 border-slate-200"
+                            >
+                                🏢 מהמשרד
+                            </button>
+                        </div>
+                    </div>
+                </Modal>
+            )}
             <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-8 gap-4">
                 <div className="flex space-x-1 space-x-reverse w-full sm:auto bg-slate-100 p-1 rounded-xl shadow-inner border border-slate-200">
                     <button onClick={() => setActiveTab('MY_PORTAL')} className={`flex-1 sm:flex-none px-8 py-2.5 rounded-lg font-black transition-all text-sm ${activeTab === 'MY_PORTAL' ? 'bg-white text-primary shadow-md' : 'text-slate-500 hover:text-slate-700'}`}>הנוכחות שלי</button>

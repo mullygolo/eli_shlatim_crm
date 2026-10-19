@@ -13,7 +13,7 @@ interface QuotesPageProps {
     quotes: Quote[];
     setQuotes: React.Dispatch<React.SetStateAction<Quote[]>>;
     customers: Customer[];
-    addActivity: (description: string) => void;
+    addActivity: (description: string, options?: import('../types').AddActivityOptions) => void;
 }
 
 const QuoteForm: React.FC<{
@@ -57,6 +57,11 @@ const QuoteForm: React.FC<{
     };
 
     const removeLineItem = (index: number) => {
+        const item = formData.lineItems[index];
+        const itemDescription = item?.description || 'פריט';
+        if (!window.confirm(`האם אתה בטוח שברצונך למחוק את הפריט "${itemDescription}"?`)) {
+            return;
+        }
         setFormData(prev => ({ ...prev, lineItems: prev.lineItems.filter((_, i) => i !== index)}));
     };
     

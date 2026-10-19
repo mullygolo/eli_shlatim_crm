@@ -7,7 +7,7 @@ interface TimesheetPageProps {
     timeEntries: TimeEntry[];
     setTimeEntries: React.Dispatch<React.SetStateAction<TimeEntry[]>>;
     employees: Employee[];
-    addActivity: (description: string) => void;
+    addActivity: (description: string, options?: import('../types').AddActivityOptions) => void;
 }
 
 const TimeEntryForm: React.FC<{

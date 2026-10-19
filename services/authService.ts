@@ -30,6 +30,10 @@ async function apiRequest<T>(endpoint: string, options: RequestInit = {}): Promi
     });
 
     if (!response.ok) {
+        if (response.status === 401 && !endpoint.startsWith('/auth/login')) {
+            localStorage.removeItem('authToken');
+            localStorage.removeItem('rememberMe');
+        }
         const error: AuthError = await response.json().catch(() => ({ error: response.statusText }));
         throw new Error(error.error || `API request failed: ${response.statusText}`);
     }
@@ -64,18 +68,32 @@ export async function login(username: string, password: string, rememberMe: bool
 }
 
 /**
- * Logout - remove token from localStorage
+ * Logout - clear token first so UI and any in-flight logic see "logged out",
+ * then optionally notify server for audit (using the token we saved before clearing).
  */
 export async function logout(): Promise<void> {
+    const token = localStorage.getItem('authToken');
+    // Clear storage immediately so nothing can "see" us as logged in
     try {
-        await apiRequest('/auth/logout', {
-            method: 'POST',
-        });
-    } catch (error) {
-        console.error('Logout error:', error);
-    } finally {
         localStorage.removeItem('authToken');
         localStorage.removeItem('rememberMe');
+    } catch (e) {
+        console.warn('localStorage clear on logout:', e);
+    }
+    // Optionally notify server for audit (with saved token); ignore errors
+    try {
+        if (token) {
+            const API_BASE_URL = import.meta.env.VITE_API_URL || '/api';
+            await fetch(`${API_BASE_URL}/auth/logout`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`,
+                },
+            });
+        }
+    } catch (error) {
+        console.error('Logout API error (ignored):', error);
     }
 }
 

@@ -1,10 +1,50 @@
 
-import React, { useState, useMemo, useEffect } from 'react';
-import { FixedExpense, VariableExpense, Loan, EquityInvestment, Debt, Receivable, ReceivablePayment, PaymentMethod, DebtPayment, Order, TransactionStatus, CustomerPayment, SupplierPayment, LineItemUnit, Attachment, PaymentStatusHistory, AmortizationEntry, Employee, AttendanceRecord, OrderStatusConfiguration } from '../types';
+import React, { useState, useMemo, useEffect, useCallback, Component, ErrorInfo } from 'react';
+import { FixedExpense, VariableExpense, Loan, EquityInvestment, Debt, Receivable, ReceivablePayment, PaymentMethod, DebtPayment, Order, TransactionStatus, CustomerPayment, SupplierPayment, LineItemUnit, Attachment, PaymentStatusHistory, AmortizationEntry, Employee, AttendanceRecord, OrderStatusConfiguration, PayrollOverrideMap } from '../types';
 import { PlusIcon, EditIcon, DeleteIcon, BankIcon, TrendingUpIcon, LogIcon, CashIcon, ClockIcon, LockIcon, DownloadIcon, ImportIcon } from './icons';
 import Modal from './Modal';
 import PnLReport from './PnLReport';
 import * as mongoService from '../services/mongoService';
+import { useAsyncAction } from '../hooks/useAsyncAction';
+import { useAuth } from '../contexts/AuthContext';
+
+// Error Boundary Component
+class ErrorBoundary extends Component<
+    { children: React.ReactNode; fallback?: React.ReactNode },
+    { hasError: boolean; error?: Error }
+> {
+    constructor(props: { children: React.ReactNode; fallback?: React.ReactNode }) {
+        super(props);
+        this.state = { hasError: false };
+    }
+
+    static getDerivedStateFromError(error: Error) {
+        return { hasError: true, error };
+    }
+
+    componentDidCatch(error: Error, errorInfo: ErrorInfo) {
+        console.error('Error in FinancePage:', error, errorInfo);
+    }
+
+    render() {
+        if (this.state.hasError) {
+            return this.props.fallback || (
+                <div className="p-6 bg-red-50 border border-red-200 rounded-md">
+                    <h3 className="text-red-800 font-bold mb-2">שגיאה בטעינת הדוח</h3>
+                    <p className="text-red-600 text-sm mb-4">{this.state.error?.message || 'שגיאה לא ידועה'}</p>
+                    <button
+                        onClick={() => this.setState({ hasError: false, error: undefined })}
+                        className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700"
+                    >
+                        נסה שוב
+                    </button>
+                </div>
+            );
+        }
+
+        return this.props.children;
+    }
+}
 
 // --- Financial Engine Helpers ---
 
@@ -80,13 +120,15 @@ interface FinancePageProps {
     setReceivables: React.Dispatch<React.SetStateAction<Receivable[]>>;
     equity: EquityInvestment[];
     setEquity: React.Dispatch<React.SetStateAction<EquityInvestment[]>>;
-    addActivity: (description: string) => void;
+    addActivity: (description: string, options?: import('../types').AddActivityOptions) => void;
     vatRate: number;
     orders: Order[];
     setOrders: React.Dispatch<React.SetStateAction<Order[]>>;
     employees: Employee[];
     attendanceRecords: AttendanceRecord[];
     statusConfigs: OrderStatusConfiguration[];
+    payrollOverrides: PayrollOverrideMap;
+    onNavigateToOrder?: (orderId: string) => void;
 }
 
 // Internal type for Table Display
@@ -141,6 +183,7 @@ interface AggregatedCheck {
     status: TransactionStatus;
     statusHistory: any[];
     sources: CheckSource[];
+    hasAttachments?: boolean;
 }
 
 const TabButton: React.FC<{ label: string; active: boolean; onClick: () => void; icon?: React.ReactNode }> = ({ label, active, onClick, icon }) => (
@@ -496,10 +539,11 @@ const AmortizationModal: React.FC<{
 
 const DebtPaymentModal: React.FC<{ 
     debt: Debt; 
-    onSavePayment: (debtId: string, payment: DebtPayment) => void; 
+    onSavePayment: (debtId: string, payment: DebtPayment) => void;
+    onSavePayments?: (debtId: string, payments: DebtPayment[]) => void;
     onClose: () => void;
     vatRate: number;
-}> = ({ debt, onSavePayment, onClose, vatRate }) => {
+}> = ({ debt, onSavePayment, onSavePayments, onClose, vatRate }) => {
     const debtOriginalAmount = debt.amount || 0;
     let debtGross = debtOriginalAmount;
     if (!debt.isVatExempt) {
@@ -519,38 +563,48 @@ const DebtPaymentModal: React.FC<{
     const [reference, setReference] = useState('');
     const [repaymentDate, setRepaymentDate] = useState<string>('');
     const [note, setNote] = useState<string>('');
+    const [paymentMode, setPaymentMode] = useState<'single' | 'installment'>('single');
+    const [generatedPayments, setGeneratedPayments] = useState<SupplierPayment[]>([]);
+
+    const toDebtPayment = (sp: SupplierPayment): DebtPayment => {
+        const status: TransactionStatus = sp.method === PaymentMethod.CHECK ? 'PENDING' : 'CLEARED';
+        return {
+            id: sp.id || `dp_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
+            amount: sp.amount,
+            date: sp.date || new Date(),
+            method: sp.method as PaymentMethod,
+            reference: sp.reference,
+            repaymentDate: sp.repaymentDate,
+            status,
+            statusHistory: [{ date: new Date(), status, changedBy: 'משתמש', reason: 'תשלום חוב' }],
+            note
+        };
+    };
+
+    const handleSaveInstallments = () => {
+        if (!generatedPayments.length || !onSavePayments) return;
+        const payments = generatedPayments.map(toDebtPayment);
+        onSavePayments(debt.id, payments);
+    };
 
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
-        if (amount <= 0) {
-            alert("אנא הזן סכום חיובי");
-            return;
-        }
+        if (paymentMode === 'installment') return;
+        if (amount <= 0) { alert("אנא הזן סכום חיובי"); return; }
         if (method === PaymentMethod.CHECK) {
             if (!reference) { alert("חובה להזין מספר צ'ק בשדה אסמכתא"); return; }
             if (!repaymentDate) { alert("חובה להזין תאריך פירעון עבור צ'ק"); return; }
         }
-
         const initialStatus: TransactionStatus = method === PaymentMethod.CHECK ? 'PENDING' : 'CLEARED';
-
         const newPayment: DebtPayment = { 
-            id: `dp_${Date.now()}`, 
-            amount, 
-            date: new Date(date), 
-            method,
-            reference,
-            repaymentDate: method === PaymentMethod.CHECK ? new Date(repaymentDate) : undefined,
-            status: initialStatus,
-            statusHistory: [{
-                date: new Date(),
-                status: initialStatus,
-                changedBy: 'משתמש',
-                reason: 'תשלום חוב'
-            }],
-            note 
+            id: `dp_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`, amount, date: new Date(date), method,
+            reference, repaymentDate: method === PaymentMethod.CHECK ? new Date(repaymentDate) : undefined,
+            status: initialStatus, statusHistory: [{ date: new Date(), status: initialStatus, changedBy: 'משתמש', reason: 'תשלום חוב' }], note 
         };
         onSavePayment(debt.id, newPayment);
     };
+
+    const isInstallmentMethod = method === PaymentMethod.CHECK || method === PaymentMethod.CREDIT_CARD;
 
     return (
         <div className="space-y-6 text-start">
@@ -569,38 +623,84 @@ const DebtPaymentModal: React.FC<{
                 <div className="grid grid-cols-2 gap-4">
                     <div>
                         <label className="block text-sm font-medium text-slate-700">סכום החזר</label>
-                        <input type="number" step="0.01" value={amount} onChange={e => setAmount(Number(e.target.value))} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" required />
+                        <input type="number" step="0.01" value={amount} onChange={e => setAmount(Number(e.target.value))} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" required={paymentMode === 'single'} disabled={paymentMode === 'installment'} />
                     </div>
                     <div>
                         <label className="block text-sm font-medium text-slate-700">אמצעי תשלום</label>
-                        <select value={method} onChange={e => setMethod(e.target.value as PaymentMethod)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm bg-white p-2 focus:ring-primary focus:border-primary sm:text-sm">
+                        <select value={method} onChange={e => { setMethod(e.target.value as PaymentMethod); setPaymentMode('single'); setGeneratedPayments([]); }} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm bg-white p-2 focus:ring-primary focus:border-primary sm:text-sm">
                             {Object.values(PaymentMethod).map(m => <option key={m} value={m}>{m}</option>)}
                         </select>
                     </div>
-                    <div>
-                        <label className="block text-sm font-medium text-slate-700">תאריך ביצוע</label>
-                        <input type="date" value={date} onChange={e => setDate(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" required />
-                    </div>
-                    <div>
-                        <label className="block text-sm font-medium text-slate-700">אסמכתא / מס' צ'ק</label>
-                        <input type="text" value={reference} onChange={e => setReference(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" placeholder={method === PaymentMethod.CHECK ? 'חובה' : ''} />
-                    </div>
+                    {isInstallmentMethod && (
+                        <div className="col-span-2">
+                            <label className="block text-[10px] font-bold text-slate-500 uppercase mb-2">סוג תשלום</label>
+                            <div className="flex gap-4">
+                                <label className="flex items-center gap-2 cursor-pointer">
+                                    <input type="radio" name="debtPaymentMode" checked={paymentMode === 'single'} onChange={() => { setPaymentMode('single'); setGeneratedPayments([]); }} className="text-primary" />
+                                    <span className="text-sm font-bold text-slate-700">תשלום בודד</span>
+                                </label>
+                                <label className="flex items-center gap-2 cursor-pointer">
+                                    <input type="radio" name="debtPaymentMode" checked={paymentMode === 'installment'} onChange={() => setPaymentMode('installment')} className="text-primary" />
+                                    <span className="text-sm font-bold text-slate-700">תשלומים בפריסה</span>
+                                </label>
+                            </div>
+                        </div>
+                    )}
+                    {paymentMode === 'single' && (
+                        <>
+                            <div>
+                                <label className="block text-sm font-medium text-slate-700">תאריך ביצוע</label>
+                                <input type="date" value={date} onChange={e => setDate(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" required />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-slate-700">אסמכתא / מס' צ'ק</label>
+                                <input type="text" value={reference} onChange={e => setReference(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" placeholder={method === PaymentMethod.CHECK ? 'חובה' : ''} />
+                            </div>
+                        </>
+                    )}
                 </div>
 
-                {method === PaymentMethod.CHECK && (
+                {paymentMode === 'single' && method === PaymentMethod.CHECK && (
                     <div className="bg-yellow-50 p-3 rounded border border-yellow-200">
                         <label className="block text-sm font-bold text-yellow-800">תאריך פירעון הצ'ק</label>
                         <input type="date" value={repaymentDate} onChange={e => setRepaymentDate(e.target.value)} className="mt-1 block w-full rounded-md border-yellow-300 shadow-sm focus:ring-yellow-500 p-2 sm:text-sm" required />
                     </div>
                 )}
 
-                <div>
-                    <label className="block text-sm font-medium text-slate-700">הערה</label>
-                    <input type="text" value={note} onChange={e => setNote(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" />
-                </div>
-                <div className="flex justify-end pt-2">
-                    <button type="submit" className="px-4 py-2 bg-primary text-white rounded hover:bg-indigo-700 text-sm font-bold shadow-sm">בצע תשלום</button>
-                </div>
+                {paymentMode === 'installment' && isInstallmentMethod && (
+                    <div className="space-y-4 mt-4">
+                        <InstallmentSeriesGenerator
+                            initialAmount={remaining}
+                            method={method as PaymentMethod.CHECK | typeof PaymentMethod.CREDIT_CARD}
+                            onGenerated={(payments) => setGeneratedPayments(payments)}
+                        />
+                        {generatedPayments.length > 0 && (
+                            <div className="flex flex-col gap-2">
+                                <div className="flex justify-between items-center">
+                                    <span className="text-sm font-bold text-slate-700">{generatedPayments.length} תשלומים נוצרו</span>
+                                    <button type="button" onClick={handleSaveInstallments} className="px-4 py-2 bg-primary text-white rounded hover:bg-indigo-700 text-sm font-bold shadow-sm">שמור פריסה</button>
+                                </div>
+                                <div className="max-h-32 overflow-y-auto text-xs text-slate-500 bg-slate-50 rounded p-2">
+                                    {generatedPayments.map((p, i) => (
+                                        <div key={p.id}>#{i + 1}: ₪{p.amount.toLocaleString()} — {p.repaymentDate ? new Date(p.repaymentDate).toLocaleDateString('he-IL') : '-'}</div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                )}
+
+                {paymentMode === 'single' && (
+                    <>
+                        <div>
+                            <label className="block text-sm font-medium text-slate-700">הערה</label>
+                            <input type="text" value={note} onChange={e => setNote(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" />
+                        </div>
+                        <div className="flex justify-end pt-2">
+                            <button type="submit" className="px-4 py-2 bg-primary text-white rounded hover:bg-indigo-700 text-sm font-bold shadow-sm">בצע תשלום</button>
+                        </div>
+                    </>
+                )}
             </form>
             <div className="flex justify-end pt-4 border-t border-slate-100">
                 <button type="button" onClick={onClose} className="px-4 py-2 bg-slate-200 text-slate-800 rounded hover:bg-slate-300">סגור</button>
@@ -611,10 +711,11 @@ const DebtPaymentModal: React.FC<{
 
 const ReceivableCollectionModal: React.FC<{ 
     receivable: Receivable; 
-    onSavePayment: (receivableId: string, payment: ReceivablePayment) => void; 
+    onSavePayment: (receivableId: string, payment: ReceivablePayment) => void;
+    onSavePayments?: (receivableId: string, payments: ReceivablePayment[]) => void;
     onClose: () => void;
     vatRate: number;
-}> = ({ receivable, onSavePayment, onClose, vatRate }) => {
+}> = ({ receivable, onSavePayment, onSavePayments, onClose, vatRate }) => {
     const originalAmount = receivable.amount || 0;
     let gross = originalAmount;
     if (!receivable.isVatExempt) {
@@ -634,38 +735,48 @@ const ReceivableCollectionModal: React.FC<{
     const [reference, setReference] = useState('');
     const [repaymentDate, setRepaymentDate] = useState<string>('');
     const [note, setNote] = useState<string>('');
+    const [paymentMode, setPaymentMode] = useState<'single' | 'installment'>('single');
+    const [generatedPayments, setGeneratedPayments] = useState<SupplierPayment[]>([]);
+
+    const toReceivablePayment = (sp: SupplierPayment): ReceivablePayment => {
+        const status: TransactionStatus = sp.method === PaymentMethod.CHECK ? 'PENDING' : 'CLEARED';
+        return {
+            id: sp.id || `rp_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
+            amount: sp.amount,
+            date: sp.date || new Date(),
+            method: sp.method as PaymentMethod,
+            reference: sp.reference,
+            repaymentDate: sp.repaymentDate,
+            status,
+            statusHistory: [{ date: new Date(), status, changedBy: 'משתמש', reason: 'גביית חוב לקוח' }],
+            note
+        };
+    };
 
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
-        if (amount <= 0) {
-            alert("אנא הזן סכום חיובי");
-            return;
-        }
+        if (paymentMode === 'installment') return;
+        if (amount <= 0) { alert("אנא הזן סכום חיובי"); return; }
         if (method === PaymentMethod.CHECK) {
             if (!reference) { alert("חובה להזין מספר צ'ק בשדה אסמכתא"); return; }
             if (!repaymentDate) { alert("חובה להזין תאריך פירעון עבור צ'ק"); return; }
         }
-
         const initialStatus: TransactionStatus = method === PaymentMethod.CHECK ? 'PENDING' : 'CLEARED';
-
         const newPayment: ReceivablePayment = { 
-            id: `rp_${Date.now()}`, 
-            amount, 
-            date: new Date(date), 
-            method,
-            reference,
-            repaymentDate: method === PaymentMethod.CHECK ? new Date(repaymentDate) : undefined,
-            status: initialStatus,
-            statusHistory: [{
-                date: new Date(),
-                status: initialStatus,
-                changedBy: 'משתמש',
-                reason: 'גביית חוב לקוח'
-            }],
-            note 
+            id: `rp_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`, amount, date: new Date(date), method,
+            reference, repaymentDate: method === PaymentMethod.CHECK ? new Date(repaymentDate) : undefined,
+            status: initialStatus, statusHistory: [{ date: new Date(), status: initialStatus, changedBy: 'משתמש', reason: 'גביית חוב לקוח' }], note 
         };
         onSavePayment(receivable.id, newPayment);
     };
+
+    const handleSaveInstallments = () => {
+        if (!generatedPayments.length || !onSavePayments) return;
+        const payments = generatedPayments.map(toReceivablePayment);
+        onSavePayments(receivable.id, payments);
+    };
+
+    const isInstallmentMethod = method === PaymentMethod.CHECK || method === PaymentMethod.CREDIT_CARD;
 
     return (
         <div className="space-y-6 text-start">
@@ -684,38 +795,84 @@ const ReceivableCollectionModal: React.FC<{
                 <div className="grid grid-cols-2 gap-4">
                     <div>
                         <label className="block text-sm font-medium text-slate-700">סכום שהתקבל</label>
-                        <input type="number" step="0.01" value={amount} onChange={e => setAmount(Number(e.target.value))} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" required />
+                        <input type="number" step="0.01" value={amount} onChange={e => setAmount(Number(e.target.value))} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" required={paymentMode === 'single'} disabled={paymentMode === 'installment'} />
                     </div>
                     <div>
                         <label className="block text-sm font-medium text-slate-700">אמצעי תשלום</label>
-                        <select value={method} onChange={e => setMethod(e.target.value as PaymentMethod)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm bg-white p-2 focus:ring-primary focus:border-primary sm:text-sm">
+                        <select value={method} onChange={e => { setMethod(e.target.value as PaymentMethod); setPaymentMode('single'); setGeneratedPayments([]); }} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm bg-white p-2 focus:ring-primary focus:border-primary sm:text-sm">
                             {Object.values(PaymentMethod).map(m => <option key={m} value={m}>{m}</option>)}
                         </select>
                     </div>
-                    <div>
-                        <label className="block text-sm font-medium text-slate-700">תאריך קבלה</label>
-                        <input type="date" value={date} onChange={e => setDate(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" required />
-                    </div>
-                    <div>
-                        <label className="block text-sm font-medium text-slate-700">אסמכתא / מס' צ'ק</label>
-                        <input type="text" value={reference} onChange={e => setReference(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" placeholder={method === PaymentMethod.CHECK ? 'חובה' : ''} />
-                    </div>
+                    {isInstallmentMethod && (
+                        <div className="col-span-2">
+                            <label className="block text-[10px] font-bold text-slate-500 uppercase mb-2">סוג תשלום</label>
+                            <div className="flex gap-4">
+                                <label className="flex items-center gap-2 cursor-pointer">
+                                    <input type="radio" name="recPaymentMode" checked={paymentMode === 'single'} onChange={() => { setPaymentMode('single'); setGeneratedPayments([]); }} className="text-primary" />
+                                    <span className="text-sm font-bold text-slate-700">תשלום בודד</span>
+                                </label>
+                                <label className="flex items-center gap-2 cursor-pointer">
+                                    <input type="radio" name="recPaymentMode" checked={paymentMode === 'installment'} onChange={() => setPaymentMode('installment')} className="text-primary" />
+                                    <span className="text-sm font-bold text-slate-700">תשלומים בפריסה</span>
+                                </label>
+                            </div>
+                        </div>
+                    )}
+                    {paymentMode === 'single' && (
+                        <>
+                            <div>
+                                <label className="block text-sm font-medium text-slate-700">תאריך קבלה</label>
+                                <input type="date" value={date} onChange={e => setDate(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" required />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-slate-700">אסמכתא / מס' צ'ק</label>
+                                <input type="text" value={reference} onChange={e => setReference(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" placeholder={method === PaymentMethod.CHECK ? 'חובה' : ''} />
+                            </div>
+                        </>
+                    )}
                 </div>
 
-                {method === PaymentMethod.CHECK && (
+                {paymentMode === 'single' && method === PaymentMethod.CHECK && (
                     <div className="bg-yellow-50 p-3 rounded border border-yellow-200">
                         <label className="block text-sm font-bold text-yellow-800">תאריך פירעון הצ'ק</label>
                         <input type="date" value={repaymentDate} onChange={e => setRepaymentDate(e.target.value)} className="mt-1 block w-full rounded-md border-yellow-300 shadow-sm focus:ring-yellow-500 p-2 sm:text-sm" required />
                     </div>
                 )}
 
-                <div>
-                    <label className="block text-sm font-medium text-slate-700">הערה</label>
-                    <input type="text" value={note} onChange={e => setNote(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" />
-                </div>
-                <div className="flex justify-end pt-2">
-                    <button type="submit" className="px-4 py-2 bg-primary text-white rounded hover:bg-indigo-700 text-sm font-bold shadow-sm">קלוט תשלום</button>
-                </div>
+                {paymentMode === 'installment' && isInstallmentMethod && (
+                    <div className="space-y-4 mt-4">
+                        <InstallmentSeriesGenerator
+                            initialAmount={remaining}
+                            method={method as PaymentMethod.CHECK | typeof PaymentMethod.CREDIT_CARD}
+                            onGenerated={(payments) => setGeneratedPayments(payments)}
+                        />
+                        {generatedPayments.length > 0 && (
+                            <div className="flex flex-col gap-2">
+                                <div className="flex justify-between items-center">
+                                    <span className="text-sm font-bold text-slate-700">{generatedPayments.length} תשלומים נוצרו</span>
+                                    <button type="button" onClick={handleSaveInstallments} className="px-4 py-2 bg-primary text-white rounded hover:bg-indigo-700 text-sm font-bold shadow-sm">שמור פריסה</button>
+                                </div>
+                                <div className="max-h-32 overflow-y-auto text-xs text-slate-500 bg-slate-50 rounded p-2">
+                                    {generatedPayments.map((p, i) => (
+                                        <div key={p.id}>#{i + 1}: ₪{p.amount.toLocaleString()} — {p.repaymentDate ? new Date(p.repaymentDate).toLocaleDateString('he-IL') : '-'}</div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                )}
+
+                {paymentMode === 'single' && (
+                    <>
+                        <div>
+                            <label className="block text-sm font-medium text-slate-700">הערה</label>
+                            <input type="text" value={note} onChange={e => setNote(e.target.value)} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm p-2 focus:ring-primary focus:border-primary sm:text-sm" />
+                        </div>
+                        <div className="flex justify-end pt-2">
+                            <button type="submit" className="px-4 py-2 bg-primary text-white rounded hover:bg-indigo-700 text-sm font-bold shadow-sm">קלוט תשלום</button>
+                        </div>
+                    </>
+                )}
             </form>
             <div className="flex justify-end pt-4 border-t border-slate-100">
                 <button type="button" onClick={onClose} className="px-4 py-2 bg-slate-200 text-slate-800 rounded hover:bg-slate-300">סגור</button>
@@ -724,17 +881,72 @@ const ReceivableCollectionModal: React.FC<{
     );
 };
 
+const readFileAsAttachment = (file: File): Promise<Attachment> => {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            if (e.target?.result) {
+                resolve({
+                    id: `att_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
+                    fileName: file.name,
+                    dataUrl: e.target.result as string,
+                    type: file.type,
+                });
+            } else reject(new Error('Failed to read file'));
+        };
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(file);
+    });
+};
+
 const CheckActionModal: React.FC<{
     check: AggregatedCheck;
     onUpdateStatus: (check: AggregatedCheck, newStatus: TransactionStatus, metadata?: any) => void;
     onClose: () => void;
     viewOnlyHistory?: boolean;
-}> = ({ check, onUpdateStatus, onClose, viewOnlyHistory = false }) => {
+    onViewAttachment?: (att: Attachment) => void;
+}> = ({ check, onUpdateStatus, onClose, viewOnlyHistory = false, onViewAttachment }) => {
     const [selectedStatus, setSelectedStatus] = useState<TransactionStatus>(check.status);
     const [note, setNote] = useState('');
     const [bounceFee, setBounceFee] = useState<number>(0);
     const [addFee, setAddFee] = useState(false);
+    const [checkAttachments, setCheckAttachmentsState] = useState<Attachment[]>([]);
+    const [loadingAttachments, setLoadingAttachments] = useState(true);
     const isIncoming = check.type === 'INCOMING';
+
+    useEffect(() => {
+        let cancelled = false;
+        setLoadingAttachments(true);
+        mongoService.getCheckAttachments(check.uniqueId).then((list) => {
+            if (!cancelled) setCheckAttachmentsState(list);
+        }).catch(() => {
+            if (!cancelled) setCheckAttachmentsState([]);
+        }).finally(() => {
+            if (!cancelled) setLoadingAttachments(false);
+        });
+        return () => { cancelled = true; };
+    }, [check.uniqueId]);
+
+    const saveCheckAttachments = useCallback((list: Attachment[]) => {
+        mongoService.setCheckAttachments(check.uniqueId, list).then(() => setCheckAttachmentsState(list)).catch((err) => {
+            console.error('Failed to save check attachments:', err);
+            alert(err?.message || 'שגיאה בשמירת הקבצים.');
+        });
+    }, [check.uniqueId]);
+
+    const handleCheckFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const files = e.target.files;
+        if (!files || files.length === 0) return;
+        const newOnes: Attachment[] = [];
+        for (let i = 0; i < files.length; i++) {
+            try {
+                newOnes.push(await readFileAsAttachment(files[i]));
+            } catch (_) { /* skip */ }
+        }
+        const next = [...checkAttachments, ...newOnes];
+        saveCheckAttachments(next);
+        e.target.value = '';
+    };
 
     const statusOptions: { value: TransactionStatus; label: string; color: string }[] = [
         { value: 'PENDING', label: isIncoming ? 'ביד (ממתין להפקדה)' : 'נמסר (טרם נפרע)', color: 'bg-yellow-100 text-yellow-800' },
@@ -801,6 +1013,30 @@ const CheckActionModal: React.FC<{
                         </div>
                     </div>
                 )}
+                <div className="border-b border-slate-200 pb-6 mb-6">
+                    <h4 className="font-bold text-slate-800 mb-3">תמונה / PDF של הצ'ק</h4>
+                    {loadingAttachments ? (
+                        <p className="text-sm text-slate-500">טוען...</p>
+                    ) : (
+                        <>
+                            <input type="file" multiple accept="image/*,.pdf" onChange={handleCheckFileChange} className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100" />
+                            <p className="text-[10px] text-slate-400 mt-1">תמונות או PDF. ניתן לבחור מספר קבצים.</p>
+                            {checkAttachments.length > 0 && (
+                                <ul className="mt-2 space-y-1.5 max-h-40 overflow-y-auto">
+                                    {checkAttachments.map((att) => (
+                                        <li key={att.id} className="flex items-center justify-between p-2 bg-slate-50 border border-slate-200 rounded-lg">
+                                            <span className="text-xs font-bold text-slate-700 truncate flex-1 min-w-0">{att.fileName}</span>
+                                            <div className="flex gap-2 shrink-0">
+                                                {onViewAttachment && <button type="button" onClick={() => onViewAttachment(att)} className="text-[10px] bg-white border border-slate-200 px-2 py-1 rounded font-bold text-indigo-600 hover:bg-indigo-50">צפה</button>}
+                                                <button type="button" onClick={() => saveCheckAttachments(checkAttachments.filter((a) => a.id !== att.id))} className="text-[10px] text-red-500 font-bold px-2 py-1 hover:bg-red-50 rounded">הסר</button>
+                                            </div>
+                                        </li>
+                                    ))}
+                                </ul>
+                            )}
+                        </>
+                    )}
+                </div>
                 <div>
                     <h4 className="font-bold text-slate-800 mb-3 flex items-center">
                         <ClockIcon className="w-4 h-4 me-2 text-slate-500"/> היסטוריית גלגול הצ'ק
@@ -839,14 +1075,64 @@ const CheckCenter: React.FC<{
     setDebts: React.Dispatch<React.SetStateAction<Debt[]>>;
     receivables: Receivable[];
     setReceivables: React.Dispatch<React.SetStateAction<Receivable[]>>;
-    addActivity: (description: string) => void;
-}> = ({ orders, setOrders, fixedExpenses, setFixedExpenses, variableExpenses, setVariableExpenses, debts, setDebts, receivables, setReceivables, addActivity }) => {
-    const [tab, setTab] = useState<'INCOMING' | 'OUTGOING'>('INCOMING');
+    addActivity: (description: string, options?: import('../types').AddActivityOptions) => void;
+    /** When true, show only incoming checks (for MANAGER/EMPLOYEE). */
+    incomingOnly?: boolean;
+    /** Open file preview for a check attachment (image/PDF). */
+    onViewCheckAttachment?: (att: Attachment) => void;
+    /** Open quick view for all attachments of a check (from row eye icon). */
+    onViewCheckAttachments?: (attachments: Attachment[]) => void;
+}> = ({ orders, setOrders, fixedExpenses, setFixedExpenses, variableExpenses, setVariableExpenses, debts, setDebts, receivables, setReceivables, addActivity, incomingOnly = false, onViewCheckAttachment, onViewCheckAttachments }) => {
+    const [tab, setTab] = useState<'INCOMING' | 'OUTGOING'>(incomingOnly ? 'INCOMING' : 'INCOMING');
     // SMART FILTER: Active (Actionable), Urgent (Overdue/Bounced), Archive (History), All
     const [smartFilter, setSmartFilter] = useState<'ACTIVE' | 'URGENT' | 'ARCHIVE' | 'ALL'>('ACTIVE');
     const [searchQuery, setSearchQuery] = useState('');
     const [selectedCheck, setSelectedCheck] = useState<{check: AggregatedCheck, viewOnly: boolean} | null>(null);
+    
+    // Pagination states
+    const [paginatedChecks, setPaginatedChecks] = useState<AggregatedCheck[]>([]);
+    const [checksCurrentPage, setChecksCurrentPage] = useState(1);
+    const [checksPageSize, setChecksPageSize] = useState(50);
+    const [checksTotalCount, setChecksTotalCount] = useState(0);
+    const [loadingChecks, setLoadingChecks] = useState(false);
+    const [checksStats, setChecksStats] = useState({ pending: 0, bounced: 0, overdue: 0, filteredTotal: 0 });
 
+    // Refetch paginated checks
+    const refetchChecks = useCallback(async () => {
+        try {
+            setLoadingChecks(true);
+            const filters: any = {};
+            if (incomingOnly) filters.tab = 'INCOMING';
+            else if (tab) filters.tab = tab;
+            if (smartFilter) filters.smartFilter = smartFilter;
+            if (searchQuery) filters.searchQuery = searchQuery;
+            
+            const result = await mongoService.getChecksPaginated(filters, checksCurrentPage, checksPageSize);
+            
+            // Convert server checks to AggregatedCheck format (convert dates)
+            const convertedChecks: AggregatedCheck[] = result.checks.map((c: any) => ({
+                ...c,
+                date: new Date(c.date),
+                repaymentDate: new Date(c.repaymentDate),
+                hasAttachments: !!c.hasAttachments
+            }));
+            
+            setPaginatedChecks(convertedChecks);
+            setChecksTotalCount(result.totalCount);
+            setChecksStats(result.stats);
+        } catch (error) {
+            console.error('Error loading paginated checks:', error);
+        } finally {
+            setLoadingChecks(false);
+        }
+    }, [tab, smartFilter, searchQuery, checksCurrentPage, checksPageSize, incomingOnly]);
+    
+    // Load paginated checks when filters or pagination change
+    useEffect(() => {
+        refetchChecks();
+    }, [refetchChecks]);
+
+    // Keep old allChecks for backward compatibility (but we won't use it for display)
     const allChecks = useMemo<AggregatedCheck[]>(() => {
         const rawItems: AggregatedCheck[] = [];
         
@@ -1006,64 +1292,8 @@ const CheckCenter: React.FC<{
         return [...incoming, ...Array.from(groupedMap.values())];
     }, [orders, fixedExpenses, variableExpenses, debts, receivables]);
 
-    const filteredChecks = useMemo(() => {
-        const today = new Date();
-        today.setHours(0,0,0,0);
-
-        return allChecks
-            .filter(c => c.type === tab)
-            .filter(c => {
-                // If search query is present, it acts as a global search (ignores lifecycle filters)
-                if (searchQuery.trim()) {
-                    const q = searchQuery.toLowerCase();
-                    return c.reference.toLowerCase().includes(q) || c.entityName.toLowerCase().includes(q);
-                }
-
-                const isActive = ['PENDING', 'BOUNCED', 'IN_BANK_CUSTODY'].includes(c.status);
-                const isOverdue = isActive && c.repaymentDate < today;
-                const isBounced = c.status === 'BOUNCED';
-                const isArchived = ['CLEARED', 'CANCELED', 'RETURNED'].includes(c.status);
-
-                if (smartFilter === 'ACTIVE') return isActive;
-                if (smartFilter === 'URGENT') return isBounced || isOverdue;
-                if (smartFilter === 'ARCHIVE') return isArchived;
-                return true; // ALL
-            })
-            .sort((a, b) => {
-                // PRIORITY SORTING:
-                // 1. Special Case: ARCHIVE View - Newest Cleared/Canceled First (Descending)
-                if (smartFilter === 'ARCHIVE') {
-                    return b.repaymentDate.getTime() - a.repaymentDate.getTime();
-                }
-
-                // 2. ACTIVE/URGENT/ALL/SEARCH Views - Action Priority
-                const isBouncedA = a.status === 'BOUNCED';
-                const isBouncedB = b.status === 'BOUNCED';
-                if (isBouncedA && !isBouncedB) return -1;
-                if (!isBouncedA && isBouncedB) return 1;
-
-                const isOverdueA = ['PENDING', 'IN_BANK_CUSTODY'].includes(a.status) && a.repaymentDate < today;
-                const isOverdueB = ['PENDING', 'IN_BANK_CUSTODY'].includes(b.status) && b.repaymentDate < today;
-                if (isOverdueA && !isOverdueB) return -1;
-                if (!isOverdueA && isOverdueB) return 1;
-
-                // For future/normal ones, sort by date (Ascending - nearest first)
-                return a.repaymentDate.getTime() - b.repaymentDate.getTime();
-            });
-    }, [allChecks, tab, smartFilter, searchQuery]);
-
-    const stats = useMemo(() => {
-        const relevant = allChecks.filter(c => c.type === tab);
-        const today = new Date();
-        today.setHours(0,0,0,0);
-
-        const pending = relevant.filter(c => ['PENDING', 'IN_BANK_CUSTODY'].includes(c.status)).reduce((s, c) => s + c.amount, 0);
-        const bounced = relevant.filter(c => c.status === 'BOUNCED').reduce((s, c) => s + c.amount, 0);
-        const overdue = relevant.filter(c => ['PENDING', 'IN_BANK_CUSTODY'].includes(c.status) && c.repaymentDate < today).reduce((s, c) => s + c.amount, 0);
-        const filteredTotal = filteredChecks.reduce((s, c) => s + c.amount, 0);
-        
-        return { pending, bounced, overdue, filteredTotal };
-    }, [allChecks, tab, filteredChecks]);
+    // Use stats from server
+    const stats = checksStats;
 
     const handleUpdateCheckStatus = (check: AggregatedCheck, newStatus: TransactionStatus, metadata?: any) => {
         if (check.status === newStatus) return;
@@ -1155,7 +1385,10 @@ const CheckCenter: React.FC<{
         setDebts(updatedDebts);
         setReceivables(updatedReceivables);
         
-        addActivity(`סטטוס צ'ק ${check.reference} (${check.type === 'INCOMING' ? 'נכנס' : 'יוצא'}) עודכן ל-${newStatus}`);
+        addActivity(`סטטוס צ'ק ${check.reference} (${check.type === 'INCOMING' ? 'נכנס' : 'יוצא'}) עודכן ל-${newStatus}`, { entityType: 'finance', action: 'status_change', metadata: { reference: check.reference, type: check.type, newStatus } });
+        
+        // Refetch checks to reflect the updated status
+        refetchChecks();
     };
 
     const getStatusBadge = (status: TransactionStatus) => {
@@ -1192,10 +1425,12 @@ const CheckCenter: React.FC<{
             </div>
 
             <div className="bg-white rounded-lg shadow-sm border border-slate-200 overflow-hidden">
+                {!incomingOnly && (
                 <div className="flex border-b border-slate-200 px-4 pt-2 bg-slate-50/50">
-                    <button onClick={() => setTab('INCOMING')} className={`px-4 py-3 font-black text-sm border-b-2 transition-colors ${tab === 'INCOMING' ? 'border-green-500 text-green-700' : 'border-transparent text-slate-500'}`}>צ'קים נכנסים</button>
-                    <button onClick={() => setTab('OUTGOING')} className={`px-4 py-3 font-black text-sm border-b-2 transition-colors ${tab === 'OUTGOING' ? 'border-red-500 text-red-700' : 'border-transparent text-slate-500'}`}>צ'קים יוצאים</button>
+                    <button onClick={() => { setTab('INCOMING'); setChecksCurrentPage(1); }} className={`px-4 py-3 font-black text-sm border-b-2 transition-colors ${tab === 'INCOMING' ? 'border-green-500 text-green-700' : 'border-transparent text-slate-500'}`}>צ'קים נכנסים</button>
+                    <button onClick={() => { setTab('OUTGOING'); setChecksCurrentPage(1); }} className={`px-4 py-3 font-black text-sm border-b-2 transition-colors ${tab === 'OUTGOING' ? 'border-red-500 text-red-700' : 'border-transparent text-slate-500'}`}>צ'קים יוצאים</button>
                 </div>
+                )}
                 
                 {/* SMART LIFECYCLE FILTERS */}
                 <div className="p-4 border-b border-slate-200 bg-white grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -1205,7 +1440,7 @@ const CheckCenter: React.FC<{
                             {(['ACTIVE', 'URGENT', 'ARCHIVE', 'ALL'] as const).map(f => (
                                 <button 
                                     key={f} 
-                                    onClick={() => { setSmartFilter(f); setSearchQuery(''); }}
+                                    onClick={() => { setSmartFilter(f); setSearchQuery(''); setChecksCurrentPage(1); }}
                                     className={`flex-1 text-xs font-black py-2.5 px-2 rounded-md transition-all ${smartFilter === f ? 'bg-white text-primary shadow-sm ring-1 ring-black/5' : 'text-slate-500 hover:text-slate-700'}`}
                                 >
                                     {f === 'ACTIVE' ? 'בתהליך (פתוחים)' : f === 'URGENT' ? 'בטיפול דחוף' : f === 'ARCHIVE' ? 'ארכיון (היסטוריה)' : 'הכל'}
@@ -1225,7 +1460,7 @@ const CheckCenter: React.FC<{
                                 type="text" 
                                 placeholder="חפש מספר צ'ק, ספק או לקוח..." 
                                 value={searchQuery}
-                                onChange={e => setSearchQuery(e.target.value)}
+                                onChange={e => { setSearchQuery(e.target.value); setChecksCurrentPage(1); }}
                                 className="w-full text-sm border-slate-300 rounded-lg focus:ring-primary focus:border-primary p-2.5 pl-10 shadow-sm"
                             />
                             <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-300">
@@ -1241,7 +1476,17 @@ const CheckCenter: React.FC<{
                             <tr><th className="px-6 py-4">תאריך פירעון</th><th className="px-6 py-4">מספר צ'ק</th><th className="px-6 py-4">משויך / גורם</th><th className="px-6 py-4">סכום</th><th className="px-6 py-4">סטטוס</th><th className="px-6 py-4 text-left">פעולות</th></tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100">
-                            {filteredChecks.map(check => {
+                            {loadingChecks && (
+                                <tr>
+                                    <td colSpan={6} className="px-6 py-32 text-center">
+                                        <div className="flex flex-col items-center gap-4 text-slate-400">
+                                            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary"></div>
+                                            <p className="text-sm font-medium">טוען צ'קים...</p>
+                                        </div>
+                                    </td>
+                                </tr>
+                            )}
+                            {!loadingChecks && paginatedChecks.map(check => {
                                 const today = new Date();
                                 today.setHours(0,0,0,0);
                                 const isOverdue = ['PENDING', 'IN_BANK_CUSTODY'].includes(check.status) && check.repaymentDate < today;
@@ -1268,12 +1513,35 @@ const CheckCenter: React.FC<{
                                         <td className={`px-6 py-4 font-black text-lg ${isBounced ? 'text-red-700' : 'text-slate-900'}`}>₪{check.amount.toLocaleString()}</td>
                                         <td className="px-6 py-4">{getStatusBadge(check.status)}</td>
                                         <td className="px-6 py-4 text-left">
-                                            <button onClick={() => setSelectedCheck({check, viewOnly: false})} className="bg-white hover:bg-indigo-600 hover:text-white px-4 py-2 rounded-lg border border-indigo-200 text-primary text-xs font-black shadow-sm transition-all group-hover:shadow-md">ניהול צ'ק</button>
+                                            <div className="flex items-center gap-2 justify-end">
+                                                {check.hasAttachments && (
+                                                    <>
+                                                        <span className="text-slate-400" title="מצורף תמונה/PDF לצ'ק">
+                                                            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" /></svg>
+                                                        </span>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => {
+                                                                mongoService.getCheckAttachments(check.uniqueId).then(atts => {
+                                                                    if (atts.length && onViewCheckAttachments) {
+                                                                        onViewCheckAttachments(atts);
+                                                                    }
+                                                                });
+                                                            }}
+                                                            className="p-2 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors"
+                                                            title="צפייה מהירה במצורפים"
+                                                        >
+                                                            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /><path strokeLinecap="round" strokeLinejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" /></svg>
+                                                        </button>
+                                                    </>
+                                                )}
+                                                <button onClick={() => setSelectedCheck({check, viewOnly: false})} className="bg-white hover:bg-indigo-600 hover:text-white px-4 py-2 rounded-lg border border-indigo-200 text-primary text-xs font-black shadow-sm transition-all group-hover:shadow-md">ניהול צ'ק</button>
+                                            </div>
                                         </td>
                                     </tr>
                                 );
                             })}
-                            {filteredChecks.length === 0 && (
+                            {!loadingChecks && paginatedChecks.length === 0 && (
                                 <tr>
                                     <td colSpan={6} className="px-6 py-32 text-center">
                                         <div className="flex flex-col items-center gap-4 text-slate-400 opacity-60">
@@ -1289,76 +1557,154 @@ const CheckCenter: React.FC<{
                         </tbody>
                     </table>
                 </div>
+                
+                {/* Pagination Controls */}
+                {checksTotalCount > 0 && (
+                    <div className="p-4 border-t border-slate-200 bg-white flex flex-col md:flex-row items-center justify-between gap-4">
+                        <div className="text-sm text-slate-600">
+                            מציג {((checksCurrentPage - 1) * checksPageSize) + 1} - {Math.min(checksCurrentPage * checksPageSize, checksTotalCount)} מתוך {checksTotalCount} צ'קים
+                        </div>
+                        <div className="flex items-center gap-4">
+                            <div className="flex items-center gap-2">
+                                <label className="text-xs text-slate-600">פריטים לעמוד:</label>
+                                <select 
+                                    value={checksPageSize}
+                                    onChange={(e) => {
+                                        setChecksPageSize(Number(e.target.value));
+                                        setChecksCurrentPage(1);
+                                    }}
+                                    className="border border-slate-300 rounded-md px-2 py-1 text-sm focus:ring-primary focus:border-primary"
+                                >
+                                    <option value={25}>25</option>
+                                    <option value={50}>50</option>
+                                    <option value={100}>100</option>
+                                    <option value={200}>200</option>
+                                </select>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <button 
+                                    onClick={() => setChecksCurrentPage(1)}
+                                    disabled={checksCurrentPage === 1 || loadingChecks}
+                                    className="px-3 py-1.5 border border-slate-300 rounded-md text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                    ראשון
+                                </button>
+                                <button 
+                                    onClick={() => setChecksCurrentPage(prev => Math.max(1, prev - 1))}
+                                    disabled={checksCurrentPage === 1 || loadingChecks}
+                                    className="px-3 py-1.5 border border-slate-300 rounded-md text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                    קודם
+                                </button>
+                                <span className="px-3 py-1.5 text-sm font-medium text-slate-700">
+                                    עמוד {checksCurrentPage} מתוך {Math.ceil(checksTotalCount / checksPageSize) || 1}
+                                </span>
+                                <button 
+                                    onClick={() => setChecksCurrentPage(prev => Math.min(Math.ceil(checksTotalCount / checksPageSize) || 1, prev + 1))}
+                                    disabled={checksCurrentPage >= Math.ceil(checksTotalCount / checksPageSize) || loadingChecks}
+                                    className="px-3 py-1.5 border border-slate-300 rounded-md text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                    הבא
+                                </button>
+                                <button 
+                                    onClick={() => setChecksCurrentPage(Math.ceil(checksTotalCount / checksPageSize) || 1)}
+                                    disabled={checksCurrentPage >= Math.ceil(checksTotalCount / checksPageSize) || loadingChecks}
+                                    className="px-3 py-1.5 border border-slate-300 rounded-md text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                    אחרון
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
             </div>
-            {selectedCheck && <CheckActionModal check={selectedCheck.check} onClose={() => setSelectedCheck(null)} onUpdateStatus={handleUpdateCheckStatus} viewOnlyHistory={selectedCheck.viewOnly} />}
+            {selectedCheck && <CheckActionModal check={selectedCheck.check} onClose={() => setSelectedCheck(null)} onUpdateStatus={handleUpdateCheckStatus} viewOnlyHistory={selectedCheck.viewOnly} onViewAttachment={onViewCheckAttachment} />}
         </div>
     );
 };
 
-const CheckSeriesGenerator: React.FC<{ 
+const InstallmentSeriesGenerator: React.FC<{ 
     initialAmount: number; 
-    onGenerated: (checks: SupplierPayment[]) => void 
-}> = ({ initialAmount, onGenerated }) => {
+    method: PaymentMethod.CHECK | typeof PaymentMethod.CREDIT_CARD;
+    onGenerated: (payments: SupplierPayment[]) => void 
+}> = ({ initialAmount, method, onGenerated }) => {
+    const isCheck = method === PaymentMethod.CHECK;
     const [count, setCount] = useState(12);
     const [startDate, setStartDate] = useState(new Date().toISOString().split('T')[0]);
     const [startRef, setStartRef] = useState('');
-    const [amountPerCheck, setAmountPerCheck] = useState(initialAmount);
+    const safeCount = Math.max(1, count);
+    const [amountPerItem, setAmountPerItem] = useState(isCheck ? initialAmount : Math.round((initialAmount / safeCount) * 100) / 100);
 
     useEffect(() => {
-        setAmountPerCheck(initialAmount);
-    }, [initialAmount]);
+        const n = Math.max(1, count);
+        setAmountPerItem(isCheck ? initialAmount : Math.round((initialAmount / n) * 100) / 100);
+    }, [initialAmount, count, isCheck]);
 
     const handleGenerate = () => {
-        const checks: SupplierPayment[] = [];
+        const payments: SupplierPayment[] = [];
         const startNum = parseInt(startRef) || 1001;
         const baseDate = new Date(startDate);
 
         for (let i = 0; i < count; i++) {
             const dueDate = new Date(baseDate.getFullYear(), baseDate.getMonth() + i, baseDate.getDate());
-            checks.push({
-                id: `sp_fix_${Date.now()}_${i}`,
-                amount: amountPerCheck,
+            payments.push({
+                id: `sp_${isCheck ? 'fix' : 'var'}_${Date.now()}_${i}`,
+                amount: amountPerItem,
                 date: new Date(),
                 repaymentDate: dueDate,
-                method: PaymentMethod.CHECK,
-                reference: (startNum + i).toString(),
+                method,
+                reference: isCheck ? (startNum + i).toString() : (startRef || undefined),
                 status: 'PENDING',
                 statusHistory: []
             });
         }
-        onGenerated(checks);
+        onGenerated(payments);
     };
 
     return (
-        <div className="bg-indigo-50 p-4 rounded-lg border border-indigo-100 space-y-4">
-            <h4 className="font-bold text-indigo-900 text-sm">מחולל סדרת צ'קים מהיר</h4>
+        <div className={`p-4 rounded-lg border space-y-4 ${isCheck ? 'bg-indigo-50 border-indigo-100' : 'bg-amber-50 border-amber-100'}`}>
+            <h4 className={`font-bold text-sm ${isCheck ? 'text-indigo-900' : 'text-amber-900'}`}>
+                {isCheck ? 'מחולל סדרת צ\'קים מהיר' : 'מחולל פריסת תשלומים באשראי'}
+            </h4>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                 <div>
-                    <label className="block text-[10px] font-bold text-indigo-600 mb-1">סכום לכל צ'ק</label>
-                    <input type="number" value={amountPerCheck} onChange={e => setAmountPerCheck(Number(e.target.value))} className="w-full text-sm rounded border-indigo-200 font-bold p-1" />
+                    <label className={`block text-[10px] font-bold mb-1 ${isCheck ? 'text-indigo-600' : 'text-amber-700'}`}>
+                        {isCheck ? 'סכום לכל צ\'ק' : 'סכום לכל תשלום'}
+                    </label>
+                    <input type="number" value={amountPerItem} onChange={e => setAmountPerItem(Number(e.target.value))} className={`w-full text-sm rounded font-bold p-1 ${isCheck ? 'border-indigo-200' : 'border-amber-200'}`} />
                 </div>
                 <div>
-                    <label className="block text-[10px] font-bold text-indigo-600 mb-1">מס' תשלומים</label>
-                    <input type="number" value={count} onChange={e => setCount(Number(e.target.value))} className="w-full text-sm rounded border-indigo-200 p-1" />
+                    <label className={`block text-[10px] font-bold mb-1 ${isCheck ? 'text-indigo-600' : 'text-amber-700'}`}>מס' תשלומים</label>
+                    <input type="number" value={count} onChange={e => setCount(Number(e.target.value))} className={`w-full text-sm rounded p-1 ${isCheck ? 'border-indigo-200' : 'border-amber-200'}`} />
                 </div>
                 <div>
-                    <label className="block text-[10px] font-bold text-indigo-600 mb-1">פירעון ראשון</label>
-                    <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} className="w-full text-sm rounded border-indigo-200 p-1" />
+                    <label className={`block text-[10px] font-bold mb-1 ${isCheck ? 'text-indigo-600' : 'text-amber-700'}`}>
+                        {isCheck ? 'פירעון ראשון' : 'חיוב ראשון'}
+                    </label>
+                    <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} className={`w-full text-sm rounded p-1 ${isCheck ? 'border-indigo-200' : 'border-amber-200'}`} />
                 </div>
                 <div>
-                    <label className="block text-[10px] font-bold text-indigo-600 mb-1">מספר צ'ק התחלתי</label>
-                    <input type="text" value={startRef} onChange={e => setStartRef(e.target.value)} placeholder="1001" className="w-full text-sm rounded border-indigo-200 p-1" />
+                    <label className={`block text-[10px] font-bold mb-1 ${isCheck ? 'text-indigo-600' : 'text-amber-700'}`}>
+                        {isCheck ? 'מספר צ\'ק התחלתי' : '4 ספרות כרטיס (אופציונלי)'}
+                    </label>
+                    <input type="text" value={startRef} onChange={e => setStartRef(e.target.value)} placeholder={isCheck ? '1001' : '1234'} className={`w-full text-sm rounded p-1 ${isCheck ? 'border-indigo-200' : 'border-amber-200'}`} />
                 </div>
             </div>
-            <button type="button" onClick={handleGenerate} className="w-full bg-indigo-600 text-white py-2 rounded font-bold text-xs shadow-sm hover:bg-indigo-700">ייצר סדרת צ'קים</button>
+            <button type="button" onClick={handleGenerate} className={`w-full py-2 rounded font-bold text-xs shadow-sm text-white ${isCheck ? 'bg-indigo-600 hover:bg-indigo-700' : 'bg-amber-600 hover:bg-amber-700'}`}>
+                {isCheck ? 'ייצר סדרת צ\'קים' : 'ייצר פריסת תשלומים'}
+            </button>
         </div>
     );
 };
 
 const FinancePage: React.FC<FinancePageProps> = ({ 
-    fixedExpenses, setFixedExpenses, variableExpenses, setVariableExpenses, loans, setLoans, debts, setDebts, receivables, setReceivables, equity, setEquity, addActivity, vatRate, orders, setOrders, employees, attendanceRecords, statusConfigs
+    fixedExpenses, setFixedExpenses, variableExpenses, setVariableExpenses, loans, setLoans, debts, setDebts, receivables, setReceivables, equity, setEquity, addActivity, vatRate, orders, setOrders, employees, attendanceRecords, statusConfigs, payrollOverrides, onNavigateToOrder
 }) => {
+    const { user } = useAuth();
+    const isChecksOnlyUser = user?.roleType === 'MANAGER' || user?.roleType === 'EMPLOYEE';
+
     const [activeTab, setActiveTab] = useState<'FIXED' | 'VARIABLE' | 'LOANS' | 'DEBTS' | 'RECEIVABLES' | 'EQUITY' | 'CHECKS' | 'PNL'>('PNL');
+    const [pnlOrders, setPnlOrders] = useState<Order[] | null>(null);
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
     const [isAmortizationModalOpen, setIsAmortizationModalOpen] = useState(false);
@@ -1368,6 +1714,8 @@ const FinancePage: React.FC<FinancePageProps> = ({
     const [selectedLoanForAmortization, setSelectedLoanForAmortization] = useState<Loan | null>(null);
     const [selectedCheckForDebt, setSelectedCheckForDebt] = useState<{check: AggregatedCheck, viewOnly: boolean} | null>(null);
     const [viewingLoanDoc, setViewingLoanDoc] = useState<Attachment | null>(null);
+    const [viewingAttachmentList, setViewingAttachmentList] = useState<Attachment[] | null>(null);
+    const [viewingAttachmentIndex, setViewingAttachmentIndex] = useState(0);
     
     // Preview state for manual loan calculation
     const [showLoanPreview, setShowLoanPreview] = useState(false);
@@ -1375,10 +1723,24 @@ const FinancePage: React.FC<FinancePageProps> = ({
     // Debt Filter States
     const [debtSearch, setDebtSearch] = useState('');
     const [debtStatusFilter, setDebtStatusFilter] = useState<'ALL' | 'OPEN' | 'OVERDUE' | 'PAID'>('OPEN');
+    
+    // Debt Pagination States
+    const [paginatedDebts, setPaginatedDebts] = useState<(Debt & { gross: number; paid: number; remaining: number; isFullyPaid: boolean; isOverdue: boolean })[]>([]);
+    const [debtsCurrentPage, setDebtsCurrentPage] = useState(1);
+    const [debtsPageSize, setDebtsPageSize] = useState(50);
+    const [debtsTotalCount, setDebtsTotalCount] = useState(0);
+    const [loadingDebts, setLoadingDebts] = useState(false);
 
     // Receivable Filter States
     const [receivableSearch, setReceivableSearch] = useState('');
     const [receivableStatusFilter, setReceivableStatusFilter] = useState<'ALL' | 'OPEN' | 'OVERDUE' | 'PAID'>('OPEN');
+    
+    // Receivable Pagination States
+    const [paginatedReceivables, setPaginatedReceivables] = useState<(Receivable & { gross: number; collected: number; remaining: number; isFullyPaid: boolean; isOverdue: boolean })[]>([]);
+    const [receivablesCurrentPage, setReceivablesCurrentPage] = useState(1);
+    const [receivablesPageSize, setReceivablesPageSize] = useState(50);
+    const [receivablesTotalCount, setReceivablesTotalCount] = useState(0);
+    const [loadingReceivables, setLoadingReceivables] = useState(false);
 
     const [equityLogs, setEquityLogs] = useState<AuditLogEntry[]>(() => {
         const saved = localStorage.getItem('equity_audit_logs');
@@ -1389,8 +1751,30 @@ const FinancePage: React.FC<FinancePageProps> = ({
     const [vMonthFilter, setVMonthFilter] = useState<string | number>(new Date().getMonth() + 1);
     const [vYearFilter, setVYearFilter] = useState<string | number>(new Date().getFullYear());
 
+    // Fixed Expenses Pagination States (only when FIXED tab is active)
+    const [paginatedFixedActive, setPaginatedFixedActive] = useState<FixedExpense[]>([]);
+    const [fixedActiveCurrentPage, setFixedActiveCurrentPage] = useState(1);
+    const [fixedActivePageSize, setFixedActivePageSize] = useState(50);
+    const [fixedActiveTotalCount, setFixedActiveTotalCount] = useState(0);
+    const [loadingFixedActive, setLoadingFixedActive] = useState(false);
+    
+    const [paginatedFixedHistorical, setPaginatedFixedHistorical] = useState<FixedExpense[]>([]);
+    const [fixedHistoricalCurrentPage, setFixedHistoricalCurrentPage] = useState(1);
+    const [fixedHistoricalPageSize, setFixedHistoricalPageSize] = useState(50);
+    const [fixedHistoricalTotalCount, setFixedHistoricalTotalCount] = useState(0);
+    const [loadingFixedHistorical, setLoadingFixedHistorical] = useState(false);
+
+    // Variable Expenses Pagination States (only when VARIABLE tab is active)
+    const [paginatedVariableExpenses, setPaginatedVariableExpenses] = useState<VariableDisplayItem[]>([]);
+    const [variableCurrentPage, setVariableCurrentPage] = useState(1);
+    const [variablePageSize, setVariablePageSize] = useState(50);
+    const [variableTotalCount, setVariableTotalCount] = useState(0);
+    const [loadingVariable, setLoadingVariable] = useState(false);
+
     const [fixedForm, setFixedForm] = useState<Partial<FixedExpense>>({});
     const [variableForm, setVariableForm] = useState<Partial<VariableExpense>>({});
+    const [variableCreditCardMode, setVariableCreditCardMode] = useState<'single' | 'installment'>('single');
+    const [fixedCreditCardMode, setFixedCreditCardMode] = useState<'single' | 'installment'>('single');
     const [loanForm, setLoanForm] = useState<Partial<Loan>>({});
     const [debtForm, setDebtForm] = useState<Partial<Debt>>({});
     const [receivableForm, setReceivableForm] = useState<Partial<Receivable>>({});
@@ -1400,15 +1784,32 @@ const FinancePage: React.FC<FinancePageProps> = ({
     const [expandedDebts, setExpandedDebts] = useState<Set<string>>(new Set());
     const [expandedReceivables, setExpandedReceivables] = useState<Set<string>>(new Set());
 
-    // Available years for Variable Expenses Filter
+    // P&L report: same order set as Orders page (getOrdersPaginated with active-deal-only, cap 15k) so הכנסות/עלות המכר match
+    useEffect(() => {
+        if (activeTab !== 'PNL' || !statusConfigs?.length) return;
+        const activeDealConfigs = statusConfigs.filter(c => c.isActiveDeal);
+        const defaultStatusFilter = activeDealConfigs.length > 0 ? [...activeDealConfigs.map(c => c.id), ...activeDealConfigs.map(c => c.label)] : undefined;
+        const filters = {
+            orderStatusFilter: defaultStatusFilter,
+            showCompletedOrders: true
+        };
+        mongoService.getOrdersPaginated(filters, 1, 15000)
+            .then((result: { orders: Order[] }) => {
+                setPnlOrders(result?.orders ?? []);
+            })
+            .catch((err) => {
+                console.error('Error fetching P&L report orders:', err);
+                setPnlOrders([]);
+            });
+    }, [activeTab, statusConfigs]);
+
+    // Available years for Variable Expenses Filter (fixed range: 10 years back, 2 years ahead)
     const vAvailableYears = useMemo(() => {
-        const years = new Set<number>();
-        variableExpenses.forEach(e => years.add(new Date(e.date).getFullYear()));
-        variableExpenses.forEach(e => e.checks?.forEach(c => c.repaymentDate && years.add(new Date(c.repaymentDate).getFullYear())));
-        debts.forEach(d => d.payments?.forEach(p => years.add(new Date(p.date).getFullYear())));
-        years.add(new Date().getFullYear());
-        return Array.from(years).sort((a, b) => b - a);
-    }, [variableExpenses, debts]);
+        const now = new Date().getFullYear();
+        const from = now - 10;
+        const to = now + 2;
+        return Array.from({ length: to - from + 1 }, (_, i) => from + i).sort((a, b) => b - a);
+    }, []);
 
     // Effect for Real-time PMT calculation in Loan Form
     useEffect(() => {
@@ -1542,29 +1943,31 @@ const FinancePage: React.FC<FinancePageProps> = ({
         const month = vMonthFilter;
         const displayItems: VariableDisplayItem[] = [];
 
-        // 1. Base Variable Expenses
+        // 1. Base Variable Expenses (skip main row if has installments - avoid double-counting)
         variableExpenses.forEach(e => {
-            const expenseDate = new Date(e.date);
-            const yearMatches = year === 'all' || expenseDate.getFullYear() === Number(year);
-            const monthMatches = month === 'all' || (expenseDate.getMonth() + 1) === Number(month);
-            
-            if (yearMatches && monthMatches) {
-                displayItems.push({
-                    id: e.id,
-                    originalId: e.id,
-                    name: e.name,
-                    category: e.category,
-                    amount: e.amount,
-                    date: expenseDate,
-                    paymentMethod: e.paymentMethod || PaymentMethod.BANK_TRANSFER,
-                    isInstallment: false,
-                    includesVat: e.includesVat,
-                    isVatExempt: e.isVatExempt,
-                    checksCount: e.checks?.length
-                });
+            const hasInstallments = e.checks && e.checks.length > 0;
+            if (!hasInstallments) {
+                const expenseDate = new Date(e.date);
+                const yearMatches = year === 'all' || expenseDate.getFullYear() === Number(year);
+                const monthMatches = month === 'all' || (expenseDate.getMonth() + 1) === Number(month);
+                if (yearMatches && monthMatches) {
+                    displayItems.push({
+                        id: e.id,
+                        originalId: e.id,
+                        name: e.name,
+                        category: e.category,
+                        amount: e.amount,
+                        date: expenseDate,
+                        paymentMethod: e.paymentMethod || PaymentMethod.BANK_TRANSFER,
+                        isInstallment: false,
+                        includesVat: e.includesVat,
+                        isVatExempt: e.isVatExempt,
+                        checksCount: 0
+                    });
+                }
             }
 
-            // 2. Future installments (checks) for this variable expense
+            // 2. Installments (checks) for this variable expense
             if (e.checks && e.checks.length > 0) {
                 const checksInFilter = e.checks.filter(c => {
                     if (!c.repaymentDate) return false;
@@ -1574,11 +1977,14 @@ const FinancePage: React.FC<FinancePageProps> = ({
                     return yMatches && mMatches;
                 });
 
+                const totalChecks = e.checks!.length;
                 checksInFilter.forEach((check, idx) => {
+                    const origIdx = e.checks!.indexOf(check);
+                    const instLabel = origIdx >= 0 ? ` (${origIdx + 1}/${totalChecks})` : ` (${idx + 1}/${totalChecks})`;
                     displayItems.push({
                         id: `${e.id}_inst_${idx}`,
                         originalId: e.id,
-                        name: `תשלום (פריסה): ${e.name}`,
+                        name: `תשלום (פריסה)${instLabel}: ${e.name}`,
                         category: e.category,
                         amount: check.amount,
                         date: new Date(check.repaymentDate!),
@@ -1633,8 +2039,134 @@ const FinancePage: React.FC<FinancePageProps> = ({
         }, { net: 0, gross: 0 });
     }, [filteredVariableExpenses, vatRate]);
 
+    // Refetch paginated debts
+    const refetchDebts = async () => {
+        if (activeTab !== 'DEBTS') return; // Only refetch when DEBTS tab is active
+        try {
+            setLoadingDebts(true);
+            const filters: any = {};
+            if (debtSearch) filters.searchTerm = debtSearch;
+            if (debtStatusFilter) filters.statusFilter = debtStatusFilter;
+            
+            const result = await mongoService.getDebtsPaginated(filters, debtsCurrentPage, debtsPageSize, vatRate);
+            setPaginatedDebts(result.debts);
+            setDebtsTotalCount(result.totalCount);
+        } catch (error) {
+            console.error('Error loading paginated debts:', error);
+        } finally {
+            setLoadingDebts(false);
+        }
+    };
+    
+    // Refetch paginated receivables
+    const refetchReceivables = async () => {
+        if (activeTab !== 'RECEIVABLES') return; // Only refetch when RECEIVABLES tab is active
+        try {
+            setLoadingReceivables(true);
+            const filters: any = {};
+            if (receivableSearch) filters.searchTerm = receivableSearch;
+            if (receivableStatusFilter) filters.statusFilter = receivableStatusFilter;
+            
+            const result = await mongoService.getReceivablesPaginated(filters, receivablesCurrentPage, receivablesPageSize, vatRate);
+            setPaginatedReceivables(result.receivables);
+            setReceivablesTotalCount(result.totalCount);
+        } catch (error) {
+            console.error('Error loading paginated receivables:', error);
+        } finally {
+            setLoadingReceivables(false);
+        }
+    };
+    
+    // Load paginated debts when filters or pagination change (only when DEBTS tab is active)
+    useEffect(() => {
+        if (activeTab === 'DEBTS') {
+            refetchDebts();
+        }
+    }, [debtSearch, debtStatusFilter, debtsCurrentPage, debtsPageSize, vatRate, activeTab]);
+    
+    // Load paginated receivables when filters or pagination change (only when RECEIVABLES tab is active)
+    useEffect(() => {
+        if (activeTab === 'RECEIVABLES') {
+            refetchReceivables();
+        }
+    }, [receivableSearch, receivableStatusFilter, receivablesCurrentPage, receivablesPageSize, vatRate, activeTab]);
+
+    // Refetch paginated fixed expenses (active)
+    const refetchFixedActive = useCallback(async () => {
+        if (activeTab !== 'FIXED') return;
+        try {
+            setLoadingFixedActive(true);
+            const result = await mongoService.getFixedExpensesPaginated({ showHistorical: false }, fixedActiveCurrentPage, fixedActivePageSize);
+            setPaginatedFixedActive(result.expenses);
+            setFixedActiveTotalCount(result.totalCount);
+        } catch (error) {
+            console.error('Error loading paginated fixed active expenses:', error);
+        } finally {
+            setLoadingFixedActive(false);
+        }
+    }, [fixedActiveCurrentPage, fixedActivePageSize, activeTab]);
+
+    // Refetch paginated fixed expenses (historical)
+    const refetchFixedHistorical = useCallback(async () => {
+        if (activeTab !== 'FIXED') return;
+        try {
+            setLoadingFixedHistorical(true);
+            const result = await mongoService.getFixedExpensesPaginated({ showHistorical: true }, fixedHistoricalCurrentPage, fixedHistoricalPageSize);
+            setPaginatedFixedHistorical(result.expenses);
+            setFixedHistoricalTotalCount(result.totalCount);
+        } catch (error) {
+            console.error('Error loading paginated fixed historical expenses:', error);
+        } finally {
+            setLoadingFixedHistorical(false);
+        }
+    }, [fixedHistoricalCurrentPage, fixedHistoricalPageSize, activeTab]);
+
+    // Refetch paginated variable expenses
+    const refetchVariableExpenses = useCallback(async () => {
+        if (activeTab !== 'VARIABLE') return;
+        try {
+            setLoadingVariable(true);
+            const filters: any = {};
+            if (vYearFilter !== 'all') filters.year = vYearFilter;
+            else filters.year = 'all';
+            if (vMonthFilter !== 'all') filters.month = vMonthFilter;
+            else filters.month = 'all';
+            
+            const result = await mongoService.getVariableExpensesPaginated(filters, variableCurrentPage, variablePageSize);
+            
+            // Convert server items to VariableDisplayItem format (convert dates)
+            const convertedItems: VariableDisplayItem[] = result.items.map((item: any) => ({
+                ...item,
+                date: new Date(item.date)
+            }));
+            
+            setPaginatedVariableExpenses(convertedItems);
+            setVariableTotalCount(result.totalCount);
+        } catch (error) {
+            console.error('Error loading paginated variable expenses:', error);
+        } finally {
+            setLoadingVariable(false);
+        }
+    }, [vMonthFilter, vYearFilter, variableCurrentPage, variablePageSize, activeTab]);
+
+    // Load paginated fixed expenses when FIXED tab is active
+    useEffect(() => {
+        if (activeTab === 'FIXED') {
+            refetchFixedActive();
+            refetchFixedHistorical();
+        }
+    }, [activeTab, fixedActiveCurrentPage, fixedActivePageSize, fixedHistoricalCurrentPage, fixedHistoricalPageSize, refetchFixedActive, refetchFixedHistorical]);
+
+    // Load paginated variable expenses when VARIABLE tab is active
+    useEffect(() => {
+        if (activeTab === 'VARIABLE') {
+            refetchVariableExpenses();
+        }
+    }, [activeTab, vMonthFilter, vYearFilter, variableCurrentPage, variablePageSize, refetchVariableExpenses]);
+
     // --- Debts Logic with Filtering and Sorting ---
-    const filteredDebts = useMemo(() => {
+    // Use paginated debts instead of client-side filtering when DEBTS tab is active
+    const filteredDebtsClientSide = useMemo(() => {
         let result = debts.map(d => {
             const amount = d.amount || 0;
             const gross = d.isVatExempt ? amount : (d.includesVat ? amount : amount * (1 + vatRate / 100));
@@ -1670,9 +2202,11 @@ const FinancePage: React.FC<FinancePageProps> = ({
             return new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime();
         });
     }, [debts, debtSearch, debtStatusFilter, vatRate]);
+    
+    const filteredDebts = activeTab === 'DEBTS' ? paginatedDebts : filteredDebtsClientSide;
 
     // --- Receivables Logic ---
-    const filteredReceivables = useMemo(() => {
+    const filteredReceivablesClientSide = useMemo(() => {
         let result = receivables.map(r => {
             const amount = r.amount || 0;
             const gross = r.isVatExempt ? amount : (r.includesVat ? amount : amount * (1 + vatRate / 100));
@@ -1704,22 +2238,23 @@ const FinancePage: React.FC<FinancePageProps> = ({
             if (a.isOverdue && !b.isOverdue) return -1;
             if (!a.isOverdue && b.isOverdue) return 1;
             if (a.isFullyPaid && !b.isFullyPaid) return 1;
-            if (!a.isFullyPaid && b.isFullyPaid) return 1;
             if (!a.isFullyPaid && b.isFullyPaid) return -1;
             return new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime();
         });
     }, [receivables, receivableSearch, receivableStatusFilter, vatRate]);
+    
+    const filteredReceivables = activeTab === 'RECEIVABLES' ? paginatedReceivables : filteredReceivablesClientSide;
 
     const handleAdd = (type: string) => {
         setEditingId(null);
-        if (type === 'FIXED') setFixedForm({ name: '', monthlyAmount: 0, paymentDay: 1, category: '', isActive: true, startDate: new Date(), paymentMethod: PaymentMethod.STANDING_ORDER, paymentDetails: '', includesVat: true, isVatExempt: false, description: '', checks: [] });
-        else if (type === 'VARIABLE') setVariableForm({ name: '', amount: 0, date: new Date(), category: '', includesVat: true, isVatExempt: false, description: '', paymentMethod: PaymentMethod.BANK_TRANSFER, paymentDetails: '', checks: [] });
+        if (type === 'FIXED') { setFixedForm({ name: '', monthlyAmount: 0, paymentDay: 1, category: '', isActive: true, startDate: new Date(), paymentMethod: PaymentMethod.STANDING_ORDER, paymentDetails: '', includesVat: true, isVatExempt: false, description: '', checks: [] }); setFixedCreditCardMode('single'); }
+        else if (type === 'VARIABLE') { setVariableForm({ name: '', amount: 0, date: new Date(), category: '', includesVat: true, isVatExempt: false, description: '', paymentMethod: PaymentMethod.BANK_TRANSFER, paymentDetails: '', checks: [] }); setVariableCreditCardMode('single'); }
         else if (type === 'LOANS') {
              setLoanForm({ lenderName: '', principalAmount: 0, interestRate: 0, monthlyPayment: 0, durationMonths: 12, paymentsMade: 0, startDate: new Date(), schedule: [] });
              setShowLoanPreview(false);
         }
-        else if (type === 'DEBTS') setDebtForm({ name: '', amount: 0, createdAt: new Date(), dueDate: new Date(), description: '', payments: [], includesVat: true, isVatExempt: false });
-        else if (type === 'RECEIVABLES') setReceivableForm({ name: '', amount: 0, createdAt: new Date(), dueDate: new Date(), description: '', payments: [], includesVat: true, isVatExempt: false });
+        else if (type === 'DEBTS') setDebtForm({ name: '', amount: 0, createdAt: new Date(), dueDate: new Date(), description: '', payments: [], includesVat: true, isVatExempt: false, attachments: [] });
+        else if (type === 'RECEIVABLES') setReceivableForm({ name: '', amount: 0, createdAt: new Date(), dueDate: new Date(), description: '', payments: [], includesVat: true, isVatExempt: false, attachments: [] });
         else if (type === 'EQUITY') {
             setEquityForm({ investorName: '', amount: 0, type: 'הון בעלים', date: new Date(), transactionType: 'DEPOSIT' });
             setIsNewInvestor(uniqueInvestorNames.length === 0);
@@ -1734,7 +2269,8 @@ const FinancePage: React.FC<FinancePageProps> = ({
             startDate: expense.startDate ? new Date(expense.startDate) : new Date(), 
             endDate: expense.endDate ? new Date(expense.endDate) : undefined,
             checks: expense.checks || []
-        }); 
+        });
+        setFixedCreditCardMode((expense.paymentMethod === PaymentMethod.CREDIT_CARD && expense.checks?.length) ? 'installment' : 'single');
         setIsModalOpen(true); 
     };
 
@@ -1748,7 +2284,8 @@ const FinancePage: React.FC<FinancePageProps> = ({
             paymentMethod: expense.paymentMethod || PaymentMethod.BANK_TRANSFER,
             paymentDetails: expense.paymentDetails || '',
             checks: expense.checks || []
-        }); 
+        });
+        setVariableCreditCardMode((expense.paymentMethod === PaymentMethod.CREDIT_CARD && expense.checks?.length) ? 'installment' : 'single');
         setIsModalOpen(true); 
     };
 
@@ -1772,10 +2309,13 @@ const FinancePage: React.FC<FinancePageProps> = ({
 
     const handleEditDebt = (debt: Debt) => {
         setEditingId(debt.id);
+        const attachments = debt.attachments ?? (debt.attachment ? [debt.attachment] : []);
         setDebtForm({
             ...debt,
             createdAt: new Date(debt.createdAt),
             dueDate: new Date(debt.dueDate),
+            attachments,
+            attachment: undefined,
         });
         setIsModalOpen(true);
     };
@@ -1786,6 +2326,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
             ...receivable,
             createdAt: new Date(receivable.createdAt),
             dueDate: new Date(receivable.dueDate),
+            attachments: receivable.attachments ?? [],
         });
         setIsModalOpen(true);
     };
@@ -1798,10 +2339,19 @@ const FinancePage: React.FC<FinancePageProps> = ({
                 case 'FIXED':
                     await mongoService.deleteFixedExpense(id);
                     setFixedExpenses(prev => prev.filter(e => e.id !== id));
+                    // Refetch paginated data if FIXED tab is active
+                    if (activeTab === 'FIXED') {
+                        refetchFixedActive();
+                        refetchFixedHistorical();
+                    }
                     break;
                 case 'VARIABLE':
                     await mongoService.deleteVariableExpense(id);
                     setVariableExpenses(prev => prev.filter(e => e.id !== id));
+                    // Refetch paginated data if VARIABLE tab is active
+                    if (activeTab === 'VARIABLE') {
+                        refetchVariableExpenses();
+                    }
                     break;
                 case 'LOANS':
                     await mongoService.deleteLoan(id);
@@ -1872,6 +2422,31 @@ const FinancePage: React.FC<FinancePageProps> = ({
         });
     };
 
+    const handleSaveDebtPayments = async (debtId: string, payments: DebtPayment[]) => {
+        try {
+            const debt = debts.find(d => d.id === debtId);
+            if (!debt) return;
+            const updatedPayments = [...(debt.payments || []), ...payments];
+            const totalPaid = updatedPayments.reduce((sum, p) => {
+                const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
+                if (p.status && invalidStatuses.includes(p.status)) return sum;
+                return sum + p.amount;
+            }, 0);
+            const amount = debt.amount || 0;
+            let gross = amount;
+            if (!debt.isVatExempt) gross = debt.includesVat ? amount : amount * (1 + vatRate / 100);
+            const updatedDebt = { ...debt, payments: updatedPayments, isPaid: totalPaid >= gross - 0.05 };
+            const saved = await mongoService.updateDebt(updatedDebt);
+            setDebts(prev => prev.map(d => d.id === debtId ? saved : d));
+            setIsPaymentModalOpen(false);
+            setSelectedDebtForPayment(null);
+            await refetchDebts();
+        } catch (error) {
+            console.error('Error saving debt payments to MongoDB:', error);
+            alert('שגיאה בשמירת תשלומי חוב למונגו. אנא נסה שוב.');
+        }
+    };
+
     const handleSaveDebtPayment = async (debtId: string, payment: DebtPayment) => {
         try {
             const debt = debts.find(d => d.id === debtId);
@@ -1899,9 +2474,35 @@ const FinancePage: React.FC<FinancePageProps> = ({
             setDebts(prev => prev.map(d => d.id === debtId ? saved : d));
             setIsPaymentModalOpen(false);
             setSelectedDebtForPayment(null);
+            await refetchDebts(); // Refresh paginated debts after payment
         } catch (error) {
             console.error('Error saving debt payment to MongoDB:', error);
             alert('שגיאה בשמירת תשלום חוב למונגו. אנא נסה שוב.');
+        }
+    };
+
+    const handleSaveReceivableCollections = async (receivableId: string, payments: ReceivablePayment[]) => {
+        try {
+            const receivable = receivables.find(r => r.id === receivableId);
+            if (!receivable) return;
+            const updatedPayments = [...(receivable.payments || []), ...payments];
+            const totalCollected = updatedPayments.reduce((sum, p) => {
+                const invalidStatuses: TransactionStatus[] = ['CANCELED', 'BOUNCED', 'RETURNED'];
+                if (p.status && invalidStatuses.includes(p.status)) return sum;
+                return sum + p.amount;
+            }, 0);
+            const amount = receivable.amount || 0;
+            let gross = amount;
+            if (!receivable.isVatExempt) gross = receivable.includesVat ? amount : amount * (1 + vatRate / 100);
+            const updatedReceivable = { ...receivable, payments: updatedPayments, isPaid: totalCollected >= gross - 0.05 };
+            const saved = await mongoService.updateReceivable(updatedReceivable);
+            setReceivables(prev => prev.map(r => r.id === receivableId ? saved : r));
+            setIsPaymentModalOpen(false);
+            setSelectedReceivableForCollection(null);
+            await refetchReceivables();
+        } catch (error) {
+            console.error('Error saving receivable collections to MongoDB:', error);
+            alert('שגיאה בשמירת גבייות למונגו. אנא נסה שוב.');
         }
     };
 
@@ -1932,6 +2533,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
             setReceivables(prev => prev.map(r => r.id === receivableId ? saved : r));
             setIsPaymentModalOpen(false);
             setSelectedReceivableForCollection(null);
+            await refetchReceivables(); // Refresh paginated receivables after payment
         } catch (error) {
             console.error('Error saving receivable collection to MongoDB:', error);
             alert('שגיאה בשמירת גבייה למונגו. אנא נסה שוב.');
@@ -1965,6 +2567,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
             
             const saved = await mongoService.updateDebt(updatedDebt);
             setDebts(prev => prev.map(d => d.id === debtId ? saved : d));
+            await refetchDebts(); // Refresh paginated debts after payment delete
         } catch (error) {
             console.error('Error deleting debt payment from MongoDB:', error);
             alert('שגיאה במחיקת תשלום חוב ממונגו. אנא נסה שוב.');
@@ -1998,6 +2601,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
             
             const saved = await mongoService.updateReceivable(updatedReceivable);
             setReceivables(prev => prev.map(r => r.id === receivableId ? saved : r));
+            await refetchReceivables(); // Refresh paginated receivables after payment delete
         } catch (error) {
             console.error('Error deleting receivable payment from MongoDB:', error);
             alert('שגיאה במחיקת גבייה ממונגו. אנא נסה שוב.');
@@ -2029,7 +2633,8 @@ const FinancePage: React.FC<FinancePageProps> = ({
             const updatedDebt = { ...debt, payments: updatedPayments, isPaid: totalPaid >= gross - 0.05 };
             const saved = await mongoService.updateDebt(updatedDebt);
             setDebts(prev => prev.map(d => d.id === debtId ? saved : d));
-            addActivity(`סטטוס תשלום חוב עודכן ל-${newStatus}`);
+            addActivity(`סטטוס תשלום חוב עודכן ל-${newStatus}`, { entityType: 'finance', action: 'status_change', metadata: { debtId, newStatus } });
+            await refetchDebts(); // Refresh paginated debts after payment status update
         } catch (error) {
             console.error('Error updating debt payment status in MongoDB:', error);
             alert('שגיאה בעדכון סטטוס תשלום חוב במונגו. אנא נסה שוב.');
@@ -2061,7 +2666,8 @@ const FinancePage: React.FC<FinancePageProps> = ({
             const updatedReceivable = { ...receivable, payments: updatedPayments, isPaid: totalCollected >= gross - 0.05 };
             const saved = await mongoService.updateReceivable(updatedReceivable);
             setReceivables(prev => prev.map(r => r.id === receivableId ? saved : r));
-            addActivity(`סטטוס גבייה עודכן ל-${newStatus}`);
+            addActivity(`סטטוס גבייה עודכן ל-${newStatus}`, { entityType: 'finance', action: 'status_change', metadata: { receivableId, newStatus } });
+            await refetchReceivables(); // Refresh paginated receivables after payment status update
         } catch (error) {
             console.error('Error updating receivable payment status in MongoDB:', error);
             alert('שגיאה בעדכון סטטוס גבייה במונגו. אנא נסה שוב.');
@@ -2089,6 +2695,54 @@ const FinancePage: React.FC<FinancePageProps> = ({
         }
     };
 
+    const readFileAsAttachment = (file: File): Promise<Attachment> => {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                if (event.target?.result) {
+                    resolve({
+                        id: `att_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
+                        fileName: file.name,
+                        dataUrl: event.target.result as string,
+                        type: file.type,
+                    });
+                } else reject(new Error('Failed to read file'));
+            };
+            reader.onerror = () => reject(reader.error);
+            reader.readAsDataURL(file);
+        });
+    };
+
+    const handleDebtFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const files = e.target.files;
+        if (!files || files.length === 0) return;
+        const current = debtForm.attachments ?? (debtForm.attachment ? [debtForm.attachment] : []);
+        const newAttachments: Attachment[] = [];
+        for (let i = 0; i < files.length; i++) {
+            try {
+                const att = await readFileAsAttachment(files[i]);
+                newAttachments.push(att);
+            } catch (_) { /* skip failed */ }
+        }
+        setDebtForm(prev => ({ ...prev, attachments: [...current, ...newAttachments], attachment: undefined }));
+        e.target.value = '';
+    };
+
+    const handleReceivableFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const files = e.target.files;
+        if (!files || files.length === 0) return;
+        const current = receivableForm.attachments ?? [];
+        const newAttachments: Attachment[] = [];
+        for (let i = 0; i < files.length; i++) {
+            try {
+                const att = await readFileAsAttachment(files[i]);
+                newAttachments.push(att);
+            } catch (_) { /* skip failed */ }
+        }
+        setReceivableForm(prev => ({ ...prev, attachments: [...current, ...newAttachments] }));
+        e.target.value = '';
+    };
+
     const handleUpdateFixedFormCheck = (index: number, field: string, value: any) => {
         const updatedChecks = [...(fixedForm.checks || [])];
         const check = { ...updatedChecks[index] };
@@ -2108,122 +2762,151 @@ const FinancePage: React.FC<FinancePageProps> = ({
     };
 
     const handleRemoveCheckFromFixedForm = (index: number) => {
+        const check = fixedForm.checks?.[index];
+        const checkInfo = check ? `צ'ק בסכום ₪${check.amount.toLocaleString()}` : 'צ\'ק';
+        if (!window.confirm(`האם אתה בטוח שברצונך למחוק את ${checkInfo}?`)) {
+            return;
+        }
         const updatedChecks = (fixedForm.checks || []).filter((_, i) => i !== index);
         setFixedForm(prev => ({ ...prev, checks: updatedChecks }));
     };
 
     const handleRemoveCheckFromVariableForm = (index: number) => {
+        const check = variableForm.checks?.[index];
+        const checkInfo = check ? `צ'ק בסכום ₪${check.amount.toLocaleString()}` : 'צ\'ק';
+        if (!window.confirm(`האם אתה בטוח שברצונך למחוק את ${checkInfo}?`)) {
+            return;
+        }
         const updatedChecks = (variableForm.checks || []).filter((_, i) => i !== index);
         setVariableForm(prev => ({ ...prev, checks: updatedChecks }));
     };
 
-    const handleSave = async () => {
-        try {
-            if (activeTab === 'FIXED') {
-                const newItem = { ...fixedForm, id: editingId || `fe_${Date.now()}` } as FixedExpense;
-                if (editingId) {
-                    const saved = await mongoService.updateFixedExpense(newItem);
-                    setFixedExpenses(prev => prev.map(item => item.id === editingId ? saved : item));
-                } else {
-                    const saved = await mongoService.createFixedExpense(newItem);
-                    setFixedExpenses(prev => [...prev, saved]);
-                }
-            } else if (activeTab === 'VARIABLE') {
-                const newItem = { 
-                    ...variableForm, 
-                    id: editingId || `ve_${Date.now()}`, 
-                    date: new Date(variableForm.date || new Date()),
-                    paymentMethod: variableForm.paymentMethod || PaymentMethod.BANK_TRANSFER,
-                    paymentDetails: variableForm.paymentDetails || '',
-                    checks: variableForm.checks || []
-                } as VariableExpense;
-                if (editingId) {
-                    const saved = await mongoService.updateVariableExpense(newItem);
-                    setVariableExpenses(prev => prev.map(item => item.id === editingId ? saved : item));
-                } else {
-                    const saved = await mongoService.createVariableExpense(newItem);
-                    setVariableExpenses(prev => [...prev, saved]);
-                }
-            } else if (activeTab === 'LOANS') {
-                const principal = loanForm.principalAmount || 0;
-                const rate = loanForm.interestRate || 0;
-                const duration = loanForm.durationMonths || 12;
-                const startDate = loanForm.startDate || new Date();
-                const paymentsMadeCount = loanForm.paymentsMade || 0;
-                
-                let schedule = loanForm.schedule || [];
-                const scheduleTotalPrincipal = schedule.reduce((sum, s) => sum + s.principalAmount, 0);
-                const needsSync = schedule.length === 0 || schedule.length !== duration || Math.abs(scheduleTotalPrincipal - principal) > 1.0;
-
-                if (needsSync && principal > 0 && duration > 0) {
-                    schedule = generateSpitzerSchedule(principal, rate, duration, startDate, paymentsMadeCount);
-                }
-
-                const newItem = { 
-                    ...loanForm, 
-                    id: editingId || `ln_${Date.now()}`, 
-                    startDate: new Date(loanForm.startDate || new Date()),
-                    schedule: schedule,
-                    paymentsMade: schedule.filter(s => s.isPaid).length 
-                } as Loan;
-                if (editingId) {
-                    const saved = await mongoService.updateLoan(newItem);
-                    setLoans(prev => prev.map(l => l.id === editingId ? saved : l));
-                } else {
-                    const saved = await mongoService.createLoan(newItem);
-                    setLoans(prev => [...prev, saved]);
-                }
-            } else if (activeTab === 'DEBTS') {
-                const newItem = { 
-                    ...debtForm, 
-                    id: editingId || `db_${Date.now()}`, 
-                    createdAt: new Date(debtForm.createdAt || new Date()), 
-                    dueDate: new Date(debtForm.dueDate || new Date()), 
-                    payments: debtForm.payments || [], 
-                    includesVat: debtForm.includesVat ?? true, 
-                    isVatExempt: debtForm.isVatExempt ?? false 
-                } as Debt;
-                if (editingId) {
-                    const saved = await mongoService.updateDebt(newItem);
-                    setDebts(prev => prev.map(d => d.id === editingId ? saved : d));
-                } else {
-                    const saved = await mongoService.createDebt(newItem);
-                    setDebts(prev => [...prev, saved]);
-                }
-            } else if (activeTab === 'RECEIVABLES') {
-                const newItem = { 
-                    ...receivableForm, 
-                    id: editingId || `rec_${Date.now()}`, 
-                    createdAt: new Date(receivableForm.createdAt || new Date()), 
-                    dueDate: new Date(receivableForm.dueDate || new Date()), 
-                    payments: receivableForm.payments || [], 
-                    includesVat: receivableForm.includesVat ?? true, 
-                    isVatExempt: receivableForm.isVatExempt ?? false 
-                } as Receivable;
-                if (editingId) {
-                    const saved = await mongoService.updateReceivable(newItem);
-                    setReceivables(prev => prev.map(r => r.id === editingId ? saved : r));
-                } else {
-                    const saved = await mongoService.createReceivable(newItem);
-                    setReceivables(prev => [...prev, saved]);
-                }
-            } else if (activeTab === 'EQUITY') {
-                if (!equityForm.investorName || !equityForm.amount) { alert('חסרים שדות חובה'); return; }
-                const newItem = { ...equityForm, id: editingId || `eq_${Date.now()}`, date: new Date(equityForm.date || new Date()) } as EquityInvestment;
-                if (editingId) {
-                    const saved = await mongoService.updateEquity(newItem);
-                    setEquity(prev => prev.map(item => item.id === editingId ? saved : item));
-                } else {
-                    const saved = await mongoService.createEquity(newItem);
-                    setEquity(prev => [...prev, saved]);
-                }
+    const handleSaveInternal = async () => {
+        if (activeTab === 'FIXED') {
+            const newItem = { ...fixedForm, id: editingId || `fe_${Date.now()}_${Math.random().toString(36).slice(2, 9)}` } as FixedExpense;
+            if (editingId) {
+                const saved = await mongoService.updateFixedExpense(newItem);
+                setFixedExpenses(prev => prev.map(item => item.id === editingId ? saved : item));
+            } else {
+                const saved = await mongoService.createFixedExpense(newItem);
+                setFixedExpenses(prev => [...prev, saved]);
             }
-            setIsModalOpen(false);
-        } catch (error) {
-            console.error('Error saving to MongoDB:', error);
-            alert('שגיאה בשמירה למונגו. אנא נסה שוב.');
+            // Refetch paginated data if FIXED tab is active
+            if (activeTab === 'FIXED') {
+                refetchFixedActive();
+                refetchFixedHistorical();
+            }
+        } else if (activeTab === 'VARIABLE') {
+            const newItem = { 
+                ...variableForm, 
+                id: editingId || `ve_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`, 
+                date: new Date(variableForm.date || new Date()),
+                paymentMethod: variableForm.paymentMethod || PaymentMethod.BANK_TRANSFER,
+                paymentDetails: variableForm.paymentDetails || '',
+                checks: variableForm.checks || []
+            } as VariableExpense;
+            if (editingId) {
+                const saved = await mongoService.updateVariableExpense(newItem);
+                setVariableExpenses(prev => prev.map(item => item.id === editingId ? saved : item));
+            } else {
+                const saved = await mongoService.createVariableExpense(newItem);
+                setVariableExpenses(prev => [...prev, saved]);
+            }
+            // Refetch paginated data if VARIABLE tab is active
+            if (activeTab === 'VARIABLE') {
+                refetchVariableExpenses();
+            }
+        } else if (activeTab === 'LOANS') {
+            const principal = loanForm.principalAmount || 0;
+            const rate = loanForm.interestRate || 0;
+            const duration = loanForm.durationMonths || 12;
+            const startDate = loanForm.startDate || new Date();
+            const paymentsMadeCount = loanForm.paymentsMade || 0;
+            
+            let schedule = loanForm.schedule || [];
+            const scheduleTotalPrincipal = schedule.reduce((sum, s) => sum + s.principalAmount, 0);
+            const needsSync = schedule.length === 0 || schedule.length !== duration || Math.abs(scheduleTotalPrincipal - principal) > 1.0;
+
+            if (needsSync && principal > 0 && duration > 0) {
+                schedule = generateSpitzerSchedule(principal, rate, duration, startDate, paymentsMadeCount);
+            }
+
+            const newItem = { 
+                ...loanForm, 
+                id: editingId || `ln_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`, 
+                startDate: new Date(loanForm.startDate || new Date()),
+                schedule: schedule,
+                paymentsMade: schedule.filter(s => s.isPaid).length 
+            } as Loan;
+            if (editingId) {
+                const saved = await mongoService.updateLoan(newItem);
+                setLoans(prev => prev.map(l => l.id === editingId ? saved : l));
+            } else {
+                const saved = await mongoService.createLoan(newItem);
+                setLoans(prev => [...prev, saved]);
+            }
+        } else if (activeTab === 'DEBTS') {
+            const attachments = debtForm.attachments ?? (debtForm.attachment ? [debtForm.attachment] : []);
+            const newItem = { 
+                ...debtForm, 
+                id: editingId || `db_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`, 
+                createdAt: new Date(debtForm.createdAt || new Date()), 
+                dueDate: new Date(debtForm.dueDate || new Date()), 
+                payments: debtForm.payments || [], 
+                includesVat: debtForm.includesVat ?? true, 
+                isVatExempt: debtForm.isVatExempt ?? false,
+                attachments,
+                attachment: undefined,
+            } as Debt;
+            if (editingId) {
+                const saved = await mongoService.updateDebt(newItem);
+                setDebts(prev => prev.map(d => d.id === editingId ? saved : d));
+            } else {
+                const saved = await mongoService.createDebt(newItem);
+                setDebts(prev => [...prev, saved]);
+            }
+        } else if (activeTab === 'RECEIVABLES') {
+            const newItem = { 
+                ...receivableForm, 
+                id: editingId || `rec_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`, 
+                createdAt: new Date(receivableForm.createdAt || new Date()), 
+                dueDate: new Date(receivableForm.dueDate || new Date()), 
+                payments: receivableForm.payments || [], 
+                includesVat: receivableForm.includesVat ?? true, 
+                isVatExempt: receivableForm.isVatExempt ?? false 
+            } as Receivable;
+            if (editingId) {
+                const saved = await mongoService.updateReceivable(newItem);
+                setReceivables(prev => prev.map(r => r.id === editingId ? saved : r));
+                await refetchReceivables(); // Refresh paginated receivables after update
+            } else {
+                const saved = await mongoService.createReceivable(newItem);
+                setReceivables(prev => [...prev, saved]);
+                await refetchReceivables(); // Refresh paginated receivables after create
+            }
+        } else if (activeTab === 'EQUITY') {
+            if (!equityForm.investorName || !equityForm.amount) { 
+                throw new Error('חסרים שדות חובה'); 
+            }
+            const newItem = { ...equityForm, id: editingId || `eq_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`, date: new Date(equityForm.date || new Date()) } as EquityInvestment;
+            if (editingId) {
+                const saved = await mongoService.updateEquity(newItem);
+                setEquity(prev => prev.map(item => item.id === editingId ? saved : item));
+            } else {
+                const saved = await mongoService.createEquity(newItem);
+                setEquity(prev => [...prev, saved]);
+            }
         }
+        setIsModalOpen(false);
     };
+
+    const { execute: handleSave, isLoading: isSaving } = useAsyncAction(handleSaveInternal, {
+        preventDoubleClick: true,
+        onError: (error) => {
+            console.error('Error saving to MongoDB:', error);
+            alert(`שגיאה בשמירה למונגו: ${error.message || 'שגיאה לא ידועה'}`);
+        }
+    });
 
     const FixedExpensesTable = ({ items, title, isHistorical = false }: { items: FixedExpense[], title: string, isHistorical?: boolean }) => (
         <div className={isHistorical ? "mt-12 pt-8 border-t border-slate-200 opacity-70" : ""}>
@@ -2293,12 +2976,20 @@ const FinancePage: React.FC<FinancePageProps> = ({
         </div>
     );
 
-    const renderFilePreview = (file: Attachment) => {
+    const closeViewer = () => {
+        setViewingLoanDoc(null);
+        setViewingAttachmentList(null);
+    };
+
+    const renderFilePreview = (file: Attachment, list?: Attachment[] | null, index?: number) => {
         const isImage = file.type.startsWith('image/');
         const isPdf = file.type === 'application/pdf' || file.fileName.toLowerCase().endsWith('.pdf');
+        const hasMultiple = list && list.length > 1 && index !== undefined;
+        const currentNum = (index ?? 0) + 1;
+        const totalNum = list?.length ?? 1;
 
         return (
-            <Modal title={`צפייה במסמך: ${file.fileName}`} onClose={() => setViewingLoanDoc(null)} size="5xl">
+            <Modal title={`צפייה במסמך: ${file.fileName}`} onClose={closeViewer} size="5xl">
                 <div className="flex flex-col h-[75vh]">
                     <div className="flex-1 bg-slate-100 rounded overflow-hidden flex items-center justify-center p-0 relative">
                         {isImage ? (
@@ -2319,23 +3010,49 @@ const FinancePage: React.FC<FinancePageProps> = ({
                             </div>
                         )}
                     </div>
-                    {(isImage || isPdf) && (
-                        <div className="mt-4 flex justify-between items-center p-2 bg-slate-50 border rounded border-slate-200">
-                            <span className="text-sm font-medium text-slate-500">{file.fileName}</span>
-                            <a href={file.dataUrl} download={file.fileName} className="text-primary font-bold hover:underline flex items-center gap-1">
-                                <DownloadIcon className="w-4 h-4"/>
-                                הורד קובץ
-                            </a>
+                    <div className="mt-4 flex flex-wrap justify-between items-center gap-2 p-2 bg-slate-50 border rounded border-slate-200">
+                        <div className="flex items-center gap-3">
+                            {hasMultiple && (
+                                <div className="flex items-center gap-2">
+                                    <button type="button" onClick={() => setViewingAttachmentIndex(Math.max(0, index! - 1))} disabled={index === 0} className="px-3 py-1 rounded bg-white border border-slate-300 text-sm font-bold disabled:opacity-50 disabled:cursor-not-allowed">← קודם</button>
+                                    <span className="text-sm font-medium text-slate-600">קובץ {currentNum} מתוך {totalNum}</span>
+                                    <button type="button" onClick={() => setViewingAttachmentIndex(Math.min(list!.length - 1, index! + 1))} disabled={index === list!.length - 1} className="px-3 py-1 rounded bg-white border border-slate-300 text-sm font-bold disabled:opacity-50 disabled:cursor-not-allowed">הבא →</button>
+                                </div>
+                            )}
+                            {(isImage || isPdf) && <span className="text-sm font-medium text-slate-500">{file.fileName}</span>}
                         </div>
-                    )}
+                        <a href={file.dataUrl} download={file.fileName} className="text-primary font-bold hover:underline flex items-center gap-1">
+                            <DownloadIcon className="w-4 h-4"/>
+                            הורד קובץ
+                        </a>
+                    </div>
                 </div>
             </Modal>
         );
     };
 
+    const currentViewingFile = viewingAttachmentList ? viewingAttachmentList[viewingAttachmentIndex] : viewingLoanDoc;
+
+    if (isChecksOnlyUser) {
+        return (
+            <div className="space-y-6 pb-12">
+                {currentViewingFile && renderFilePreview(currentViewingFile, viewingAttachmentList, viewingAttachmentList ? viewingAttachmentIndex : undefined)}
+                <div className="bg-white rounded-lg shadow-md border border-slate-200 overflow-hidden">
+                    <div className="px-6 py-4 border-b border-slate-200 bg-slate-50/50">
+                        <h2 className="text-lg font-black text-slate-800">ניהול צ'קים נכנסים</h2>
+                        <p className="text-sm text-slate-500 mt-0.5">צפייה ועדכון סטטוס לצ'קים שנכנסו מלקוחות וחייבים</p>
+                    </div>
+                    <div className="p-6 min-h-[400px]">
+                        <CheckCenter orders={orders} setOrders={setOrders} fixedExpenses={fixedExpenses} setFixedExpenses={setFixedExpenses} variableExpenses={variableExpenses} setVariableExpenses={setVariableExpenses} debts={debts} setDebts={setDebts} receivables={receivables} setReceivables={setReceivables} addActivity={addActivity} incomingOnly={true} onViewCheckAttachment={(att) => { setViewingLoanDoc(att); setViewingAttachmentList(null); }} onViewCheckAttachments={(attachments) => { setViewingAttachmentList(attachments); setViewingAttachmentIndex(0); setViewingLoanDoc(attachments[0]); }} />
+                    </div>
+                </div>
+            </div>
+        );
+    }
+
     return (
         <div className="space-y-6 pb-12">
-            {viewingLoanDoc && renderFilePreview(viewingLoanDoc)}
+            {currentViewingFile && renderFilePreview(currentViewingFile, viewingAttachmentList, viewingAttachmentList ? viewingAttachmentIndex : undefined)}
             <div className="grid grid-cols-2 lg:grid-cols-6 gap-4">
                 <div className="bg-white p-4 rounded-lg shadow-sm border-t-4 border-blue-500">
                     <h3 className="text-xs font-black text-slate-500 uppercase tracking-tighter">קבועות (ברוטו)</h3>
@@ -2376,9 +3093,26 @@ const FinancePage: React.FC<FinancePageProps> = ({
                 </div>
 
                 <div className="p-6 min-h-[400px]">
-                    {activeTab === 'PNL' && <PnLReport orders={orders} fixedExpenses={fixedExpenses} variableExpenses={variableExpenses} loans={loans} employees={employees} attendanceRecords={attendanceRecords} statusConfigs={statusConfigs} vatRate={vatRate} debts={debts} receivables={receivables} />}
+                    {activeTab === 'PNL' && (
+                        <ErrorBoundary>
+                            <PnLReport 
+                                orders={pnlOrders ?? orders} 
+                                fixedExpenses={fixedExpenses} 
+                                variableExpenses={variableExpenses} 
+                                loans={loans} 
+                                employees={employees} 
+                                attendanceRecords={attendanceRecords} 
+                                statusConfigs={statusConfigs} 
+                                vatRate={vatRate} 
+                                debts={debts} 
+                                receivables={receivables} 
+                                payrollOverrides={payrollOverrides}
+                                onNavigateToOrder={onNavigateToOrder}
+                            />
+                        </ErrorBoundary>
+                    )}
 
-                    {activeTab === 'CHECKS' && <CheckCenter orders={orders} setOrders={setOrders} fixedExpenses={fixedExpenses} setFixedExpenses={setFixedExpenses} variableExpenses={variableExpenses} setVariableExpenses={setVariableExpenses} debts={debts} setDebts={setDebts} receivables={receivables} setReceivables={setReceivables} addActivity={addActivity} />}
+                    {activeTab === 'CHECKS' && <CheckCenter orders={orders} setOrders={setOrders} fixedExpenses={fixedExpenses} setFixedExpenses={setFixedExpenses} variableExpenses={variableExpenses} setVariableExpenses={setVariableExpenses} debts={debts} setDebts={setDebts} receivables={receivables} setReceivables={setReceivables} addActivity={addActivity} onViewCheckAttachment={(att) => { setViewingLoanDoc(att); setViewingAttachmentList(null); }} onViewCheckAttachments={(attachments) => { setViewingAttachmentList(attachments); setViewingAttachmentIndex(0); setViewingLoanDoc(attachments[0]); }} />}
 
                     {activeTab === 'FIXED' && (
                         <div className="text-start">
@@ -2390,8 +3124,132 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                 <button onClick={() => handleAdd('FIXED')} className="flex items-center px-5 py-2.5 bg-primary text-white rounded-lg shadow-lg hover:bg-indigo-700 font-bold transition-all"><PlusIcon className="w-5 h-5 me-2"/> הוסף הוצאה</button>
                             </div>
                             <div className="space-y-12">
-                                <FixedExpensesTable items={activeFixedServices} title="שירותים פעילים" />
-                                {historicalFixedServices.length > 0 && <FixedExpensesTable items={historicalFixedServices} title="היסטוריית שירותים (הסתיימו)" isHistorical={true} />}
+                                <div>
+                                    <FixedExpensesTable items={loadingFixedActive ? [] : paginatedFixedActive} title="שירותים פעילים" />
+                                    {/* Pagination Controls for Active Fixed Expenses */}
+                                    {fixedActiveTotalCount > 0 && (
+                                        <div className="mt-4 flex items-center justify-between bg-white px-4 py-3 border-t border-slate-200">
+                                            <div className="flex items-center gap-4">
+                                                <div className="text-sm text-slate-600">
+                                                    מציג {((fixedActiveCurrentPage - 1) * fixedActivePageSize) + 1} - {Math.min(fixedActiveCurrentPage * fixedActivePageSize, fixedActiveTotalCount)} מתוך {fixedActiveTotalCount} שירותים פעילים
+                                                </div>
+                                                <div className="flex items-center gap-2">
+                                                    <label className="text-sm text-slate-600">שורות לעמוד:</label>
+                                                    <select 
+                                                        value={fixedActivePageSize} 
+                                                        onChange={(e) => {
+                                                            setFixedActivePageSize(parseInt(e.target.value));
+                                                            setFixedActiveCurrentPage(1);
+                                                        }}
+                                                        className="text-sm border border-slate-300 rounded px-2 py-1 focus:ring-primary focus:border-primary"
+                                                    >
+                                                        <option value={25}>25</option>
+                                                        <option value={50}>50</option>
+                                                        <option value={100}>100</option>
+                                                        <option value={200}>200</option>
+                                                    </select>
+                                                </div>
+                                            </div>
+                                            <div className="flex items-center gap-2">
+                                                <button
+                                                    onClick={() => setFixedActiveCurrentPage(1)}
+                                                    disabled={fixedActiveCurrentPage === 1 || loadingFixedActive}
+                                                    className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                                >
+                                                    ראשון
+                                                </button>
+                                                <button
+                                                    onClick={() => setFixedActiveCurrentPage(prev => Math.max(1, prev - 1))}
+                                                    disabled={fixedActiveCurrentPage === 1 || loadingFixedActive}
+                                                    className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                                >
+                                                    קודם
+                                                </button>
+                                                <span className="px-3 py-1 text-sm text-slate-600">
+                                                    עמוד {fixedActiveCurrentPage} מתוך {Math.ceil(fixedActiveTotalCount / fixedActivePageSize) || 1}
+                                                </span>
+                                                <button
+                                                    onClick={() => setFixedActiveCurrentPage(prev => Math.min(Math.ceil(fixedActiveTotalCount / fixedActivePageSize) || 1, prev + 1))}
+                                                    disabled={fixedActiveCurrentPage >= Math.ceil(fixedActiveTotalCount / fixedActivePageSize) || loadingFixedActive}
+                                                    className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                                >
+                                                    הבא
+                                                </button>
+                                                <button
+                                                    onClick={() => setFixedActiveCurrentPage(Math.ceil(fixedActiveTotalCount / fixedActivePageSize) || 1)}
+                                                    disabled={fixedActiveCurrentPage >= Math.ceil(fixedActiveTotalCount / fixedActivePageSize) || loadingFixedActive}
+                                                    className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                                >
+                                                    אחרון
+                                                </button>
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                                {fixedHistoricalTotalCount > 0 && (
+                                    <div>
+                                        <FixedExpensesTable items={loadingFixedHistorical ? [] : paginatedFixedHistorical} title="היסטוריית שירותים (הסתיימו)" isHistorical={true} />
+                                        {/* Pagination Controls for Historical Fixed Expenses */}
+                                        {fixedHistoricalTotalCount > 0 && (
+                                            <div className="mt-4 flex items-center justify-between bg-white px-4 py-3 border-t border-slate-200">
+                                                <div className="flex items-center gap-4">
+                                                    <div className="text-sm text-slate-600">
+                                                        מציג {((fixedHistoricalCurrentPage - 1) * fixedHistoricalPageSize) + 1} - {Math.min(fixedHistoricalCurrentPage * fixedHistoricalPageSize, fixedHistoricalTotalCount)} מתוך {fixedHistoricalTotalCount} שירותים היסטוריים
+                                                    </div>
+                                                    <div className="flex items-center gap-2">
+                                                        <label className="text-sm text-slate-600">שורות לעמוד:</label>
+                                                        <select 
+                                                            value={fixedHistoricalPageSize} 
+                                                            onChange={(e) => {
+                                                                setFixedHistoricalPageSize(parseInt(e.target.value));
+                                                                setFixedHistoricalCurrentPage(1);
+                                                            }}
+                                                            className="text-sm border border-slate-300 rounded px-2 py-1 focus:ring-primary focus:border-primary"
+                                                        >
+                                                            <option value={25}>25</option>
+                                                            <option value={50}>50</option>
+                                                            <option value={100}>100</option>
+                                                            <option value={200}>200</option>
+                                                        </select>
+                                                    </div>
+                                                </div>
+                                                <div className="flex items-center gap-2">
+                                                    <button
+                                                        onClick={() => setFixedHistoricalCurrentPage(1)}
+                                                        disabled={fixedHistoricalCurrentPage === 1 || loadingFixedHistorical}
+                                                        className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                                    >
+                                                        ראשון
+                                                    </button>
+                                                    <button
+                                                        onClick={() => setFixedHistoricalCurrentPage(prev => Math.max(1, prev - 1))}
+                                                        disabled={fixedHistoricalCurrentPage === 1 || loadingFixedHistorical}
+                                                        className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                                    >
+                                                        קודם
+                                                    </button>
+                                                    <span className="px-3 py-1 text-sm text-slate-600">
+                                                        עמוד {fixedHistoricalCurrentPage} מתוך {Math.ceil(fixedHistoricalTotalCount / fixedHistoricalPageSize) || 1}
+                                                    </span>
+                                                    <button
+                                                        onClick={() => setFixedHistoricalCurrentPage(prev => Math.min(Math.ceil(fixedHistoricalTotalCount / fixedHistoricalPageSize) || 1, prev + 1))}
+                                                        disabled={fixedHistoricalCurrentPage >= Math.ceil(fixedHistoricalTotalCount / fixedHistoricalPageSize) || loadingFixedHistorical}
+                                                        className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                                    >
+                                                        הבא
+                                                    </button>
+                                                    <button
+                                                        onClick={() => setFixedHistoricalCurrentPage(Math.ceil(fixedHistoricalTotalCount / fixedHistoricalPageSize) || 1)}
+                                                        disabled={fixedHistoricalCurrentPage >= Math.ceil(fixedHistoricalTotalCount / fixedHistoricalPageSize) || loadingFixedHistorical}
+                                                        className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                                    >
+                                                        אחרון
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
                             </div>
                         </div>
                     )}
@@ -2406,7 +3264,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                             <label className="text-[10px] font-black text-slate-400 uppercase">שנה</label>
                                             <select 
                                                 value={vYearFilter} 
-                                                onChange={e => setVYearFilter(e.target.value === 'all' ? 'all' : Number(e.target.value))} 
+                                                onChange={e => { setVYearFilter(e.target.value === 'all' ? 'all' : Number(e.target.value)); setVariableCurrentPage(1); }} 
                                                 className="text-sm border p-2 rounded-md border-slate-300 shadow-sm focus:ring-primary focus:border-primary bg-white min-w-[100px]"
                                             >
                                                 <option value="all">כל השנים</option>
@@ -2417,7 +3275,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                             <label className="text-[10px] font-black text-slate-400 uppercase">חודש</label>
                                             <select 
                                                 value={vMonthFilter} 
-                                                onChange={e => setVMonthFilter(e.target.value === 'all' ? 'all' : Number(e.target.value))} 
+                                                onChange={e => { setVMonthFilter(e.target.value === 'all' ? 'all' : Number(e.target.value)); setVariableCurrentPage(1); }} 
                                                 className="text-sm border p-2 rounded-md border-slate-300 shadow-sm focus:ring-primary focus:border-primary bg-white min-w-[120px]"
                                             >
                                                 <option value="all">כל החודשים</option>
@@ -2427,7 +3285,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                             </select>
                                         </div>
                                         <button 
-                                            onClick={() => { setVMonthFilter('all'); setVYearFilter('all'); }} 
+                                            onClick={() => { setVMonthFilter('all'); setVYearFilter('all'); setVariableCurrentPage(1); }} 
                                             className="text-xs px-4 py-2 mt-4 rounded-md font-bold transition-all bg-slate-100 text-slate-600 hover:bg-slate-200"
                                         >
                                             נקה סינון
@@ -2450,7 +3308,17 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                         </tr>
                                     </thead>
                                     <tbody className="divide-y divide-slate-100 bg-white">
-                                        {filteredVariableExpenses.map(item => {
+                                        {loadingVariable && (
+                                            <tr>
+                                                <td colSpan={7} className="px-6 py-32 text-center">
+                                                    <div className="flex flex-col items-center gap-4 text-slate-400">
+                                                        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary"></div>
+                                                        <p className="text-sm font-medium">טוען הוצאות...</p>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        )}
+                                        {!loadingVariable && paginatedVariableExpenses.map(item => {
                                             const amount = item.amount || 0;
                                             let net = item.isVatExempt ? amount : (item.includesVat ? amount / (1 + vatRate / 100) : amount);
                                             let gross = item.isVatExempt ? amount : (item.includesVat ? amount : amount * (1 + vatRate / 100));
@@ -2462,15 +3330,15 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                                     <td className="px-6 py-4"><span className={`${item.isDebtPayment ? 'bg-purple-50 text-purple-700 border-purple-100' : 'bg-orange-50 text-orange-700 border-orange-100'} px-3 py-1 rounded-full border text-[11px] font-bold`}>{item.category}</span></td>
                                                     <td className="px-6 py-4 text-slate-500 font-mono">₪{net.toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
                                                     <td className="px-6 py-4 font-black text-slate-900 font-mono">₪{gross.toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
-                                                    <td className="px-6 py-4 text-left"><div className="flex gap-2 justify-end opacity-0 group-hover:opacity-100">{!item.isInstallment ? <><button onClick={() => handleEditVariable(item.originalId)} className="text-primary hover:bg-blue-50 p-1.5 rounded"><EditIcon className="w-5 h-5"/></button><button onClick={() => handleDelete('VARIABLE', item.originalId)} className="text-red-500 p-1.5 rounded"><DeleteIcon className="w-5 h-5"/></button></> : <span className="text-[10px] text-slate-300 italic">מערכת</span>}</div></td>
+                                                    <td className="px-6 py-4 text-left"><div className="flex gap-2 justify-end opacity-0 group-hover:opacity-100">{item.isInstallment ? <button onClick={() => handleEditVariable(item.originalId)} className="text-primary hover:bg-blue-50 p-1.5 rounded" title="ערוך הוצאה מקורית"><EditIcon className="w-5 h-5"/></button> : <><button onClick={() => handleEditVariable(item.originalId)} className="text-primary hover:bg-blue-50 p-1.5 rounded"><EditIcon className="w-5 h-5"/></button><button onClick={() => handleDelete('VARIABLE', item.originalId)} className="text-red-500 p-1.5 rounded"><DeleteIcon className="w-5 h-5"/></button></>}</div></td>
                                                 </tr>
                                             );
                                         })}
-                                        {filteredVariableExpenses.length === 0 && (
+                                        {!loadingVariable && paginatedVariableExpenses.length === 0 && (
                                             <tr><td colSpan={7} className="px-6 py-12 text-center text-slate-400 italic">לא נמצאו הוצאות בסינון הנבחר</td></tr>
                                         )}
                                     </tbody>
-                                    {filteredVariableExpenses.length > 0 && (
+                                    {!loadingVariable && paginatedVariableExpenses.length > 0 && (
                                         <tfoot className="bg-slate-50 font-black border-t-2 border-slate-200">
                                             <tr>
                                                 <td colSpan={4} className="px-6 py-4 text-start text-slate-600">סה"כ לסינון הנוכחי:</td>
@@ -2482,6 +3350,66 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                     )}
                                 </table>
                             </div>
+                            
+                            {/* Pagination Controls for Variable Expenses */}
+                            {variableTotalCount > 0 && (
+                                <div className="mt-4 flex items-center justify-between bg-white px-4 py-3 border-t border-slate-200">
+                                    <div className="flex items-center gap-4">
+                                        <div className="text-sm text-slate-600">
+                                            מציג {((variableCurrentPage - 1) * variablePageSize) + 1} - {Math.min(variableCurrentPage * variablePageSize, variableTotalCount)} מתוך {variableTotalCount} הוצאות
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                            <label className="text-sm text-slate-600">שורות לעמוד:</label>
+                                            <select 
+                                                value={variablePageSize} 
+                                                onChange={(e) => {
+                                                    setVariablePageSize(parseInt(e.target.value));
+                                                    setVariableCurrentPage(1);
+                                                }}
+                                                className="text-sm border border-slate-300 rounded px-2 py-1 focus:ring-primary focus:border-primary"
+                                            >
+                                                <option value={25}>25</option>
+                                                <option value={50}>50</option>
+                                                <option value={100}>100</option>
+                                                <option value={200}>200</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <button
+                                            onClick={() => setVariableCurrentPage(1)}
+                                            disabled={variableCurrentPage === 1 || loadingVariable}
+                                            className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                        >
+                                            ראשון
+                                        </button>
+                                        <button
+                                            onClick={() => setVariableCurrentPage(prev => Math.max(1, prev - 1))}
+                                            disabled={variableCurrentPage === 1 || loadingVariable}
+                                            className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                        >
+                                            קודם
+                                        </button>
+                                        <span className="px-3 py-1 text-sm text-slate-600">
+                                            עמוד {variableCurrentPage} מתוך {Math.ceil(variableTotalCount / variablePageSize) || 1}
+                                        </span>
+                                        <button
+                                            onClick={() => setVariableCurrentPage(prev => Math.min(Math.ceil(variableTotalCount / variablePageSize) || 1, prev + 1))}
+                                            disabled={variableCurrentPage >= Math.ceil(variableTotalCount / variablePageSize) || loadingVariable}
+                                            className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                        >
+                                            הבא
+                                        </button>
+                                        <button
+                                            onClick={() => setVariableCurrentPage(Math.ceil(variableTotalCount / variablePageSize) || 1)}
+                                            disabled={variableCurrentPage >= Math.ceil(variableTotalCount / variablePageSize) || loadingVariable}
+                                            className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                        >
+                                            אחרון
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
                         </div>
                     )}
                     {activeTab === 'LOANS' && (
@@ -2608,7 +3536,10 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                         type="text" 
                                         placeholder="חיפוש חוב או ספק..." 
                                         value={debtSearch}
-                                        onChange={e => setDebtSearch(e.target.value)}
+                                        onChange={e => {
+                                            setDebtSearch(e.target.value);
+                                            setDebtsCurrentPage(1); // Reset to first page on search
+                                        }}
                                         className="w-full pl-10 pr-4 py-2 border border-slate-300 rounded-lg focus:ring-purple-500 focus:border-purple-500 text-sm bg-white p-2"
                                     />
                                     <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400">
@@ -2616,12 +3547,12 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                     </div>
                                 </div>
                                 <div className="flex bg-slate-100 p-1 rounded-lg w-full md:w-auto overflow-x-auto">
-                                    <button onClick={() => setDebtStatusFilter('OPEN')} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${debtStatusFilter === 'OPEN' ? 'bg-white text-purple-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>פתוחים</button>
-                                    <button onClick={() => setDebtStatusFilter('OVERDUE')} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${debtStatusFilter === 'OVERDUE' ? 'bg-white text-red-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>באיחור</button>
-                                    <button onClick={() => setDebtStatusFilter('ALL')} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${debtStatusFilter === 'ALL' ? 'bg-white text-slate-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>הכל</button>
-                                    <button onClick={() => setDebtStatusFilter('PAID')} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${debtStatusFilter === 'PAID' ? 'bg-white text-green-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>שולמו</button>
+                                    <button onClick={() => { setDebtStatusFilter('OPEN'); setDebtsCurrentPage(1); }} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${debtStatusFilter === 'OPEN' ? 'bg-white text-purple-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>פתוחים</button>
+                                    <button onClick={() => { setDebtStatusFilter('OVERDUE'); setDebtsCurrentPage(1); }} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${debtStatusFilter === 'OVERDUE' ? 'bg-white text-red-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>באיחור</button>
+                                    <button onClick={() => { setDebtStatusFilter('ALL'); setDebtsCurrentPage(1); }} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${debtStatusFilter === 'ALL' ? 'bg-white text-slate-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>הכל</button>
+                                    <button onClick={() => { setDebtStatusFilter('PAID'); setDebtsCurrentPage(1); }} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${debtStatusFilter === 'PAID' ? 'bg-white text-green-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>שולמו</button>
                                 </div>
-                                <div className="text-xs text-slate-400 font-medium px-2 whitespace-nowrap">מציג {filteredDebts.length} מתוך {debts.length}</div>
+                                <div className="text-xs text-slate-400 font-medium px-2 whitespace-nowrap">מציג {filteredDebts.length} מתוך {debtsTotalCount}</div>
                             </div>
 
                             <div className="border rounded-xl overflow-x-auto bg-white shadow-sm">
@@ -2644,7 +3575,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                                         <td className="px-6 py-5 text-slate-400 font-mono text-center">₪{(debt.gross - net).toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
                                                         <td className="px-6 py-5 font-black text-slate-900 bg-purple-50/10 text-center">₪{debt.gross.toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
                                                         <td className="px-6 py-5 text-center">{debt.isFullyPaid ? <span className="text-green-600 font-black bg-green-50 px-3 py-1 rounded-full border border-green-100 text-xs">שולם</span> : <div className="flex flex-col items-center"><span className="text-red-600 font-black text-lg leading-none">₪{debt.remaining.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>{debt.paid > 0.1 && <span className="text-[10px] text-blue-600 font-bold mt-1">שולם חלקית (₪{debt.paid.toLocaleString()})</span>}</div>}</td>
-                                                        <td className="px-6 py-5 text-left"><div className="flex gap-3 justify-end items-center">{!debt.isFullyPaid && <button onClick={() => { setSelectedDebtForPayment(debt); setIsPaymentModalOpen(true); }} className="text-white bg-purple-600 px-4 py-1.5 rounded-lg font-black text-xs shadow-lg hover:bg-purple-700 transition-all">בצע החזר</button>}<button onClick={() => handleEditDebt(debt)} className="text-slate-300 hover:text-blue-500"><EditIcon className="w-5 h-5"/></button></div></td>
+                                                        <td className="px-6 py-5 text-left"><div className="flex gap-3 justify-end items-center">{!debt.isFullyPaid && <button onClick={() => { setSelectedDebtForPayment(debt); setIsPaymentModalOpen(true); }} className="text-white bg-purple-600 px-4 py-1.5 rounded-lg font-black text-xs shadow-lg hover:bg-purple-700 transition-all">בצע החזר</button>}{((): boolean => { const list = debt.attachments ?? (debt.attachment ? [debt.attachment] : []); return list.length > 0; })() && (() => { const list = debt.attachments ?? (debt.attachment ? [debt.attachment] : []); return (<span className="relative inline-flex"><button onClick={(e) => { e.stopPropagation(); setViewingAttachmentList(list); setViewingAttachmentIndex(0); setViewingLoanDoc(list[0]); }} className="p-2 bg-purple-50 text-purple-600 rounded-lg hover:bg-purple-100 transition-colors" title={list.length > 1 ? `צפה במסמכים (${list.length})` : 'צפה במסמך'}><svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg></button>{list.length > 1 && <span className="absolute -top-0.5 -right-0.5 bg-purple-600 text-white text-[10px] font-black rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1">{list.length}</span>}</span>); })()}<button onClick={() => handleEditDebt(debt)} className="text-slate-300 hover:text-blue-500"><EditIcon className="w-5 h-5"/></button></div></td>
                                                     </tr>
                                                     {isExpanded && debt.payments && debt.payments.length > 0 && (
                                                         <tr className="bg-slate-50/30"><td colSpan={9} className="px-6 py-4"><div className="bg-white rounded border border-slate-200 shadow-inner overflow-hidden"><table className="min-w-full text-xs text-right"><thead className="bg-slate-50 text-slate-500 font-bold uppercase"><tr><th className="px-4 py-2">תאריך</th><th className="px-4 py-2">סכום</th><th className="px-4 py-2">שיטה</th><th className="px-4 py-2">אסמכתא</th><th className="px-4 py-2">סטטוס</th><th className="px-4 py-2">הערה</th><th className="px-4 py-2"></th></tr></thead><tbody className="divide-y divide-slate-100">{debt.payments.map(p => (<tr key={p.id} className="hover:bg-slate-50 group"><td className="px-4 py-2">{new Date(p.date).toLocaleDateString('he-IL')}</td><td className="px-4 py-2 font-bold text-green-700">₪{p.amount.toLocaleString()}</td><td className="px-4 py-2">{p.method}</td><td className="px-4 py-2 font-mono">{p.reference || '-'}</td><td className="px-4 py-2"><button onClick={() => {const agCheck: AggregatedCheck = { uniqueId: p.id, type: 'OUTGOING', date: new Date(p.date), repaymentDate: p.repaymentDate ? new Date(p.repaymentDate) : new Date(p.date), amount: p.amount, reference: p.reference || '-', entityName: `חוב: ${debt.name}`, status: p.status || 'CLEARED', statusHistory: p.statusHistory || [], sources: [{ orderId: 'DEBT', orderNumber: 'DEBT', paymentId: p.id, sourceType: 'debt', debtId: debt.id, amount: p.amount }] }; setSelectedCheckForDebt({ check: agCheck, viewOnly: false });}} className={`px-2 py-0.5 rounded text-[10px] font-bold shadow-sm ${['BOUNCED', 'CANCELED', 'RETURNED'].includes(p.status || '') ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>{p.status === 'CLEARED' ? 'נפרע' : p.status === 'PENDING' ? 'ממתין' : p.status || 'שולם'}</button></td><td className="px-4 py-2 text-slate-500 max-w-xs truncate">{p.note || '-'}</td><td className="px-4 py-2 text-left"><button onClick={() => handleDeleteDebtPayment(debt.id, p.id)} className="text-red-300 hover:text-red-500 p-1 opacity-0 group-hover:opacity-100 transition-opacity"><DeleteIcon className="w-3.5 h-3.5"/></button></td></tr>))}</tbody></table></div></td></tr>
@@ -2655,6 +3586,70 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                     </tbody>
                                 </table>
                             </div>
+                            
+                            {/* Pagination Controls for DEBTS */}
+                            {debtsTotalCount > 0 && (
+                                <div className="mt-4 flex items-center justify-between bg-white px-4 py-3 border-t border-slate-200">
+                                    <div className="flex items-center gap-4">
+                                        <div className="text-sm text-slate-600">
+                                            מציג {((debtsCurrentPage - 1) * debtsPageSize) + 1} - {Math.min(debtsCurrentPage * debtsPageSize, debtsTotalCount)} מתוך {debtsTotalCount} חובות
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                            <label className="text-sm text-slate-600">שורות לעמוד:</label>
+                                            <select 
+                                                value={debtsPageSize} 
+                                                onChange={(e) => {
+                                                    setDebtsPageSize(parseInt(e.target.value));
+                                                    setDebtsCurrentPage(1);
+                                                }}
+                                                className="text-sm border border-slate-300 rounded px-2 py-1 focus:ring-primary focus:border-primary"
+                                            >
+                                                <option value={25}>25</option>
+                                                <option value={50}>50</option>
+                                                <option value={100}>100</option>
+                                                <option value={200}>200</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <button
+                                            onClick={() => setDebtsCurrentPage(1)}
+                                            disabled={debtsCurrentPage === 1 || loadingDebts}
+                                            className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                        >
+                                            ראשון
+                                        </button>
+                                        <button
+                                            onClick={() => setDebtsCurrentPage(prev => Math.max(1, prev - 1))}
+                                            disabled={debtsCurrentPage === 1 || loadingDebts}
+                                            className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                        >
+                                            קודם
+                                        </button>
+                                        <span className="px-3 py-1 text-sm text-slate-600">
+                                            עמוד {debtsCurrentPage} מתוך {Math.ceil(debtsTotalCount / debtsPageSize) || 1}
+                                        </span>
+                                        <button
+                                            onClick={() => setDebtsCurrentPage(prev => Math.min(Math.ceil(debtsTotalCount / debtsPageSize) || 1, prev + 1))}
+                                            disabled={debtsCurrentPage >= Math.ceil(debtsTotalCount / debtsPageSize) || loadingDebts}
+                                            className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                        >
+                                            הבא
+                                        </button>
+                                        <button
+                                            onClick={() => setDebtsCurrentPage(Math.ceil(debtsTotalCount / debtsPageSize) || 1)}
+                                            disabled={debtsCurrentPage >= Math.ceil(debtsTotalCount / debtsPageSize) || loadingDebts}
+                                            className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                        >
+                                            אחרון
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+                            
+                            {loadingDebts && (
+                                <div className="mt-4 text-center text-slate-500 text-sm">טוען...</div>
+                            )}
                         </div>
                     )}
                     {activeTab === 'RECEIVABLES' && (
@@ -2673,7 +3668,10 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                         type="text" 
                                         placeholder="חיפוש חייב..." 
                                         value={receivableSearch}
-                                        onChange={e => setReceivableSearch(e.target.value)}
+                                        onChange={e => {
+                                            setReceivableSearch(e.target.value);
+                                            setReceivablesCurrentPage(1); // Reset to first page on search
+                                        }}
                                         className="w-full pl-10 pr-4 py-2 border border-slate-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 text-sm bg-white p-2"
                                     />
                                     <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400">
@@ -2681,10 +3679,10 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                     </div>
                                 </div>
                                 <div className="flex bg-slate-100 p-1 rounded-lg w-full md:w-auto overflow-x-auto">
-                                    <button onClick={() => setReceivableStatusFilter('OPEN')} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${receivableStatusFilter === 'OPEN' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>פתוחים</button>
-                                    <button onClick={() => setReceivableStatusFilter('OVERDUE')} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${receivableStatusFilter === 'OVERDUE' ? 'bg-white text-red-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>בפיגור</button>
-                                    <button onClick={() => setReceivableStatusFilter('ALL')} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${receivableStatusFilter === 'ALL' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>הכל</button>
-                                    <button onClick={() => setReceivableStatusFilter('PAID')} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${receivableStatusFilter === 'PAID' ? 'bg-white text-green-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>נגבו</button>
+                                    <button onClick={() => { setReceivableStatusFilter('OPEN'); setReceivablesCurrentPage(1); }} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${receivableStatusFilter === 'OPEN' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>פתוחים</button>
+                                    <button onClick={() => { setReceivableStatusFilter('OVERDUE'); setReceivablesCurrentPage(1); }} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${receivableStatusFilter === 'OVERDUE' ? 'bg-white text-red-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>בפיגור</button>
+                                    <button onClick={() => { setReceivableStatusFilter('ALL'); setReceivablesCurrentPage(1); }} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${receivableStatusFilter === 'ALL' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>הכל</button>
+                                    <button onClick={() => { setReceivableStatusFilter('PAID'); setReceivablesCurrentPage(1); }} className={`flex-1 md:flex-none px-4 py-1.5 rounded-md text-xs font-bold transition-all whitespace-nowrap ${receivableStatusFilter === 'PAID' ? 'bg-white text-green-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>נגבו</button>
                                 </div>
                             </div>
 
@@ -2705,7 +3703,7 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                                         <td className="px-6 py-5 text-slate-500 font-medium text-center"><span className={rec.isOverdue ? 'text-red-600 font-bold' : ''}>{new Date(rec.dueDate).toLocaleDateString('he-IL')}</span></td>
                                                         <td className="px-6 py-5 font-black text-slate-900 text-center">₪{rec.gross.toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
                                                         <td className="px-6 py-5 text-center">{rec.isFullyPaid ? <span className="text-green-600 font-black bg-green-50 px-3 py-1 rounded-full border border-green-100 text-xs">נגבה במלואו</span> : <div className="flex flex-col items-center"><span className="text-indigo-600 font-black text-lg leading-none">₪{rec.remaining.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>{rec.collected > 0.1 && <span className="text-[10px] text-green-600 font-bold mt-1">נגבה חלקית (₪{rec.collected.toLocaleString()})</span>}</div>}</td>
-                                                        <td className="px-6 py-5 text-left"><div className="flex gap-3 justify-end items-center">{!rec.isFullyPaid && <button onClick={() => { setSelectedReceivableForCollection(rec); setIsPaymentModalOpen(true); }} className="text-white bg-indigo-600 px-4 py-1.5 rounded-lg font-black text-xs shadow-lg hover:bg-indigo-700 transition-all">דווח גבייה</button>}<button onClick={() => handleEditReceivable(rec)} className="text-slate-300 hover:text-blue-500"><EditIcon className="w-5 h-5"/></button></div></td>
+                                                        <td className="px-6 py-5 text-left"><div className="flex gap-3 justify-end items-center">{!rec.isFullyPaid && <button onClick={() => { setSelectedReceivableForCollection(rec); setIsPaymentModalOpen(true); }} className="text-white bg-indigo-600 px-4 py-1.5 rounded-lg font-black text-xs shadow-lg hover:bg-indigo-700 transition-all">דווח גבייה</button>}{(rec.attachments?.length ?? 0) > 0 && (() => { const list = rec.attachments ?? []; return (<span className="relative inline-flex"><button onClick={(e) => { e.stopPropagation(); setViewingAttachmentList(list); setViewingAttachmentIndex(0); setViewingLoanDoc(list[0]); }} className="p-2 bg-indigo-50 text-indigo-600 rounded-lg hover:bg-indigo-100 transition-colors" title={list.length > 1 ? `צפה במסמכים (${list.length})` : 'צפה במסמך'}><svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg></button>{list.length > 1 && <span className="absolute -top-0.5 -right-0.5 bg-indigo-600 text-white text-[10px] font-black rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1">{list.length}</span>}</span>); })()}<button onClick={() => handleEditReceivable(rec)} className="text-slate-300 hover:text-blue-500"><EditIcon className="w-5 h-5"/></button></div></td>
                                                     </tr>
                                                     {isExpanded && rec.payments && rec.payments.length > 0 && (
                                                         <tr className="bg-slate-50/30"><td colSpan={7} className="px-6 py-4"><div className="bg-white rounded border border-slate-200 shadow-inner overflow-hidden"><table className="min-w-full text-xs text-right"><thead className="bg-slate-50 text-slate-500 font-bold uppercase"><tr><th className="px-4 py-2">תאריך קבלה</th><th className="px-4 py-2">סכום</th><th className="px-4 py-2">שיטה</th><th className="px-4 py-2">אסמכתא</th><th className="px-4 py-2">סטטוס</th><th className="px-4 py-2"></th></tr></thead><tbody className="divide-y divide-slate-100">{rec.payments.map(p => (<tr key={p.id} className="hover:bg-slate-50 group"><td className="px-4 py-2">{new Date(p.date).toLocaleDateString('he-IL')}</td><td className="px-4 py-2 font-bold text-green-700">₪{p.amount.toLocaleString()}</td><td className="px-4 py-2">{p.method}</td><td className="px-4 py-2 font-mono">{p.reference || '-'}</td><td className="px-4 py-2"><span className={`px-2 py-0.5 rounded text-[10px] font-bold shadow-sm ${['BOUNCED', 'CANCELED', 'RETURNED'].includes(p.status || '') ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>{p.status === 'CLEARED' ? 'תקין' : p.status === 'PENDING' ? 'ממתין' : p.status || 'נגבה'}</span></td><td className="px-4 py-2 text-left"><button onClick={() => handleDeleteReceivablePayment(rec.id, p.id)} className="text-red-300 hover:text-red-500 p-1 opacity-0 group-hover:opacity-100 transition-opacity"><DeleteIcon className="w-3.5 h-3.5"/></button></td></tr>))}</tbody></table></div></td></tr>
@@ -2719,6 +3717,70 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                     </tbody>
                                 </table>
                             </div>
+                            
+                            {/* Pagination Controls for RECEIVABLES */}
+                            {receivablesTotalCount > 0 && (
+                                <div className="mt-4 flex items-center justify-between bg-white px-4 py-3 border-t border-slate-200">
+                                    <div className="flex items-center gap-4">
+                                        <div className="text-sm text-slate-600">
+                                            מציג {((receivablesCurrentPage - 1) * receivablesPageSize) + 1} - {Math.min(receivablesCurrentPage * receivablesPageSize, receivablesTotalCount)} מתוך {receivablesTotalCount} חייבים
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                            <label className="text-sm text-slate-600">שורות לעמוד:</label>
+                                            <select 
+                                                value={receivablesPageSize} 
+                                                onChange={(e) => {
+                                                    setReceivablesPageSize(parseInt(e.target.value));
+                                                    setReceivablesCurrentPage(1);
+                                                }}
+                                                className="text-sm border border-slate-300 rounded px-2 py-1 focus:ring-primary focus:border-primary"
+                                            >
+                                                <option value={25}>25</option>
+                                                <option value={50}>50</option>
+                                                <option value={100}>100</option>
+                                                <option value={200}>200</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <button
+                                            onClick={() => setReceivablesCurrentPage(1)}
+                                            disabled={receivablesCurrentPage === 1 || loadingReceivables}
+                                            className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                        >
+                                            ראשון
+                                        </button>
+                                        <button
+                                            onClick={() => setReceivablesCurrentPage(prev => Math.max(1, prev - 1))}
+                                            disabled={receivablesCurrentPage === 1 || loadingReceivables}
+                                            className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                        >
+                                            קודם
+                                        </button>
+                                        <span className="px-3 py-1 text-sm text-slate-600">
+                                            עמוד {receivablesCurrentPage} מתוך {Math.ceil(receivablesTotalCount / receivablesPageSize) || 1}
+                                        </span>
+                                        <button
+                                            onClick={() => setReceivablesCurrentPage(prev => Math.min(Math.ceil(receivablesTotalCount / receivablesPageSize) || 1, prev + 1))}
+                                            disabled={receivablesCurrentPage >= Math.ceil(receivablesTotalCount / receivablesPageSize) || loadingReceivables}
+                                            className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                        >
+                                            הבא
+                                        </button>
+                                        <button
+                                            onClick={() => setReceivablesCurrentPage(Math.ceil(receivablesTotalCount / receivablesPageSize) || 1)}
+                                            disabled={receivablesCurrentPage >= Math.ceil(receivablesTotalCount / receivablesPageSize) || loadingReceivables}
+                                            className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                        >
+                                            אחרון
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+                            
+                            {loadingReceivables && (
+                                <div className="mt-4 text-center text-slate-500 text-sm">טוען...</div>
+                            )}
                         </div>
                     )}
                     {activeTab === 'EQUITY' && (
@@ -2780,26 +3842,56 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                 <div><label className="block text-sm font-bold text-slate-700 mb-1">יום חיוב (1-31)</label><input type="number" min="1" max="31" value={fixedForm.paymentDay || ''} onChange={e => setFixedForm({...fixedForm, paymentDay: parseInt(e.target.value)})} className="block w-full border-slate-300 rounded-md shadow-sm focus:ring-primary focus:border-primary sm:text-sm p-2 bg-white" /></div>
                                 <div><label className="block text-sm font-bold text-slate-700 mb-1">סכום חודשי (נטו)</label><input type="number" value={fixedForm.monthlyAmount || ''} onChange={e => setFixedForm({...fixedForm, monthlyAmount: parseFloat(e.target.value)})} className="block w-full border-slate-300 rounded-md shadow-sm focus:ring-primary focus:border-primary sm:text-sm p-2 bg-white" /></div>
                                 <div className="grid grid-cols-2 gap-2 mt-4"><label className="flex items-center gap-2 cursor-pointer bg-slate-50 p-2 rounded border border-slate-200"><input type="checkbox" checked={fixedForm.includesVat} onChange={e => setFixedForm({...fixedForm, includesVat: e.target.checked})} className="h-4 w-4 text-primary border-gray-300 rounded focus:ring-primary" disabled={fixedForm.isVatExempt} /><span className={`text-sm font-bold ${fixedForm.isVatExempt ? 'text-slate-400' : 'text-slate-700'}`}>הסכום שהוזן כולל מע"מ</span></label><label className="flex items-center gap-2 cursor-pointer bg-amber-50 p-2 rounded border border-amber-200"><input type="checkbox" checked={fixedForm.isVatExempt} onChange={e => setFixedForm({...fixedForm, isVatExempt: e.target.checked})} className="h-4 w-4 text-amber-600 border-amber-300 rounded focus:ring-amber-500" /><span className="text-sm font-bold text-amber-800">הוצאה פטורה ממע"מ</span></label></div>
-                                <div><label className="block text-sm font-bold text-slate-700 mb-1">אמצעי תשלום</label><select value={fixedForm.paymentMethod} onChange={e => setFixedForm({...fixedForm, paymentMethod: e.target.value as PaymentMethod})} className="block w-full border-slate-300 rounded-md shadow-sm focus:ring-primary focus:border-primary sm:text-sm bg-white p-2">{Object.values(PaymentMethod).map(m => <option key={m} value={m}>{m}</option>)}</select></div>
+                                <div><label className="block text-sm font-bold text-slate-700 mb-1">אמצעי תשלום</label><select value={fixedForm.paymentMethod} onChange={e => {
+                                    const newMethod = e.target.value as PaymentMethod;
+                                    const wasInstallment = fixedForm.paymentMethod === PaymentMethod.CHECK || fixedForm.paymentMethod === PaymentMethod.CREDIT_CARD;
+                                    const isInstallment = newMethod === PaymentMethod.CHECK || newMethod === PaymentMethod.CREDIT_CARD;
+                                    let newChecks = fixedForm.checks;
+                                    if (wasInstallment && !isInstallment) { newChecks = []; setFixedCreditCardMode('single'); }
+                                    else if (wasInstallment && isInstallment && newMethod !== fixedForm.paymentMethod && fixedForm.checks?.length) {
+                                        newChecks = fixedForm.checks.map(c => ({ ...c, method: newMethod }));
+                                        if (newMethod === PaymentMethod.CREDIT_CARD) setFixedCreditCardMode('installment');
+                                    } else if (newMethod === PaymentMethod.CREDIT_CARD) setFixedCreditCardMode('single');
+                                    setFixedForm({ ...fixedForm, paymentMethod: newMethod, checks: newChecks || [] });
+                                }} className="block w-full border-slate-300 rounded-md shadow-sm focus:ring-primary focus:border-primary sm:text-sm bg-white p-2">{Object.values(PaymentMethod).map(m => <option key={m} value={m}>{m}</option>)}</select></div>
                                 <div><label className="block text-sm font-bold text-slate-700 mb-1">פרטי תשלום (כרטיס/חשבון)</label><input type="text" value={fixedForm.paymentDetails || ''} onChange={e => setFixedForm({...fixedForm, paymentDetails: e.target.value})} className="block w-full border-slate-300 rounded-md shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" placeholder="ויזה 1234, חשבון בנק..." /></div>
-                                {fixedForm.paymentMethod === PaymentMethod.CHECK && (
+                                {fixedForm.paymentMethod === PaymentMethod.CREDIT_CARD && (
+                                    <div className="md:col-span-2 mt-4">
+                                        <label className="block text-[10px] font-bold text-slate-500 uppercase mb-2">סוג תשלום</label>
+                                        <div className="flex gap-4">
+                                            <label className="flex items-center gap-2 cursor-pointer">
+                                                <input type="radio" name="fixedCreditCardMode" checked={fixedCreditCardMode === 'single'} onChange={() => { setFixedCreditCardMode('single'); setFixedForm({ ...fixedForm, checks: [] }); }} className="text-primary" />
+                                                <span className="text-sm font-bold text-slate-700">תשלום בודד</span>
+                                            </label>
+                                            <label className="flex items-center gap-2 cursor-pointer">
+                                                <input type="radio" name="fixedCreditCardMode" checked={fixedCreditCardMode === 'installment'} onChange={() => setFixedCreditCardMode('installment')} className="text-primary" />
+                                                <span className="text-sm font-bold text-slate-700">תשלומים בפריסה</span>
+                                            </label>
+                                        </div>
+                                    </div>
+                                )}
+                                {(fixedForm.paymentMethod === PaymentMethod.CHECK || (fixedForm.paymentMethod === PaymentMethod.CREDIT_CARD && fixedCreditCardMode === 'installment')) && (
                                     <div className="md:col-span-2 mt-4 space-y-4">
-                                        <CheckSeriesGenerator initialAmount={fixedForm.isVatExempt ? (fixedForm.monthlyAmount || 0) : (fixedForm.includesVat ? (fixedForm.monthlyAmount || 0) : (fixedForm.monthlyAmount || 0) * (1 + vatRate / 100))} onGenerated={(checks) => setFixedForm({ ...fixedForm, checks: [...(fixedForm.checks || []), ...checks] })} />
+                                        <InstallmentSeriesGenerator
+                                            initialAmount={fixedForm.isVatExempt ? (fixedForm.monthlyAmount || 0) : (fixedForm.includesVat ? (fixedForm.monthlyAmount || 0) : (fixedForm.monthlyAmount || 0) * (1 + vatRate / 100))}
+                                            method={fixedForm.paymentMethod as PaymentMethod.CHECK | typeof PaymentMethod.CREDIT_CARD}
+                                            onGenerated={(payments) => setFixedForm({ ...fixedForm, checks: [...(fixedForm.checks || []), ...payments] })}
+                                        />
                                         {fixedForm.checks && fixedForm.checks.length > 0 && (
                                             <div className="bg-slate-50 border border-slate-200 rounded-lg p-4">
-                                                <div className="flex justify-between items-center mb-3"><h4 className="text-sm font-bold text-slate-700">עריכת רשימת צ'קים ({fixedForm.checks.length})</h4><button type="button" onClick={() => setFixedForm({ ...fixedForm, checks: [] })} className="text-[10px] text-red-500 font-bold hover:underline">נקה הכל</button></div>
+                                                <div className="flex justify-between items-center mb-3"><h4 className="text-sm font-bold text-slate-700">{fixedForm.paymentMethod === PaymentMethod.CHECK ? 'עריכת רשימת צ\'קים' : 'עריכת פריסת תשלומים'} ({fixedForm.checks.length})</h4><button type="button" onClick={() => setFixedForm({ ...fixedForm, checks: [] })} className="text-[10px] text-red-500 font-bold hover:underline">נקה הכל</button></div>
                                                 <div className="max-h-60 overflow-y-auto space-y-2 custom-scrollbar pe-2">
                                                     {fixedForm.checks.map((c, i) => (
                                                         <div key={c.id || i} className="grid grid-cols-12 gap-2 items-center bg-white p-2 rounded shadow-sm border border-slate-100 group">
                                                             <div className="col-span-1 text-[10px] font-bold text-slate-400">#{i+1}</div>
-                                                            <div className="col-span-3"><label className="text-[9px] text-slate-400 block">מספר צ'ק</label><input type="text" value={c.reference} onChange={(e) => handleUpdateFixedFormCheck(i, 'reference', e.target.value)} className="w-full text-xs p-1 border border-slate-300 rounded" /></div>
+                                                            <div className="col-span-3"><label className="text-[9px] text-slate-400 block">{fixedForm.paymentMethod === PaymentMethod.CHECK ? 'מספר צ\'ק' : '4 ספרות'}</label><input type="text" value={c.reference || ''} onChange={(e) => handleUpdateFixedFormCheck(i, 'reference', e.target.value)} className="w-full text-xs p-1 border border-slate-300 rounded" placeholder={fixedForm.paymentMethod === PaymentMethod.CREDIT_CARD ? '1234' : undefined} /></div>
                                                             <div className="col-span-3"><label className="text-[9px] text-slate-400 block">סכום</label><input type="number" value={c.amount} onChange={(e) => handleUpdateFixedFormCheck(i, 'amount', e.target.value)} className="w-full text-xs p-1 border border-slate-300 rounded font-bold text-indigo-600" /></div>
-                                                            <div className="col-span-4"><label className="text-[9px] text-slate-400 block">תאריך פירעון</label><input type="date" value={c.repaymentDate ? new Date(c.repaymentDate).toISOString().split('T')[0] : ''} onChange={(e) => handleUpdateFixedFormCheck(i, 'repaymentDate', e.target.value)} className="w-full text-xs p-1 border border-slate-300 rounded" /></div>
+                                                            <div className="col-span-4"><label className="text-[9px] text-slate-400 block">{fixedForm.paymentMethod === PaymentMethod.CHECK ? 'תאריך פירעון' : 'תאריך חיוב'}</label><input type="date" value={c.repaymentDate ? new Date(c.repaymentDate).toISOString().split('T')[0] : ''} onChange={(e) => handleUpdateFixedFormCheck(i, 'repaymentDate', e.target.value)} className="w-full text-xs p-1 border border-slate-300 rounded" /></div>
                                                             <div className="col-span-1 text-center"><button type="button" onClick={() => handleRemoveCheckFromFixedForm(i)} className="text-red-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"><DeleteIcon className="w-4 h-4"/></button></div>
                                                         </div>
                                                     ))}
                                                 </div>
-                                                <button type="button" onClick={() => setFixedForm({ ...fixedForm, checks: [...(fixedForm.checks || []), { id: `sp_fix_${Date.now()}`, amount: fixedForm.monthlyAmount || 0, date: new Date(), repaymentDate: new Date(), method: PaymentMethod.CHECK, reference: '', status: 'PENDING' }] })} className="w-full mt-3 py-1.5 border border-dashed border-indigo-300 text-indigo-600 text-xs font-bold rounded hover:bg-indigo-50 transition-colors">+ הוסף צ'ק בודד לרשימה</button>
+                                                <button type="button" onClick={() => setFixedForm({ ...fixedForm, checks: [...(fixedForm.checks || []), { id: `sp_fix_${Date.now()}`, amount: fixedForm.monthlyAmount || 0, date: new Date(), repaymentDate: new Date(), method: fixedForm.paymentMethod as PaymentMethod, reference: '', status: 'PENDING' }] })} className="w-full mt-3 py-1.5 border border-dashed border-indigo-300 text-indigo-600 text-xs font-bold rounded hover:bg-indigo-50 transition-colors">+ הוסף תשלום בודד לרשימה</button>
                                             </div>
                                         )}
                                     </div>
@@ -2816,26 +3908,56 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                 <div><label className="block text-sm font-bold text-slate-700 mb-1">תאריך</label><input type="date" value={variableForm.date ? new Date(variableForm.date).toISOString().split('T')[0] : ''} onChange={e => setVariableForm({...variableForm, date: new Date(e.target.value)})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
                                 <div><label className="block text-sm font-bold text-slate-700 mb-1">סכום (נטו)</label><input type="number" value={variableForm.amount || ''} onChange={e => setVariableForm({...variableForm, amount: parseFloat(e.target.value)})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
                                 <div className="grid grid-cols-2 gap-2 mt-4"><label className="flex items-center gap-2 cursor-pointer bg-slate-50 p-2 rounded border border-slate-200"><input type="checkbox" checked={variableForm.includesVat} onChange={e => setVariableForm({...variableForm, includesVat: e.target.checked})} className="h-4 w-4 text-primary border-gray-300 rounded focus:ring-primary" disabled={variableForm.isVatExempt} /><span className={`text-sm font-bold ${variableForm.isVatExempt ? 'text-slate-400' : 'text-slate-700'}`}>הסכום שהוזן כולל מע"מ</span></label><label className="flex items-center gap-2 cursor-pointer bg-amber-50 p-2 rounded border border-amber-200"><input type="checkbox" checked={variableForm.isVatExempt} onChange={e => setVariableForm({...variableForm, isVatExempt: e.target.checked})} className="h-4 w-4 text-amber-600 border-amber-300 rounded focus:ring-amber-500" /><span className="text-sm font-bold text-amber-800">הוצאה פטורה ממע"מ</span></label></div>
-                                <div><label className="block text-sm font-bold text-slate-700 mb-1">אמצעי תשלום</label><select value={variableForm.paymentMethod} onChange={e => setVariableForm({...variableForm, paymentMethod: e.target.value as PaymentMethod})} className="mt-1 block w-full border-slate-300 rounded-md shadow-sm focus:border-primary focus:ring-primary sm:text-sm bg-white p-2">{Object.values(PaymentMethod).map(m => <option key={m} value={m}>{m}</option>)}</select></div>
+                                <div><label className="block text-sm font-bold text-slate-700 mb-1">אמצעי תשלום</label><select value={variableForm.paymentMethod} onChange={e => {
+                                    const newMethod = e.target.value as PaymentMethod;
+                                    const wasInstallment = variableForm.paymentMethod === PaymentMethod.CHECK || variableForm.paymentMethod === PaymentMethod.CREDIT_CARD;
+                                    const isInstallment = newMethod === PaymentMethod.CHECK || newMethod === PaymentMethod.CREDIT_CARD;
+                                    let newChecks = variableForm.checks;
+                                    if (wasInstallment && !isInstallment) { newChecks = []; setVariableCreditCardMode('single'); }
+                                    else if (wasInstallment && isInstallment && newMethod !== variableForm.paymentMethod && variableForm.checks?.length) {
+                                        newChecks = variableForm.checks.map(c => ({ ...c, method: newMethod }));
+                                        if (newMethod === PaymentMethod.CREDIT_CARD) setVariableCreditCardMode('installment');
+                                    } else if (newMethod === PaymentMethod.CREDIT_CARD) setVariableCreditCardMode('single');
+                                    setVariableForm({ ...variableForm, paymentMethod: newMethod, checks: newChecks || [] });
+                                }} className="mt-1 block w-full border-slate-300 rounded-md shadow-sm focus:border-primary focus:ring-primary sm:text-sm bg-white p-2">{Object.values(PaymentMethod).map(m => <option key={m} value={m}>{m}</option>)}</select></div>
                                 <div><label className="block text-sm font-bold text-slate-700 mb-1">פרטי תשלום (כרטיס/חשבון)</label><input type="text" value={variableForm.paymentDetails || ''} onChange={e => setVariableForm({...variableForm, paymentDetails: e.target.value})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" placeholder="ויזה 1234, חשבון בנק..." /></div>
-                                {variableForm.paymentMethod === PaymentMethod.CHECK && (
+                                {variableForm.paymentMethod === PaymentMethod.CREDIT_CARD && (
+                                    <div className="md:col-span-2 mt-4">
+                                        <label className="block text-[10px] font-bold text-slate-500 uppercase mb-2">סוג תשלום</label>
+                                        <div className="flex gap-4">
+                                            <label className="flex items-center gap-2 cursor-pointer">
+                                                <input type="radio" name="variableCreditCardMode" checked={variableCreditCardMode === 'single'} onChange={() => { setVariableCreditCardMode('single'); setVariableForm({ ...variableForm, checks: [] }); }} className="text-primary" />
+                                                <span className="text-sm font-bold text-slate-700">תשלום בודד</span>
+                                            </label>
+                                            <label className="flex items-center gap-2 cursor-pointer">
+                                                <input type="radio" name="variableCreditCardMode" checked={variableCreditCardMode === 'installment'} onChange={() => setVariableCreditCardMode('installment')} className="text-primary" />
+                                                <span className="text-sm font-bold text-slate-700">תשלומים בפריסה</span>
+                                            </label>
+                                        </div>
+                                    </div>
+                                )}
+                                {(variableForm.paymentMethod === PaymentMethod.CHECK || (variableForm.paymentMethod === PaymentMethod.CREDIT_CARD && variableCreditCardMode === 'installment')) && (
                                     <div className="md:col-span-2 mt-4 space-y-4">
-                                        <CheckSeriesGenerator initialAmount={variableForm.isVatExempt ? (variableForm.amount || 0) : (variableForm.includesVat ? (variableForm.amount || 0) : (variableForm.amount || 0) * (1 + vatRate / 100))} onGenerated={(checks) => setVariableForm({ ...variableForm, checks: [...(variableForm.checks || []), ...checks] })} />
+                                        <InstallmentSeriesGenerator
+                                            initialAmount={variableForm.isVatExempt ? (variableForm.amount || 0) : (variableForm.includesVat ? (variableForm.amount || 0) : (variableForm.amount || 0) * (1 + vatRate / 100))}
+                                            method={variableForm.paymentMethod as PaymentMethod.CHECK | typeof PaymentMethod.CREDIT_CARD}
+                                            onGenerated={(payments) => setVariableForm({ ...variableForm, checks: [...(variableForm.checks || []), ...payments] })}
+                                        />
                                         {variableForm.checks && variableForm.checks.length > 0 && (
                                             <div className="bg-slate-50 border border-slate-200 rounded-lg p-4">
-                                                <div className="flex justify-between items-center mb-3"><h4 className="text-sm font-bold text-slate-700">עריכת רשימת צ'קים ({variableForm.checks.length})</h4><button type="button" onClick={() => setVariableForm({ ...variableForm, checks: [] })} className="text-[10px] text-red-500 font-bold hover:underline">נקה הכל</button></div>
+                                                <div className="flex justify-between items-center mb-3"><h4 className="text-sm font-bold text-slate-700">{variableForm.paymentMethod === PaymentMethod.CHECK ? 'עריכת רשימת צ\'קים' : 'עריכת פריסת תשלומים'} ({variableForm.checks.length})</h4><button type="button" onClick={() => setVariableForm({ ...variableForm, checks: [] })} className="text-[10px] text-red-500 font-bold hover:underline">נקה הכל</button></div>
                                                 <div className="max-h-60 overflow-y-auto space-y-2 custom-scrollbar pe-2">
                                                     {variableForm.checks.map((c, i) => (
                                                         <div key={c.id || i} className="grid grid-cols-12 gap-2 items-center bg-white p-2 rounded shadow-sm border border-slate-100 group">
                                                             <div className="col-span-1 text-[10px] font-bold text-slate-400">#{i+1}</div>
-                                                            <div className="col-span-3"><label className="text-[9px] text-slate-400 block">מספר צ'ק</label><input type="text" value={c.reference} onChange={(e) => handleUpdateVariableFormCheck(i, 'reference', e.target.value)} className="w-full text-xs p-1 border border-slate-300 rounded" /></div>
+                                                            <div className="col-span-3"><label className="text-[9px] text-slate-400 block">{variableForm.paymentMethod === PaymentMethod.CHECK ? 'מספר צ\'ק' : '4 ספרות'}</label><input type="text" value={c.reference || ''} onChange={(e) => handleUpdateVariableFormCheck(i, 'reference', e.target.value)} className="w-full text-xs p-1 border border-slate-300 rounded" placeholder={variableForm.paymentMethod === PaymentMethod.CREDIT_CARD ? '1234' : undefined} /></div>
                                                             <div className="col-span-3"><label className="text-[9px] text-slate-400 block">סכום</label><input type="number" value={c.amount} onChange={(e) => handleUpdateVariableFormCheck(i, 'amount', e.target.value)} className="w-full text-xs p-1 border border-slate-300 rounded font-bold text-indigo-600" /></div>
-                                                            <div className="col-span-4"><label className="text-[9px] text-slate-400 block">תאריך פירעון</label><input type="date" value={c.repaymentDate ? new Date(c.repaymentDate).toISOString().split('T')[0] : ''} onChange={(e) => handleUpdateVariableFormCheck(i, 'repaymentDate', e.target.value)} className="w-full text-xs p-1 border border-slate-300 rounded" /></div>
+                                                            <div className="col-span-4"><label className="text-[9px] text-slate-400 block">{variableForm.paymentMethod === PaymentMethod.CHECK ? 'תאריך פירעון' : 'תאריך חיוב'}</label><input type="date" value={c.repaymentDate ? new Date(c.repaymentDate).toISOString().split('T')[0] : ''} onChange={(e) => handleUpdateVariableFormCheck(i, 'repaymentDate', e.target.value)} className="w-full text-xs p-1 border border-slate-300 rounded" /></div>
                                                             <div className="col-span-1 text-center"><button type="button" onClick={() => handleRemoveCheckFromVariableForm(i)} className="text-red-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"><DeleteIcon className="w-4 h-4"/></button></div>
                                                         </div>
                                                     ))}
                                                 </div>
-                                                <button type="button" onClick={() => setVariableForm({ ...variableForm, checks: [...(variableForm.checks || []), { id: `sp_var_${Date.now()}`, amount: variableForm.amount || 0, date: new Date(), repaymentDate: new Date(), method: PaymentMethod.CHECK, reference: '', status: 'PENDING' }] })} className="w-full mt-3 py-1.5 border border-dashed border-indigo-300 text-indigo-600 text-xs font-bold rounded hover:bg-indigo-50 transition-colors">+ הוסף צ'ק בודד לרשימה</button>
+                                                <button type="button" onClick={() => setVariableForm({ ...variableForm, checks: [...(variableForm.checks || []), { id: `sp_var_${Date.now()}`, amount: variableForm.amount || 0, date: new Date(), repaymentDate: new Date(), method: variableForm.paymentMethod as PaymentMethod, reference: '', status: 'PENDING' }] })} className="w-full mt-3 py-1.5 border border-dashed border-indigo-300 text-indigo-600 text-xs font-bold rounded hover:bg-indigo-50 transition-colors">+ הוסף תשלום בודד לרשימה</button>
                                             </div>
                                         )}
                                     </div>
@@ -2911,7 +4033,11 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                                 </div>
                                                 <div className="flex gap-2 shrink-0">
                                                     <button type="button" onClick={() => setViewingLoanDoc(loanForm.amortizationFile!)} className="text-[10px] bg-white border border-indigo-200 px-2 py-1 rounded font-bold text-indigo-600 hover:bg-indigo-100">צפה</button>
-                                                    <button type="button" onClick={() => setLoanForm({...loanForm, amortizationFile: undefined})} className="text-[10px] text-red-500 font-bold px-2 py-1 hover:bg-red-50 rounded">הסר</button>
+                                                    <button type="button" onClick={() => {
+                                                        if (window.confirm(`האם אתה בטוח שברצונך להסיר את הקובץ "${loanForm.amortizationFile?.fileName || 'קובץ'}"?`)) {
+                                                            setLoanForm({...loanForm, amortizationFile: undefined});
+                                                        }
+                                                    }} className="text-[10px] text-red-500 font-bold px-2 py-1 hover:bg-red-50 rounded">הסר</button>
                                                 </div>
                                             </div>
                                         )}
@@ -2932,6 +4058,28 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                 <div><label className="block text-sm font-bold text-slate-700 mb-1">סכום הקרן (נטו)</label><input type="number" value={debtForm.amount || ''} onChange={e => setDebtForm({...debtForm, amount: parseFloat(e.target.value)})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
                                 <div className="grid grid-cols-2 gap-2 mt-4"><label className="flex items-center gap-2 cursor-pointer bg-slate-50 p-2 rounded border border-slate-200"><input type="checkbox" checked={debtForm.includesVat ?? true} onChange={e => setDebtForm({...debtForm, includesVat: e.target.checked})} className="h-4 w-4 text-primary border-gray-300 rounded focus:ring-primary" disabled={debtForm.isVatExempt} /><span className={`text-sm font-bold ${debtForm.isVatExempt ? 'text-slate-400' : 'text-slate-700'}`}>הסכום שהוזן כולל מע"מ</span></label><label className="flex items-center gap-2 cursor-pointer bg-amber-50 p-2 rounded border border-amber-200"><input type="checkbox" checked={debtForm.isVatExempt} onChange={e => setDebtForm({...debtForm, isVatExempt: e.target.checked})} className="h-4 w-4 text-amber-600 border-amber-300 rounded focus:ring-amber-500" /><span className="text-sm font-bold text-amber-800">הוצאה פטורה ממע"מ</span></label></div>
                                 <div className="md:col-span-2"><label className="block text-sm font-bold text-slate-700 mb-1">תיאור / הערות</label><textarea value={debtForm.description || ''} onChange={e => setDebtForm({...debtForm, description: e.target.value})} rows={2} className="block w-full border-slate-300 rounded-md shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
+                                <div className="md:col-span-2">
+                                    <label className="block text-sm font-bold text-slate-700 mb-1">תמונות / קבצים מצורפים לחוב</label>
+                                    <input type="file" multiple onChange={handleDebtFileChange} accept="image/*,.pdf,.doc,.docx,.xls,.xlsx" className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-purple-50 file:text-purple-700 hover:file:bg-purple-100" />
+                                    <p className="text-[10px] text-slate-400 mt-1">ניתן לבחור מספר קבצים. תמונות, PDF וקבצי Office</p>
+                                    {((debtForm.attachments?.length ?? 0) + (debtForm.attachment ? 1 : 0)) > 0 && (
+                                        <ul className="mt-2 space-y-1.5 max-h-40 overflow-y-auto">
+                                            {(debtForm.attachments ?? (debtForm.attachment ? [debtForm.attachment] : [])).map((att, idx) => (
+                                                <li key={att.id} className="flex items-center justify-between p-2 bg-purple-50 border border-purple-200 rounded-lg">
+                                                    <span className="text-xs font-bold text-purple-700 truncate flex-1 min-w-0">{att.fileName}</span>
+                                                    <div className="flex gap-2 shrink-0">
+                                                        <button type="button" onClick={() => { setViewingLoanDoc(att); setViewingAttachmentList(null); }} className="text-[10px] bg-white border border-purple-200 px-2 py-1 rounded font-bold text-purple-600 hover:bg-purple-100">צפה</button>
+                                                        <button type="button" onClick={() => {
+                                                            const list = debtForm.attachments ?? (debtForm.attachment ? [debtForm.attachment] : []);
+                                                            const next = list.filter((_, i) => i !== idx);
+                                                            setDebtForm({ ...debtForm, attachments: next, attachment: undefined });
+                                                        }} className="text-[10px] text-red-500 font-bold px-2 py-1 hover:bg-red-50 rounded">הסר</button>
+                                                    </div>
+                                                </li>
+                                            ))}
+                                        </ul>
+                                    )}
+                                </div>
                             </div>
                         )}
                         {activeTab === 'RECEIVABLES' && (
@@ -2942,6 +4090,27 @@ const FinancePage: React.FC<FinancePageProps> = ({
                                 <div><label className="block text-sm font-bold text-slate-700 mb-1">סכום החוב (נטו)</label><input type="number" value={receivableForm.amount || ''} onChange={e => setReceivableForm({...receivableForm, amount: parseFloat(e.target.value)})} className="mt-1 block w-full rounded-md border-slate-300 shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
                                 <div className="grid grid-cols-2 gap-2 mt-4"><label className="flex items-center gap-2 cursor-pointer bg-slate-50 p-2 rounded border border-slate-200"><input type="checkbox" checked={receivableForm.includesVat ?? true} onChange={e => setReceivableForm({...receivableForm, includesVat: e.target.checked})} className="h-4 w-4 text-primary border-gray-300 rounded focus:ring-primary" disabled={receivableForm.isVatExempt} /><span className={`text-sm font-bold ${receivableForm.isVatExempt ? 'text-slate-400' : 'text-slate-700'}`}>הסכום שהוזן כולל מע"מ</span></label><label className="flex items-center gap-2 cursor-pointer bg-amber-50 p-2 rounded border border-amber-200"><input type="checkbox" checked={receivableForm.isVatExempt} onChange={e => setReceivableForm({...receivableForm, isVatExempt: e.target.checked})} className="h-4 w-4 text-amber-600 border-amber-300 rounded focus:ring-amber-500" /><span className="text-sm font-bold text-amber-800">החזר פטור ממע"מ</span></label></div>
                                 <div className="md:col-span-2"><label className="block text-sm font-bold text-slate-700 mb-1">תיאור / הערות</label><textarea value={receivableForm.description || ''} onChange={e => setReceivableForm({...receivableForm, description: e.target.value})} rows={2} className="block w-full border-slate-300 rounded-md shadow-sm focus:border-primary focus:ring-primary sm:text-sm p-2 bg-white" /></div>
+                                <div className="md:col-span-2">
+                                    <label className="block text-sm font-bold text-slate-700 mb-1">תמונות / קבצים מצורפים לחייב</label>
+                                    <input type="file" multiple onChange={handleReceivableFileChange} accept="image/*,.pdf,.doc,.docx,.xls,.xlsx" className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100" />
+                                    <p className="text-[10px] text-slate-400 mt-1">ניתן לבחור מספר קבצים. תמונות, PDF וקבצי Office</p>
+                                    {(receivableForm.attachments?.length ?? 0) > 0 && (
+                                        <ul className="mt-2 space-y-1.5 max-h-40 overflow-y-auto">
+                                            {(receivableForm.attachments ?? []).map((att, idx) => (
+                                                <li key={att.id} className="flex items-center justify-between p-2 bg-indigo-50 border border-indigo-200 rounded-lg">
+                                                    <span className="text-xs font-bold text-indigo-700 truncate flex-1 min-w-0">{att.fileName}</span>
+                                                    <div className="flex gap-2 shrink-0">
+                                                        <button type="button" onClick={() => { setViewingLoanDoc(att); setViewingAttachmentList(null); }} className="text-[10px] bg-white border border-indigo-200 px-2 py-1 rounded font-bold text-indigo-600 hover:bg-indigo-100">צפה</button>
+                                                        <button type="button" onClick={() => {
+                                                            const next = (receivableForm.attachments ?? []).filter((_, i) => i !== idx);
+                                                            setReceivableForm({ ...receivableForm, attachments: next });
+                                                        }} className="text-[10px] text-red-500 font-bold px-2 py-1 hover:bg-red-50 rounded">הסר</button>
+                                                    </div>
+                                                </li>
+                                            ))}
+                                        </ul>
+                                    )}
+                                </div>
                             </div>
                         )}
                         {activeTab === 'EQUITY' && (
@@ -2986,8 +4155,30 @@ const FinancePage: React.FC<FinancePageProps> = ({
                             </div>
                         )}
                         <div className="flex justify-end pt-6 border-t mt-4 gap-2">
-                            <button onClick={() => setIsModalOpen(false)} className="px-4 py-2 bg-slate-100 text-slate-700 rounded hover:bg-slate-200">ביטול</button>
-                            <button onClick={handleSave} className="px-6 py-2 bg-primary text-white rounded shadow hover:bg-indigo-700 font-bold">שמור שינויים</button>
+                            <button 
+                                onClick={() => setIsModalOpen(false)} 
+                                disabled={isSaving}
+                                className="px-4 py-2 bg-slate-100 text-slate-700 rounded hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                ביטול
+                            </button>
+                            <button 
+                                onClick={() => handleSave()} 
+                                disabled={isSaving}
+                                className="px-6 py-2 bg-primary text-white rounded shadow hover:bg-indigo-700 font-bold disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                            >
+                                {isSaving ? (
+                                    <>
+                                        <svg className="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                        </svg>
+                                        שומר...
+                                    </>
+                                ) : (
+                                    'שמור שינויים'
+                                )}
+                            </button>
                         </div>
                     </div>
                 </Modal>
@@ -2995,13 +4186,13 @@ const FinancePage: React.FC<FinancePageProps> = ({
 
             {isPaymentModalOpen && selectedDebtForPayment && (
                 <Modal title={`תשלום עבור: ${selectedDebtForPayment.name}`} onClose={() => setIsPaymentModalOpen(false)}>
-                    <DebtPaymentModal debt={selectedDebtForPayment} onSavePayment={handleSaveDebtPayment} onClose={() => setIsPaymentModalOpen(false)} vatRate={vatRate} />
+                    <DebtPaymentModal debt={selectedDebtForPayment} onSavePayment={handleSaveDebtPayment} onSavePayments={handleSaveDebtPayments} onClose={() => setIsPaymentModalOpen(false)} vatRate={vatRate} />
                 </Modal>
             )}
 
             {isPaymentModalOpen && selectedReceivableForCollection && (
                 <Modal title={`קליטת גבייה: ${selectedReceivableForCollection.name}`} onClose={() => setIsPaymentModalOpen(false)}>
-                    <ReceivableCollectionModal receivable={selectedReceivableForCollection} onSavePayment={handleSaveReceivableCollection} onClose={() => setIsPaymentModalOpen(false)} vatRate={vatRate} />
+                    <ReceivableCollectionModal receivable={selectedReceivableForCollection} onSavePayment={handleSaveReceivableCollection} onSavePayments={handleSaveReceivableCollections} onClose={() => setIsPaymentModalOpen(false)} vatRate={vatRate} />
                 </Modal>
             )}
 
@@ -3026,7 +4217,8 @@ const FinancePage: React.FC<FinancePageProps> = ({
                             handleUpdateReceivablePaymentStatus(check.sources[0].receivableId!, check.uniqueId, newStatus, metadata?.note);
                         }
                     }} 
-                    viewOnlyHistory={selectedCheckForDebt.viewOnly} 
+                    viewOnlyHistory={selectedCheckForDebt.viewOnly}
+                    onViewAttachment={(att) => { setViewingLoanDoc(att); setViewingAttachmentList(null); }}
                 />
             )}
         </div>

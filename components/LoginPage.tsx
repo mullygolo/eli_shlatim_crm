@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import ResetPasswordModal from './ResetPasswordModal';
 
@@ -9,6 +9,7 @@ const LoginPage: React.FC = () => {
     const [error, setError] = useState<string | null>(null);
     const [isLoading, setIsLoading] = useState(false);
     const [showForgotPassword, setShowForgotPassword] = useState(false);
+    const submittingRef = useRef(false);
     const { login, isAuthenticated } = useAuth();
 
     // Redirect if already authenticated
@@ -20,6 +21,8 @@ const LoginPage: React.FC = () => {
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
+        if (submittingRef.current) return;
+        submittingRef.current = true;
         setError(null);
         setIsLoading(true);
 
@@ -30,6 +33,7 @@ const LoginPage: React.FC = () => {
             setError(err.message || 'שגיאה בהתחברות');
         } finally {
             setIsLoading(false);
+            submittingRef.current = false;
         }
     };
 

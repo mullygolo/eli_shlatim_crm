@@ -1,11 +1,14 @@
 import { Router } from 'express';
 import {
-    getFixedExpenses, createFixedExpense, updateFixedExpense, deleteFixedExpense,
-    getVariableExpenses, createVariableExpense, updateVariableExpense, deleteVariableExpense,
+    getFixedExpenses, getFixedExpensesPaginated, createFixedExpense, updateFixedExpense, deleteFixedExpense,
+    getVariableExpenses, getVariableExpensesPaginated, createVariableExpense, updateVariableExpense, deleteVariableExpense,
     getLoans, createLoan, updateLoan, deleteLoan,
-    getDebts, createDebt, updateDebt, deleteDebt,
-    getReceivables, createReceivable, updateReceivable, deleteReceivable,
-    getEquity, createEquity, updateEquity, deleteEquity
+    getDebts, getDebtsPaginated, createDebt, updateDebt, deleteDebt,
+    getReceivables, getReceivablesPaginated, createReceivable, updateReceivable, deleteReceivable,
+    getEquity, createEquity, updateEquity, deleteEquity,
+    getChecksPaginated,
+    getCheckAttachments,
+    setCheckAttachments
 } from '../services/mongoService.js';
 
 const router = Router();
@@ -47,6 +50,23 @@ router.delete('/fixed-expenses/:id', async (req, res) => {
     }
 });
 
+router.get('/fixed-expenses/paginated', async (req, res) => {
+    try {
+        const page = parseInt(req.query.page as string) || 1;
+        const limit = parseInt(req.query.limit as string) || 50;
+        const filters: any = {};
+        
+        if (req.query.showHistorical !== undefined) {
+            filters.showHistorical = req.query.showHistorical === 'true';
+        }
+        
+        const result = await getFixedExpensesPaginated(filters, page, limit);
+        res.json(result);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch paginated fixed expenses' });
+    }
+});
+
 // Variable Expenses
 router.get('/variable-expenses', async (req, res) => {
     try {
@@ -54,6 +74,26 @@ router.get('/variable-expenses', async (req, res) => {
         res.json(expenses);
     } catch (error) {
         res.status(500).json({ error: 'Failed to fetch variable expenses' });
+    }
+});
+
+router.get('/variable-expenses/paginated', async (req, res) => {
+    try {
+        const page = parseInt(req.query.page as string) || 1;
+        const limit = parseInt(req.query.limit as string) || 50;
+        const filters: any = {};
+        
+        if (req.query.year) {
+            filters.year = req.query.year === 'all' ? 'all' : parseInt(req.query.year as string);
+        }
+        if (req.query.month) {
+            filters.month = req.query.month === 'all' ? 'all' : parseInt(req.query.month as string);
+        }
+        
+        const result = await getVariableExpensesPaginated(filters, page, limit);
+        res.json(result);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch paginated variable expenses' });
     }
 });
 
@@ -131,6 +171,23 @@ router.get('/debts', async (req, res) => {
     }
 });
 
+router.get('/debts/paginated', async (req, res) => {
+    try {
+        const page = parseInt(req.query.page as string) || 1;
+        const limit = parseInt(req.query.limit as string) || 50;
+        const vatRate = parseFloat(req.query.vatRate as string) || 0;
+        const filters: any = {};
+        
+        if (req.query.searchTerm) filters.searchTerm = req.query.searchTerm as string;
+        if (req.query.statusFilter) filters.statusFilter = req.query.statusFilter as 'ALL' | 'OPEN' | 'OVERDUE' | 'PAID';
+        
+        const result = await getDebtsPaginated(filters, page, limit, vatRate);
+        res.json(result);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch paginated debts' });
+    }
+});
+
 router.post('/debts', async (req, res) => {
     try {
         const debt = await createDebt(req.body);
@@ -168,6 +225,23 @@ router.get('/receivables', async (req, res) => {
     }
 });
 
+router.get('/receivables/paginated', async (req, res) => {
+    try {
+        const page = parseInt(req.query.page as string) || 1;
+        const limit = parseInt(req.query.limit as string) || 50;
+        const vatRate = parseFloat(req.query.vatRate as string) || 0;
+        const filters: any = {};
+        
+        if (req.query.searchTerm) filters.searchTerm = req.query.searchTerm as string;
+        if (req.query.statusFilter) filters.statusFilter = req.query.statusFilter as 'ALL' | 'OPEN' | 'OVERDUE' | 'PAID';
+        
+        const result = await getReceivablesPaginated(filters, page, limit, vatRate);
+        res.json(result);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch paginated receivables' });
+    }
+});
+
 router.post('/receivables', async (req, res) => {
     try {
         const receivable = await createReceivable(req.body);
@@ -192,6 +266,43 @@ router.delete('/receivables/:id', async (req, res) => {
         res.status(204).send();
     } catch (error) {
         res.status(500).json({ error: 'Failed to delete receivable' });
+    }
+});
+
+// Checks
+router.get('/checks/paginated', async (req, res) => {
+    try {
+        const page = parseInt(req.query.page as string) || 1;
+        const limit = parseInt(req.query.limit as string) || 50;
+        const filters: any = {};
+        
+        if (req.query.tab) filters.tab = req.query.tab as 'INCOMING' | 'OUTGOING';
+        if (req.query.smartFilter) filters.smartFilter = req.query.smartFilter as 'ACTIVE' | 'URGENT' | 'ARCHIVE' | 'ALL';
+        if (req.query.searchQuery) filters.searchQuery = req.query.searchQuery as string;
+        
+        const result = await getChecksPaginated(filters, page, limit);
+        res.json(result);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch paginated checks' });
+    }
+});
+
+// Check attachments (images/PDFs per check)
+router.get('/check-attachments/:uniqueId', async (req, res) => {
+    try {
+        const attachments = await getCheckAttachments(req.params.uniqueId);
+        res.json(attachments);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch check attachments' });
+    }
+});
+
+router.put('/check-attachments/:uniqueId', async (req, res) => {
+    try {
+        const attachments = await setCheckAttachments(req.params.uniqueId, req.body.attachments || []);
+        res.json(attachments);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to save check attachments' });
     }
 });
 

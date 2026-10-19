@@ -2,6 +2,7 @@
 import { GoogleGenAI } from "@google/genai";
 import { Customer, Order, OrderStatusConfiguration } from '../types';
 import { calculateOrderTotals } from '../utils/calculations';
+import { getStatusConfigForOrder } from '../utils/statusHelpers';
 
 export const generateDashboardSummary = async (customers: Customer[], orders: Order[], statusConfigs: OrderStatusConfiguration[]): Promise<string> => {
     const customerCount = customers.length;
@@ -19,7 +20,7 @@ export const generateDashboardSummary = async (customers: Customer[], orders: Or
     // Filter open orders dynamically based on flags
     const openOrdersValue = orders
         .filter(o => {
-            const config = statusConfigs.find(c => c.label === o.orderStatus);
+            const config = getStatusConfigForOrder(o, statusConfigs);
             // Open = active but not completed and not lost
             return config?.isActiveDeal && !config?.isCompleted && !config?.isLost;
         })

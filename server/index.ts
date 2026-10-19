@@ -25,7 +25,9 @@ import callLogsRouter from './routes/callLogs.js';
 import performanceMetricsRouter from './routes/performanceMetrics.js';
 import notificationsRouter from './routes/notifications.js';
 import viewEventsRouter from './routes/viewEvents.js';
+import phoneCustomersRouter from './routes/phoneCustomers.js';
 import { verifyToken } from './middleware/auth.js';
+import { verifyPhoneApiKey } from './middleware/phoneApiAuth.js';
 import { initializeDefaultAdmin, autoCloseOldAttendanceRecords, initializeAttendanceIndexes, initializeCallLogsIndex, backfillCallLogsDialedNumber, inferCallLogDirectionForUnknown, initializeViewEventsIndexes, initializeStatusConfigs, getDb } from './services/mongoService.js';
 import { getDateStringIsrael } from './utils/timezone.js';
 
@@ -49,6 +51,7 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // API Routes (חשוב - לפני static files)
 // Public: auth (login/reset), webhooks, health. All other API routes require JWT.
+app.use('/api/v1/customers', verifyPhoneApiKey, phoneCustomersRouter);
 app.use('/api/auth', authRouter);
 app.use('/api/webhook', webhookCallsRouter);
 app.use('/api/customers', verifyToken, customersRouter);

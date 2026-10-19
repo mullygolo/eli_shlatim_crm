@@ -456,6 +456,19 @@ export async function getRelevantOrdersForCustomers(customerIds: string[]): Prom
     }
 }
 
+/** Orders belonging to one customer, newest first. */
+export async function getOrdersByCustomerId(customerId: string): Promise<Order[]> {
+    try {
+        const database = await getDb();
+        const collection = database.collection<Order>('orders');
+        const docs = await collection.find({ customerId }).sort({ date: -1 }).limit(200).toArray();
+        return docs.map(deserializeDates) as Order[];
+    } catch (error) {
+        console.error('Error fetching orders by customer:', error);
+        throw error;
+    }
+}
+
 /** Find one order by order number (trimmed). For import: update existing order status. */
 export async function getOrderByOrderNumber(orderNumber: string): Promise<Order | null> {
     try {

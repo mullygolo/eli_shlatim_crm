@@ -16,15 +16,53 @@ dotenv.config();
 
 const GREENINVOICE_API_KEY = process.env.GREENINVOICE_API_KEY || '';
 const GREENINVOICE_API_SECRET = process.env.GREENINVOICE_API_SECRET || '';
-// API URL - PHP SDK uses https://api.greeninvoice.co.il/api/v1 as base, then /documents endpoint
-const GREENINVOICE_API_URL = process.env.GREENINVOICE_API_URL || 'https://api.greeninvoice.co.il/api';
-const GREENINVOICE_API_V1 = 'https://api.greeninvoice.co.il/api/v1'; // Full v1 base URL (like PHP SDK)
-const GREENINVOICE_API_BASE = 'https://api.greeninvoice.co.il'; // Base URL without /api
+
+/** Rewrite the retired host so a stale env var cannot keep calling the old API. */
+function normalizeGreenInvoiceApiUrl(url: string): string {
+    return url
+        .trim()
+        .replace(/\/+$/, '')
+        .replace('://www.greeninvoice.co.il', '://api.greeninvoice.co.il');
+}
+
+// Resource API (documents, clients, …). Token is issued by a separate IdP host.
+const GREENINVOICE_API_URL = normalizeGreenInvoiceApiUrl(
+    process.env.GREENINVOICE_API_URL || 'https://api.greeninvoice.co.il/api'
+);
+const GREENINVOICE_API_V1 = 'https://api.greeninvoice.co.il/api/v1';
+const GREENINVOICE_API_BASE = 'https://api.greeninvoice.co.il';
 const GREENINVOICE_APP_URL = process.env.GREENINVOICE_APP_URL || 'https://app.greeninvoice.co.il';
+const GREENINVOICE_TOKEN_URL =
+    process.env.GREENINVOICE_TOKEN_URL || 'https://api.morning.co/idp/v1/oauth/token';
 
 // Cache for authentication token
 let authToken: string | null = null;
 let tokenExpiry: number = 0;
+
+/** Absolute unix-seconds expiry, refreshed a minute early. */
+function readTokenExpiry(authData: GreenInvoiceAuthResponse | null): number {
+    const now = Math.floor(Date.now() / 1000);
+    const raw = authData?.expiresAt ?? authData?.expires ?? authData?.expiry;
+    let expiry: number | null = null;
+
+    if (typeof raw === 'number' && Number.isFinite(raw)) {
+        expiry = raw > 1e12 ? Math.floor(raw / 1000) : raw;
+    } else if (typeof raw === 'string' && raw) {
+        const asNumber = Number(raw);
+        if (Number.isFinite(asNumber) && asNumber > 0) {
+            expiry = asNumber > 1e12 ? Math.floor(asNumber / 1000) : asNumber;
+        } else {
+            const parsed = Date.parse(raw);
+            if (!Number.isNaN(parsed)) expiry = Math.floor(parsed / 1000);
+        }
+    }
+
+    if (expiry == null && typeof authData?.expires_in === 'number') {
+        expiry = now + authData.expires_in;
+    }
+
+    return (expiry ?? now + 3600) - 60;
+}
 
 /**
  * Authenticate with GreenInvoice API and get access token
@@ -40,37 +78,17 @@ async function authenticate(): Promise<string> {
     }
 
     try {
-        // Morning API: POST {base}/v1/account/token with { id, secret } → { token, expires }
-        const authEndpoints = ['/v1/account/token', '/account/token'];
-
-        let lastError: Error | null = null;
-        let response: Response | null = null;
-
-        for (const endpoint of authEndpoints) {
-            try {
-                response = await fetch(`${GREENINVOICE_API_URL}${endpoint}`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        id: GREENINVOICE_API_KEY,
-                        secret: GREENINVOICE_API_SECRET,
-                    }),
-                });
-
-                if (response.ok) break;
-
-                const errorText = await response.text().catch(() => response!.statusText);
-                lastError = new Error(`Authentication failed (${endpoint}): ${errorText || response.statusText}`);
-                response = null;
-            } catch (error: unknown) {
-                lastError = error instanceof Error ? error : new Error(String(error));
-                response = null;
-            }
-        }
-
-        if (!response?.ok) {
-            throw lastError ?? new Error('Authentication failed: All endpoints failed');
-        }
+        // OAuth 2.0 client-credentials on Morning's IdP.
+        // https://developers.morning.co — POST /idp/v1/oauth/token
+        const response = await fetch(GREENINVOICE_TOKEN_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                grant_type: 'client_credentials',
+                client_id: GREENINVOICE_API_KEY,
+                client_secret: GREENINVOICE_API_SECRET,
+            }),
+        });
 
         const text = await response.text();
         let authData: GreenInvoiceAuthResponse | null = null;
@@ -82,23 +100,24 @@ async function authenticate(): Promise<string> {
             }
         }
 
-        const token =
-            authData?.token ||
-            response.headers.get('X-Authorization-Bearer') ||
-            response.headers.get('x-authorization-bearer');
-
-        if (!token) {
-            console.error('GreenInvoice auth: no token in body or header. Body preview:', text.slice(0, 200));
-            throw new Error('Token not found in response (body.token or X-Authorization-Bearer header)');
+        if (!response.ok) {
+            const message =
+                (authData as { error_description?: string; errorMessage?: string; message?: string } | null)?.error_description ||
+                (authData as { errorMessage?: string } | null)?.errorMessage ||
+                (authData as { message?: string } | null)?.message ||
+                text.slice(0, 300) ||
+                response.statusText;
+            throw new Error(`Authentication failed (${response.status}): ${message}`);
         }
 
-        const expiry =
-            (typeof authData?.expires === 'number' ? authData.expires : undefined) ??
-            (typeof authData?.expiry === 'number' ? authData.expiry : undefined) ??
-            Math.floor(Date.now() / 1000) + 1800;
+        const token = authData?.accessToken || authData?.access_token || authData?.token;
+        if (!token) {
+            console.error('GreenInvoice auth: no access token. Body preview:', text.slice(0, 200));
+            throw new Error('Token not found in response (accessToken)');
+        }
 
         authToken = token;
-        tokenExpiry = expiry;
+        tokenExpiry = readTokenExpiry(authData);
         return token;
     } catch (error) {
         console.error('GreenInvoice authentication error:', error);

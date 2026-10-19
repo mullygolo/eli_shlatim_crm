@@ -2,12 +2,17 @@
 
 export interface GreenInvoiceAuthResponse {
     status?: string;
-    token: string;
+    token?: string;
+    accessToken?: string;
+    access_token?: string;
     type?: string;
-    /** New Morning API field */
+    token_type?: string;
+    /** Absolute unix expiry from the OAuth IdP */
+    expiresAt?: number | string;
     expires?: number;
-    /** Legacy field (pre-migration) */
     expiry?: number;
+    /** Seconds until expiry (OAuth) */
+    expires_in?: number;
 }
 
 export interface GreenInvoiceClient {
